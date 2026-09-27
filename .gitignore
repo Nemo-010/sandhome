@@ -1,0 +1,8 @@
+ts-state/
+keys/
+*.private.json
+tmp/
+sand-state/
+__pycache__/
+*.pyc
+.work/

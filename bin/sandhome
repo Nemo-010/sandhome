@@ -1,0 +1,260 @@
+#!/bin/sh
+# sandhome - the one command. POSIX sh; sources the library from the checkout it
+# lives in, or from SANDHOME_REPO, so a copy installed under a prefix works.
+set -u
+
+SH_SELF=sandhome
+
+# Resolve the repository directory: the environment wins, then this script's own
+# path. A script read from a pipe has no path, and that case is refused rather
+# than guessed, because sourcing the wrong library is worse than not starting.
+# STOP: THE LIBRARY IS FOUND THROUGH SANDHOME_REPO_DIR FIRST. This copy of the
+# script lives on the exec root, not in the checkout, so "the parent of $0" is
+# the exec root and there is no lib/ under it. The bootstrap exports the
+# checkout, and a copy that cannot find its library is a command that prints
+# "cannot find the sandhome library" on every single call.
+if [ -n "${SANDHOME_REPO_DIR:-}" ]; then
+    sh_repo=$SANDHOME_REPO_DIR
+elif [ -n "${SH_REPO_DIR:-}" ]; then
+    sh_repo=$SH_REPO_DIR
+else
+    case "$0" in
+        */*) sh_repo=$(CDPATH='' cd -- "${0%/*}/.." && pwd) ;;
+        *)   printf 'sandhome: cannot find the sandhome library; run it by path or set SANDHOME_REPO\n' >&2
+             exit 2 ;;
+    esac
+fi
+if [ ! -r "$sh_repo/lib/common.sh" ]; then
+    printf 'sandhome: no library under %s; set SANDHOME_REPO\n' "$sh_repo" >&2
+    exit 2
+fi
+
+SH_REPO_DIR=$sh_repo
+SH_LIB_DIR="$sh_repo/lib"
+# The env file puts this on PATH, which is what lets a fresh shell run
+# `sandhome doctor` by name rather than by path.
+SANDHOME_BIN_DIR="$sh_repo/bin"
+export SH_REPO_DIR SH_LIB_DIR SANDHOME_BIN_DIR
+
+# shellcheck source=../lib/common.sh
+. "$SH_LIB_DIR/common.sh"
+# shellcheck source=../lib/detect.sh
+. "$SH_LIB_DIR/detect.sh"
+# shellcheck source=../lib/space.sh
+. "$SH_LIB_DIR/space.sh"
+# shellcheck source=../lib/fetch.sh
+. "$SH_LIB_DIR/fetch.sh"
+# shellcheck source=../lib/env.sh
+. "$SH_LIB_DIR/env.sh"
+# shellcheck source=../lib/toolchain.sh
+. "$SH_LIB_DIR/toolchain.sh"
+# shellcheck source=../lib/shim.sh
+. "$SH_LIB_DIR/shim.sh"
+# shellcheck source=../lib/report.sh
+. "$SH_LIB_DIR/report.sh"
+
+sh_detect_all
+sh_space_plan
+
+usage() {
+    cat <<'USAGE'
+usage: sandhome COMMAND [args]
+
+  doctor                 probe the environment and report what is missing
+  env                    print the environment, for `eval "$(sandhome env)"`
+  path                   print the exec-view bin directory
+  space [--probe]        where the two roots are, and every candidate tried
+  toolchains             name, one-line description, PATH binaries, versions
+  install NAME...        adopt or install each toolchain, then write the env
+  ensure NAME...         alias for install
+  shims [build]          build the LD_PRELOAD shims this machine needs
+  test                   run this checkout's whole test suite
+  selftest               the checks that need this machine and no network
+  selftest shims         build and exercise the LD_PRELOAD shims
+  selftest exec          the noexec-home end-to-end: install, promote, run
+  shell [args]           run errandsh, the pty-less line discipline
+  exec CMD...            run CMD with the sandhome environment loaded
+  report [--json]        the full report
+  gc [DAYS]              remove staging older than DAYS (default 7)
+  version                print the schema version
+  help                   this text
+
+Environment:
+  SANDHOME_HOME   the persistent data root (default $XDG_DATA_HOME/sandhome)
+  SANDHOME_EXEC   the exec-capable root; detected when unset
+  SANDHOME_REPO   the checkout that holds lib/, tools/ and shell/
+  SANDHOME_SHIMS  set to 1 to put the shims in LD_PRELOAD
+  SANDHOME_PASSWD_USERS   extra names for the synthetic passwd database
+  SANDHOME_SHA256 pin the sha256 of every download this run makes
+  SANDHOME_REF    branch or tag the pipe bootstrap fetches. Default main
+  SANDHOME_REPO_URL  owner/name to fetch. Default talaria0101/sandhome
+  NO_PROXY        never set; the fetch path uses curl, which honours it
+USAGE
+}
+
+cmd_env()    { sh_env_print; }
+cmd_path()   { printf '%s\n' "$SH_EXEC_BIN"; }
+cmd_space() {
+    if [ "${1:-}" = --probe ]; then
+        sh_space_probe_report
+        return 0
+    fi
+    sh_space_report
+}
+# cmd_toolchains [--json] -> name, description, declared PATH binaries, the
+# status read from a probe, and the version. Everything here is read from the
+# machine, not from what the module declares it should be.
+cmd_toolchains() {
+    if [ "${1:-}" = --json ]; then
+        printf '['
+        sh_c_n=0
+        for sh_c_t in $(sh_toolchain_available); do
+            sh_toolchain_load "$sh_c_t" >/dev/null 2>&1
+            eval "sh_c_desc=\${TC_${sh_c_t}_DESC:-}"
+            eval "sh_c_bins=\${TC_${sh_c_t}_BINS:-}"
+            [ "$sh_c_n" -gt 0 ] && printf ','
+            printf '{"name":"%s","desc":"%s","bins":"%s","status":"%s","version":"%s"}' \
+                "$(sh_json_escape "$sh_c_t")" "$(sh_json_escape "$sh_c_desc")" \
+                "$(sh_json_escape "$sh_c_bins")" \
+                "$(sh_json_escape "$(sh_toolchain_status "$sh_c_t")")" \
+                "$(sh_json_escape "$(sh_toolchain_version "$sh_c_t")")"
+            sh_c_n=$((sh_c_n + 1))
+        done
+        printf ']\n'
+        return 0
+    fi
+    for sh_c_t in $(sh_toolchain_available); do
+        sh_toolchain_load "$sh_c_t" >/dev/null 2>&1
+        eval "sh_c_desc=\${TC_${sh_c_t}_DESC:-}"
+        eval "sh_c_bins=\${TC_${sh_c_t}_BINS:-}"
+        if [ -n "$sh_c_bins" ]; then
+            sh_c_path="via $(sh_commas_to_spaces "$sh_c_bins")"
+        else
+            sh_c_path='via its own PATH fragment'
+        fi
+        printf '%-9s %-8s %-9s %s\n' \
+            "$sh_c_t" "$(sh_toolchain_status "$sh_c_t")" \
+            "$(sh_toolchain_version "$sh_c_t")" "$sh_c_desc"
+        printf '          path: %s\n' "$sh_c_path"
+    done
+}
+cmd_install() {
+    if [ "$#" -eq 0 ]; then
+        sh_die 'install needs at least one toolchain name'
+    fi
+    # # STOP: A NAME IS CHECKED BEFORE ANY DOWNLOAD, AND A FAILED ENSURE IS COUNTED.
+    # `|| true` made `sandhome install nonsense` print "unknown toolchain" and
+    # exit 0, so a script could not tell a typo from a success. sh_fail already
+    # increments the counter, so an unknown name and a failed install both end
+    # the command non-zero through the check at the bottom of this file.
+    for sh_c_n in "$@"; do
+        if ! sh_toolchain_known "$sh_c_n"; then
+            sh_fail "unknown toolchain $sh_c_n; run 'sandhome toolchains' for the list"
+        fi
+    done
+    sh_env_load
+    for sh_c_n in "$@"; do
+        sh_toolchain_ensure "$sh_c_n" || true
+    done
+    sh_env_write
+    SH_INSTALLED=$INSTALLED
+    SH_ADOPTED=$ADOPTED
+    sh_env_load
+    return 0
+}
+cmd_shims() {
+    if [ "${1:-build}" = build ]; then
+        sh_shim_build_all "$SH_REPO_DIR/shims"
+        sh_shim_write_passwd
+    fi
+    sh_shim_report
+}
+cmd_shell() {
+    sh_env_load
+    if [ -x "$SH_EXEC_BIN/errandsh" ]; then
+        exec "$SH_EXEC_BIN/errandsh" "$@"
+    fi
+    if [ -r "$SH_REPO_DIR/shell/errandsh" ]; then
+        exec sh "$SH_REPO_DIR/shell/errandsh" "$@"
+    fi
+    sh_die 'no errandsh found'
+}
+cmd_exec() {
+    if [ "$#" -eq 0 ]; then
+        sh_die 'exec needs a command'
+    fi
+    sh_env_load
+    exec "$@"
+}
+cmd_report() {
+    sh_env_load
+    if [ "${1:-}" = --json ]; then
+        sh_report_json
+    else
+        sh_report_text
+    fi
+}
+cmd_gc() { sh_say "removed $(sh_space_gc "${1:-7}") staging entries"; }
+cmd_version() { printf 'sandhome/1\n'; }
+
+# STOP: `selftest` AND `test` RUN WHAT IS IN THE CHECKOUT, AND WERE NAMED IN THE
+# USAGE WITHOUT EXISTING. An agent that reads `sandhome help`, picks the obvious
+# subcommand to check a change and gets "unknown command" has been told the tool
+# is incomplete. selftest takes no network (syntax, unit, space, shims, and the
+# noexec end-to-end when this machine has a noexec root to test with);
+# `sandhome test` runs the whole suite the way a caller does.
+cmd_selftest() {
+    case ${1:-} in
+        shims) sandhome_test_one shims ;;
+        exec)  sandhome_test_one bootstrap ;;
+        *)      sandhome_test_one syntax
+                 sandhome_test_one unit
+                 sandhome_test_one space
+                 sandhome_test_one shims
+                 sandhome_test_one bootstrap
+                 sandhome_test_one toolchain ;;
+    esac
+}
+
+sandhome_test_one() {
+    sh_st_file=$SH_REPO_DIR/tests/$1.sh
+    if [ ! -r "$sh_st_file" ]; then
+        sh_say "no test named $1 in this checkout"
+        return 2
+    fi
+    sh_say "running tests/$1.sh"
+    # Through an interpreter, never by executing the file: this checkout may be
+    # on a mount that refuses execve, which is the condition the tool exists for.
+    sh_st_first=''
+    IFS= read -r sh_st_first < "$sh_st_file" 2>/dev/null || sh_st_first=''
+    case "$sh_st_first" in
+        *bash*) bash "$sh_st_file" ;;
+        *)      sh "$sh_st_file" ;;
+    esac
+}
+
+cmd_test() { sh "$SH_REPO_DIR/tests/run.sh"; }
+
+case "${1:-help}" in
+    doctor)      sh_env_load; sh_doctor || exit 1 ;;
+    env)         cmd_env ;;
+    path)        cmd_path ;;
+    space)       shift; cmd_space "$@" ;;
+    toolchains)  shift; cmd_toolchains "$@" ;;
+    install|ensure) shift; cmd_install "$@" ;;
+    shims)       shift; cmd_shims "$@" ;;
+    shell)       shift; cmd_shell "$@" ;;
+    exec)        shift; cmd_exec "$@" ;;
+    report)      shift; cmd_report "$@" ;;
+    gc)          shift; cmd_gc "$@" ;;
+    test)        cmd_test ;;
+    selftest)    shift; cmd_selftest "${1:-}" ;;
+    version|--version) cmd_version ;;
+    help|-h|--help) usage ;;
+    *)           usage >&2; sh_die "unknown command $1" ;;
+esac
+
+if [ "$SH_FAILURES" -gt 0 ]; then
+    exit 1
+fi
+exit 0

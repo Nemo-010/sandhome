@@ -1,0 +1,62 @@
+name: sandhome
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Every file is checked by the shell that will read it, and also by a
+      # second reader, so a file that is valid under dash and not under bash is
+      # found here rather than on the machine it was installed on.
+      - name: seating
+        run: |
+          set -e
+          command -v dash || { sudo apt-get update -qq && sudo apt-get install -y dash; }
+          dash -c 'echo "dash ok"'
+          command -v shellcheck || sudo apt-get install -y shellcheck
+
+      - name: POSIX syntax under dash and bash
+        run: sh tests/syntax.sh
+
+      # shellcheck is advisory here: this tree deliberately uses constructs
+      # SC2015 and friends reject, and its dependency set is a decision rather
+      # than an oversight. It runs so a NEW class of finding is visible, and
+      # its output is captured rather than gating the job.
+      - name: shellcheck (advisory)
+        run: shellcheck -s sh -e SC2086,SC2046,SC1091,SC2015,SC2164,SC3043 . || true
+
+      - name: the pure helpers, the plan, the mirror, the shims
+        run: |
+          sh tests/unit.sh
+          sh tests/space.sh
+          sh tests/toolchain.sh
+          sh tests/shims.sh
+
+      # The end-to-end install needs the network. When it cannot run it exits 2
+      # and says so; that is `skipped`, not `failed`, and it is reported
+      # separately so a red job always means a defect.
+      - name: the end-to-end install
+        run: sh tests/bootstrap.sh
+
+      - name: the line discipline over pipes
+        run: bash tests/errandsh-posix.sh
+
+      - name: the whole suite, as a caller reads it
+        run: sh tests/run.sh
+
+      # The report is machine-readable and is parsed here, not eyeballed: a
+      # --json that is not JSON is a defect, and this is where that is caught.
+      - name: the JSON report parses
+        run: |
+          set -e
+          sh bootstrap.sh --toolset minimal --no-profile --no-path-line --no-shell --json > report.json
+          jq -e '.schema == "sandhome/1"' report.json > /dev/null
+          sh bin/sandhome toolchains --json | jq -e 'length > 0' > /dev/null
+          sh bin/sandhome report --json | jq -e 'has("failures")' > /dev/null
+          echo "the report is valid JSON"
