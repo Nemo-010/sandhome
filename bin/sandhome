@@ -87,8 +87,14 @@ Environment:
   SANDHOME_PASSWD_USERS   extra names for the synthetic passwd database
   SANDHOME_SHA256 pin the sha256 of every download this run makes
   SANDHOME_REF    branch or tag the pipe bootstrap fetches. Default main
-  SANDHOME_REPO_URL  owner/name to fetch. Default talaria0101/sandhome
-  NO_PROXY        never set; the fetch path uses curl, which honours it
+  SANDHOME_REPO_DIR   the checkout the installed copy of this command reads.
+                      Set by env.sh; read it, do not set it.
+  SANDHOME_MIN_EXEC_MB  free megabytes an exec candidate must have to be
+                      preferred. Default 128
+  SANDHOME_REQUIRE_DIGEST  1 refuses a download when no sha256 tool exists
+  SANDHOME_GO_VERSION_URL, SANDHOME_GO_DL_JSON_URL, SANDHOME_NODE_INDEX_URL
+                      point a version or digest parser at a mirror, so the
+                      parsers can be tested offline
 USAGE
 }
 

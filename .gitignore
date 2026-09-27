@@ -1,8 +1,10 @@
-ts-state/
-keys/
-*.private.json
+# Build output and scratch. Everything below is produced by a run, not authored.
+shims/*.so
+shims/passwd
 tmp/
-sand-state/
+*.tmp
+*.tmp.*
+.work/
 __pycache__/
 *.pyc
-.work/
+.DS_Store

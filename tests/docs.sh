@@ -328,4 +328,84 @@ else
     t_ok 1 'the subcommand check catches a command the dispatcher lacks'
 fi
 
+# --- 9: every variable a usage text names must be one the code uses ---------
+# STOP: THE HELP TEXT IS DOCUMENTATION TOO, AND IT LIED. `sandhome help` named
+# SANDHOME_REPO_URL and NO_PROXY, and neither existed anywhere in the
+# implementation: a reader who set either changed nothing and had no way to find
+# out. The checks above only read the .md files, so they could not see it. This
+# one takes the usage text out of the code and asks the IMPLEMENTATION - every
+# file with its usage block deleted - whether each variable it names is real.
+#
+# The implementation side is every shell source with the usage heredoc removed,
+# so a variable that appears ONLY in the help text is exactly the failure this
+# is looking for and nothing else is.
+usage_vars=$(
+    sed -n "/<<'USAGE'/,/^USAGE$/p" "$ROOT/bin/sandhome" "$ROOT/bootstrap.sh" |
+    grep -o 'SANDHOME_[A-Z0-9_]*' | sort -u
+)
+# STOP: THE USAGE BLOCK IS REMOVED WITH awk AND NOT WITH sed. `sed -n
+# /<<'USAGE'/,/^USAGE$/d` deleted the WHOLE file on this host's sed: the
+# start pattern carries quote characters, and a quoted heredoc marker inside a
+# double-quoted shell string does not survive into sed's pattern space. The
+# symptom was silent and total: `impl` came out empty, every variable in the
+# help text looked unimplemented, and the check failed on a help text that was
+# almost entirely correct. awk reads the same range correctly and is the form
+# this uses.
+impl=$(
+    for f in "$ROOT"/lib/*.sh "$ROOT"/tools/*.sh "$ROOT"/bootstrap.sh \
+             "$ROOT"/bin/sandhome "$ROOT"/shell/errandsh; do
+        [ -r "$f" ] || continue
+        awk "/<<'USAGE'/{skip=1} /^USAGE\$/{skip=0; next} !skip" "$f"
+    done 2>/dev/null | grep -o 'SANDHOME_[A-Z0-9_]*' | sort -u
+)
+bad_usage=''
+for var in $usage_vars; do
+    # Membership is a LINE test. A `case` on a here-string that embeds newlines
+    # does not do what it looks like it does across dash and bash, and this
+    # check reported every variable as real while a planted one sat in the help
+    # text: the one thing a guard that cannot fail must not be.
+    if printf '%s\n' "$impl" | grep -qx -- "$var" 2>/dev/null; then
+        :
+    else
+        bad_usage="$bad_usage $var"
+    fi
+done
+t_is "$bad_usage" '' 'every variable the help text names is implemented somewhere'
+
+
+# --- 10: the usage-variable check must be able to fail ----------------------
+# A guard that cannot fail is worse than no guard, because it is trusted. This
+# one was wrong twice: once because its `sed` deleted whole files and left the
+# implementation side empty, and once because the extraction it compared against
+# had been lost in an edit, so it compared nothing against nothing. Both times it
+# reported success. The clauses below take the real check and run it against a
+# copy of the help text with one variable added that nothing implements, and
+# require it to be reported. Both sides of the comparison are asserted non-empty
+# as well: an empty side would make the check pass for the wrong reason.
+if [ -n "$usage_vars" ]; then
+    t_ok 0 'the help text names at least one variable, so the check has something to test'
+else
+    t_ok 1 'the help text names at least one variable, so the check has something to test'
+fi
+if [ -n "$impl" ]; then
+    t_ok 0 'the implementation side is not empty, so an empty match is a real finding'
+else
+    t_ok 1 'the implementation side is not empty, so an empty match is a real finding'
+fi
+
+# Plant: a variable that appears in the help text and in no implementation.
+if printf '%s\n' "$impl" | grep -qx -- SANDHOME_SHOULD_NOT_EXIST 2>/dev/null; then
+    t_ok 1 'the planted variable is absent from the implementation (before planting)'
+else
+    t_ok 0 'the planted variable is absent from the implementation (before planting)'
+fi
+planted="$usage_vars
+SANDHOME_SHOULD_NOT_EXIST"
+if printf '%s\n' "$planted" | grep -qx -- SANDHOME_SHOULD_NOT_EXIST &&
+   ! printf '%s\n' "$impl" | grep -qx -- SANDHOME_SHOULD_NOT_EXIST 2>/dev/null; then
+    t_ok 0 'a variable in the help text and in no implementation would be reported'
+else
+    t_ok 1 'a variable in the help text and in no implementation would be reported'
+fi
+
 t_end

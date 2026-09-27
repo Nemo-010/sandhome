@@ -36,8 +36,14 @@ Environment:
   SANDHOME_PASSWD_USERS   extra names for the synthetic passwd database
   SANDHOME_SHA256 pin the sha256 of every download this run makes
   SANDHOME_REF    branch or tag the pipe bootstrap fetches. Default main
-  SANDHOME_REPO_URL  owner/name to fetch. Default talaria0101/sandhome
-  NO_PROXY        never set; the fetch path uses curl, which honours it
+  SANDHOME_REPO_DIR   the checkout the installed copy of this command reads.
+                      Set by env.sh; read it, do not set it.
+  SANDHOME_MIN_EXEC_MB  free megabytes an exec candidate must have to be
+                      preferred. Default 128
+  SANDHOME_REQUIRE_DIGEST  1 refuses a download when no sha256 tool exists
+  SANDHOME_GO_VERSION_URL, SANDHOME_GO_DL_JSON_URL, SANDHOME_NODE_INDEX_URL
+                      point a version or digest parser at a mirror, so the
+                      parsers can be tested offline
 ```
 
 ## bootstrap.sh flags
@@ -86,12 +92,12 @@ usage: sh bootstrap.sh [options]
 | --- | --- | --- |
 | `SANDHOME_BIN_DIR` | bootstrap.sh sandhome | `$SH_REPO_DIR/bin` |
 | `SANDHOME_EXEC` | env.sh space.sh bootstrap.sh sandhome fd.sh go.sh jq.sh ripgrep.sh | `unset, and the feature is off until it is set` |
-| `SANDHOME_GO_DL_JSON_URL` | go.sh | `unset, and the feature is off until it is set` |
-| `SANDHOME_GO_VERSION_URL` | go.sh | `unset, and the feature is off until it is set` |
+| `SANDHOME_GO_DL_JSON_URL` | sandhome go.sh | `unset, and the feature is off until it is set` |
+| `SANDHOME_GO_VERSION_URL` | sandhome go.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_HERE` | profile.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_HOME` | env.sh profile.sh space.sh bootstrap.sh sandhome go.sh node.sh python.sh | `unset, and the feature is off until it is set` |
-| `SANDHOME_MIN_EXEC_MB` | space.sh | `unset, and the feature is off until it is set` |
-| `SANDHOME_NODE_INDEX_URL` | node.sh | `unset, and the feature is off until it is set` |
+| `SANDHOME_MIN_EXEC_MB` | space.sh sandhome | `unset, and the feature is off until it is set` |
+| `SANDHOME_NODE_INDEX_URL` | sandhome node.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_NO_PROFILE` | profile.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_NO_REFETCH` | bootstrap.sh | `1` |
 | `SANDHOME_NO_RUN` | bootstrap.sh | `unset, and the feature is off until it is set` |
@@ -101,8 +107,7 @@ usage: sh bootstrap.sh [options]
 | `SANDHOME_REF` | bootstrap.sh sandhome | `unset, and the feature is off until it is set` |
 | `SANDHOME_REPO` | env.sh bootstrap.sh sandhome | `unset, and the feature is off until it is set` |
 | `SANDHOME_REPO_DIR` | env.sh bootstrap.sh sandhome | `unset, and the feature is off until it is set` |
-| `SANDHOME_REPO_URL` | sandhome | `unset, and the feature is off until it is set` |
-| `SANDHOME_REQUIRE_DIGEST` | fetch.sh | `unset, and the feature is off until it is set` |
+| `SANDHOME_REQUIRE_DIGEST` | fetch.sh sandhome | `unset, and the feature is off until it is set` |
 | `SANDHOME_SHA256` | fetch.sh bootstrap.sh sandhome go.sh jq.sh rust.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_SHIMS` | env.sh shim.sh sandhome | `unset, and the feature is off until it is set` |
 

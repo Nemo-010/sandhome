@@ -79,7 +79,15 @@ sh_bootstrap_refetch() {
     }
     sh_fr_ok=0
     for sh_fr_owner in "$SH_REPO_OWNER" talaria0101/sandhome; do
-        sh_fr_url="https://codeload.github.com/$sh_fr_owner/tar.gz/refs/heads/$SH_REPO_REF"
+        # STOP: THE TARBALL URL IS /tar.gz/<ref> AND NOT
+        # /tar.gz/refs/heads/<ref>. Measured against the real codeload:
+        #   codeload.github.com/OWNER/tar.gz/refs/heads/main  -> 404
+        #   codeload.github.com/OWNER/tar.gz/main            -> 200
+        # The longer form is what the git protocol uses and it is what a reader
+        # reaches for first, and it fails on a repository that exists with a
+        # body that names the URL and nothing about the cause. A branch, a tag
+        # and a commit sha all work in the short form, so one form is enough.
+        sh_fr_url="https://codeload.github.com/$sh_fr_owner/tar.gz/$SH_REPO_REF"
         sh_fr_tar="$SH_FETCH_DIR/src.tar.gz"
         if sh_fr_fetch "$sh_fr_url" "$sh_fr_tar"; then
             if tar -xzf "$sh_fr_tar" -C "$SH_FETCH_DIR" 2>/dev/null; then
