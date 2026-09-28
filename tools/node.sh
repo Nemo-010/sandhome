@@ -7,6 +7,7 @@ TC_node_DESC='Node.js with the bundled npm, from the official nodejs.org tarball
 # exec bin next to node, so `npm` is on PATH from a shell that read only env.sh
 # and never sourced the module's own fragment.
 TC_node_BINS='bin/node bin/npm bin/npx'
+TC_node_EXEC_MB=200
 
 tc_node_probe() {
     sh_have node && node --version >/dev/null 2>&1
@@ -69,7 +70,7 @@ tc_node_install() {
     # 163MB measured, up to ~244MB with the bundled npm). Gate it the same way
     # as go (issue #66): a home-only check let the install succeed into a root
     # the view did not fit.
-    sh_space_need 200 exec || return 1
+    sh_space_need "$TC_node_EXEC_MB" exec || return 1
 
     sh_ni_sha=''
     if sh_have curl || sh_have wget; then

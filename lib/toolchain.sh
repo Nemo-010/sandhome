@@ -173,6 +173,137 @@ sh_toolchain_order() {
     return 0
 }
 
+# sh_force_toolchain NAME -> 0 when NAME installs even though a working
+# copy is on PATH. `install --force` (SH_FORCE=1) forces the names on that
+# command line; SANDHOME_FORCE (SH_FORCE_LIST, read by the bootstrap) forces
+# across a whole run: '*' forces everything, otherwise a comma list of names.
+# Without either, a usable host copy is adopted, which is the common case.
+sh_force_toolchain() {
+    [ "${SH_FORCE:-0}" = 1 ] && return 0
+    case "${SH_FORCE_LIST:-}" in
+        '*') return 0 ;;
+        *",${1:-},"*) return 0 ;;
+    esac
+    return 1
+}
+
+# sh_toolchain_payload_present NAME -> 0 when the home already holds the
+# files this toolchain would promote, so a download would only rewrite
+# identical bytes. After a tmpfs restart the exec view is gone while the
+# home payload survives; the probe above reads that as "not present" because
+# it answers through the view, and every toolchain was downloaded again byte
+# for byte (issue #73). The check is the module's own BINS under its home
+# root: exactly the files the promote step reads. A half-written payload
+# from a killed run passes this check and fails the verification probe
+# afterwards, and that path falls back to a real install below - presence
+# is a hint, the probe is the verdict.
+sh_toolchain_payload_present() {
+    # The name reaches an eval below, so it is checked before anything else:
+    # only known modules name variables, and anything else answers absent.
+    sh_toolchain_known "$1" || return 1
+    sh_tpp_root=$(sh_toolchain_root "$1")
+    [ -d "$sh_tpp_root" ] || return 1
+    sh_toolchain_load "$1" >/dev/null 2>&1 || return 1
+    eval "sh_tpp_bins=\${TC_${1}_BINS:-}"
+    [ -n "$sh_tpp_bins" ] || return 1
+    for sh_tpp_rel in $sh_tpp_bins; do
+        [ -f "$sh_tpp_root/$sh_tpp_rel" ] || return 1
+    done
+    return 0
+}
+
+# sh_toolchain_exec_mb NAME -> the megabytes this toolchain still wants on
+# the exec root, or nothing when it cannot be priced. A payload already in
+# the home is measured (sh_view_copy_kb prices what the view will actually
+# hold: launcher kilobytes in launch mode, full copies otherwise); a view
+# already current costs nothing. A fresh install reads the module's declared
+# number: tc_<name>_exec_mb when the module computes one (rust and clang
+# are mode-aware), else TC_<name>_EXEC_MB. Unknown names and modules that
+# declare nothing answer nothing, and the caller prints fit=unknown rather
+# than a number it invented.
+sh_toolchain_exec_mb() {
+    sh_tem_name=${1:-}
+    [ -n "$sh_tem_name" ] || return 1
+    # Checked before the eval below: only known modules name variables.
+    sh_toolchain_known "$sh_tem_name" || return 1
+    sh_toolchain_load "$sh_tem_name" >/dev/null 2>&1 || return 1
+    sh_tem_root=$(sh_toolchain_root "$sh_tem_name")
+    if [ -d "$sh_tem_root" ]; then
+        sh_tem_view=$(sh_toolchain_view "$sh_tem_name")
+        if sh_view_current "$sh_tem_root" "$sh_tem_view" 2>/dev/null; then
+            printf '0'
+            return 0
+        fi
+        # The copy list prices here too, or copy-listed linkers count as
+        # launchers and the estimate under-reads a hundredfold.
+        sh_copy_only_set "$sh_tem_name"
+        sh_tem_kb=$(sh_view_copy_kb "$sh_tem_root" 2>/dev/null)
+        case "$sh_tem_kb" in
+            ''|*[!0-9]*) return 1 ;;
+        esac
+        printf '%s' $((sh_tem_kb / 1024 + 20))
+        return 0
+    fi
+    if command -v "tc_${sh_tem_name}_exec_mb" >/dev/null 2>&1; then
+        sh_tem_decl=$("tc_${sh_tem_name}_exec_mb" 2>/dev/null)
+    else
+        eval "sh_tem_decl=\${TC_${sh_tem_name}_EXEC_MB:-}"
+    fi
+    case "$sh_tem_decl" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    printf '%s' "$sh_tem_decl"
+    return 0
+}
+
+# sh_feasibility_plan NAMES... -> price the whole request before anything is
+# downloaded or written (issue #75). Prints one line per toolchain on stderr
+# (stdout stays clean for --json):
+#   feas NAME need_mb=N free_mb=F fit=yes|no|unknown
+# then a total line:
+#   total_exec_need_mb=T max_exec_free_mb=M
+# and sets SH_FEASIBLE (space-separated names to install) and SH_INFEASIBLE
+# (names refused up front). Needs are priced off the current free space for
+# every name, so the table is a snapshot: an install that fits now can still
+# fail later once earlier installs consume the root, and the per-install
+# gates stay the last word. Unknown names and unpriceable modules print
+# fit=unknown and stay feasible - the ensure step, not this table, refuses
+# an unknown name.
+sh_feasibility_plan() {
+    SH_FEASIBLE=''
+    SH_INFEASIBLE=''
+    sh_fp_free=$(sh_free_mb "${SH_EXEC:-/tmp}" 2>/dev/null)
+    case "$sh_fp_free" in ''|*[!0-9]*) sh_fp_free=0 ;; esac
+    sh_fp_max=$(sh_space_max_exec_free 2>/dev/null)
+    case "$sh_fp_max" in ''|*[!0-9]*) sh_fp_max=0 ;; esac
+    sh_fp_total=0
+    for sh_fp_name in "$@"; do
+        [ -n "$sh_fp_name" ] || continue
+        sh_fp_need=$(sh_toolchain_exec_mb "$sh_fp_name" 2>/dev/null) || sh_fp_need=''
+        case "$sh_fp_need" in
+            ''|*[!0-9]*)
+                printf 'feas %s need_mb=unknown free_mb=%s fit=unknown\n' "$sh_fp_name" "$sh_fp_free" >&2
+                SH_FEASIBLE="$SH_FEASIBLE $sh_fp_name"
+                ;;
+            *)
+                sh_fp_total=$((sh_fp_total + sh_fp_need))
+                if [ "$sh_fp_need" -le "$sh_fp_free" ]; then
+                    printf 'feas %s need_mb=%s free_mb=%s fit=yes\n' "$sh_fp_name" "$sh_fp_need" "$sh_fp_free" >&2
+                    SH_FEASIBLE="$SH_FEASIBLE $sh_fp_name"
+                else
+                    printf 'feas %s need_mb=%s free_mb=%s fit=no\n' "$sh_fp_name" "$sh_fp_need" "$sh_fp_free" >&2
+                    SH_INFEASIBLE="$SH_INFEASIBLE $sh_fp_name"
+                fi
+                ;;
+        esac
+    done
+    printf 'total_exec_need_mb=%s max_exec_free_mb=%s\n' "$sh_fp_total" "$sh_fp_max" >&2
+    SH_FEASIBLE=$(sh_trim "$SH_FEASIBLE")
+    SH_INFEASIBLE=$(sh_trim "$SH_INFEASIBLE")
+    export SH_FEASIBLE SH_INFEASIBLE
+    return 0
+}
+
 # sh_toolchain_preflight NAME -> 0 when an install of NAME may start here.
 # The dependency preflight shape (issue #5, LemonBench DepScan): probe and
 # name what is missing BEFORE the run, rather than failing part-way through
@@ -220,6 +351,9 @@ sh_toolchain_preflight() {
 # `tc_<name>_probe` re-run against whatever the environment is afterwards.
 sh_toolchain_install_one() {
     sh_te_name=$1
+    # Reset per call: POSIX sh has no locals, and a reuse flag left over
+    # from the previous toolchain would send this one down the wrong path.
+    SH_TE_REUSED=0
     if ! sh_toolchain_known "$sh_te_name"; then
         sh_fail "unknown toolchain $sh_te_name; run 'sandhome toolchains' for the list"
         return 1
@@ -245,10 +379,12 @@ sh_toolchain_install_one() {
     # (issue #45). An instruction the tool prints must be one the tool obeys.
     #
     # It installs into the toolchain root and does not touch the copy on PATH,
-    # so a host tool survives a forced install.
-    if [ "${SH_FORCE:-0}" = 1 ]; then
+    # so a host tool survives a forced install. SANDHOME_FORCE is the same
+    # decision for a bootstrap run, where there is no command line per name:
+    # 1 forces everything, a comma list forces the names in it.
+    if sh_force_toolchain "$sh_te_name"; then
         sh_toolchain_preflight "$sh_te_name" || return 1
-        sh_say "toolchain $sh_te_name: --force, installing into $SH_HOME_TOOLCHAINS/$sh_te_name"
+        sh_say "toolchain $sh_te_name: forced, installing into $SH_HOME_TOOLCHAINS/$sh_te_name"
         if ! "tc_${sh_te_name}_install"; then
             sh_fail "toolchain $sh_te_name could not be installed"
             return 1
@@ -257,6 +393,17 @@ sh_toolchain_install_one() {
     elif sh_toolchain_probe "$sh_te_name"; then
         sh_say "toolchain $sh_te_name: a working copy is already here; adopting it"
         ADOPTED="$ADOPTED $sh_te_name"
+    elif sh_toolchain_payload_present "$sh_te_name"; then
+        # The view is gone but the payload survived (a tmpfs restart clears
+        # the exec root, never the home): rebuild the view from the bytes
+        # already here instead of downloading them again (issue #73). A force
+        # skips this path on purpose - it asks for a fresh install. When the
+        # kept payload turns out to be a half-written one, the verification
+        # probe below fails and the run falls back to a real install rather
+        # than reporting a toolchain that does not run.
+        sh_say "toolchain $sh_te_name: payload already in $SH_HOME_TOOLCHAINS/$sh_te_name; rebuilding the view without downloading"
+        INSTALLED="$INSTALLED $sh_te_name"
+        SH_TE_REUSED=1
     else
         sh_toolchain_preflight "$sh_te_name" || return 1
         sh_say "toolchain $sh_te_name: not present; installing into $SH_HOME_TOOLCHAINS/$sh_te_name"
@@ -280,6 +427,14 @@ sh_toolchain_install_one() {
         "tc_${sh_te_name}_env" || sh_warn "toolchain $sh_te_name wrote no env fragment"
     fi
     sh_env_load
+    # PATH WAS JUST REWRITTEN, SO THE SHELL'S COMMAND HASH IS STALE. The
+    # probe above ran the tool this install replaces (on one sandbox
+    # /usr/bin/rustc is a rustup proxy), and the shell remembers where it
+    # found it. The view now holds the new binary, but a hashed command keeps
+    # winning while the path it names still exists, so the verification probe
+    # below would run the OLD binary and report a healthy install as broken.
+    # The hashed path does not disappear, so the shell never notices alone.
+    hash -r 2>/dev/null || :
     # # NOTE: THE LAST WORD IS A PROBE, NOT AN EXIT CODE. A toolchain that installed
     # "without an error" and does not answer afterwards is the exact claim this
     # tree exists to refuse, and the split root is where it would hide. It runs
@@ -288,6 +443,33 @@ sh_toolchain_install_one() {
     # false the moment the roots split.
     if command -v "tc_${sh_te_name}_probe" >/dev/null 2>&1; then
         if ! "tc_${sh_te_name}_probe" >/dev/null 2>&1; then
+            if [ "${SH_TE_REUSED:-0}" = 1 ]; then
+                # The kept payload does not run: it is a half-written tree
+                # from a killed run, not a toolchain. Download a fresh copy
+                # rather than reporting one that does not run (issue #73).
+                SH_TE_REUSED=0
+                sh_warn "the kept $sh_te_name payload does not run; downloading a fresh copy"
+                sh_toolchain_preflight "$sh_te_name" || return 1
+                if ! "tc_${sh_te_name}_install"; then
+                    sh_fail "toolchain $sh_te_name could not be installed"
+                    return 1
+                fi
+                eval "sh_te_bins=\${TC_${sh_te_name}_BINS:-}"
+                if [ -n "$sh_te_bins" ]; then
+                    # shellcheck disable=SC2086
+                    sh_promote_toolchain "$sh_te_name" $sh_te_bins || true
+                fi
+                if command -v "tc_${sh_te_name}_env" >/dev/null 2>&1; then
+                    "tc_${sh_te_name}_env" || sh_warn "toolchain $sh_te_name wrote no env fragment"
+                fi
+                sh_env_load
+                hash -r 2>/dev/null || :
+                if ! "tc_${sh_te_name}_probe" >/dev/null 2>&1; then
+                    sh_fail "toolchain $sh_te_name installed without an error and still does not run from the exec view"
+                    return 1
+                fi
+                return 0
+            fi
             sh_fail "toolchain $sh_te_name installed without an error and still does not run from the exec view"
             return 1
         fi

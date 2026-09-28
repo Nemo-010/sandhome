@@ -236,6 +236,13 @@ sh_repo_persist() {
     case "${SH_REPO_DIR:-}" in
         "${TMPDIR:-/tmp}"/*|/tmp/sandhome-bootstrap.*)
             sh_rp_durable="$SH_HOME/repo"
+            # A preview changes nothing: every other write step says `would`
+            # under --dry-run, and the durable copy is a write like the rest.
+            # (issue #70: a dry run left 39 files in a fresh home.)
+            if [ "${SH_DRY_RUN:-0}" = 1 ]; then
+                sh_step "would install the durable library at $sh_rp_durable"
+                return 0
+            fi
             mkdir -p "$sh_rp_durable" 2>/dev/null || return 0
             for sh_rp_d in lib tools shell bin docs shims; do
                 if [ -e "$SH_REPO_DIR/$sh_rp_d" ]; then

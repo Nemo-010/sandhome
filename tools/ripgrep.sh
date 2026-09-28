@@ -2,6 +2,7 @@
 # ripgrep - the search tool agents reach for first. A single musl binary.
 TC_ripgrep_DESC='ripgrep (rg), the fast recursive search tool'
 TC_ripgrep_BINS='bin/rg'
+TC_ripgrep_EXEC_MB=32
 
 tc_ripgrep_probe() {
     sh_have rg && rg --version >/dev/null 2>&1

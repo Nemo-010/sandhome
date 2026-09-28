@@ -12,6 +12,24 @@
 TC_clang_DESC='Clang/LLVM, from the official LLVM release tarball (a >1GB download)'
 TC_clang_BINS='bin/clang bin/clang++'
 
+# No VIEW_BINS_ONLY, no copy list: in launch mode every executable is a 20KB
+# launcher that runs the home payload from memory, so the whole bin/ tree
+# mirrors for ~1MB. clang re-execs itself for -cc1 and resolves its resource
+# directory exe-relative; both follow the view path the launcher keeps in
+# argv[0], so no wrapper and no flags are needed. Measured: resource dir,
+# cc1 spawn, -shared, C and C++ all work through launcher copies.
+
+# tc_clang_exec_mb -> the fresh-install exec need in MB: 32 in launch mode
+# (a launcher per executable), 3000 in copy mode (the whole bin/ tree as
+# real copies). Read by the install gate below and the feasibility plan.
+tc_clang_exec_mb() {
+    if [ "${SH_VIEW_MODE:-copy}" = launch ]; then
+        printf '32'
+    else
+        printf '3000'
+    fi
+}
+
 tc_clang_probe() {
     sh_have clang && clang --version >/dev/null 2>&1
 }
@@ -37,13 +55,22 @@ tc_clang_install() {
         *) sh_warn 'could not resolve the current LLVM release'; return 1 ;;
     esac
     sh_ci_ver=${sh_ci_tag#llvmorg-}
-    sh_ci_asset="LLVM-${sh_ci_ver}-Linux-${sh_ci_arch}.tar.xz"
+    # THE zst ASSET IS PREFERRED WHERE ZSTD EXISTS. It is ~1.1GB against
+    # ~2GB for the xz, and zstd decompresses several times faster, which is
+    # the difference between an LLVM install worth attempting on a sandbox
+    # and one that is not. The xz stays the fallback for a host without zstd.
+    if command -v zstd >/dev/null 2>&1 || command -v unzstd >/dev/null 2>&1; then
+        sh_ci_asset="LLVM-${sh_ci_ver}-Linux-${sh_ci_arch}.tar.zst"
+    else
+        sh_ci_asset="LLVM-${sh_ci_ver}-Linux-${sh_ci_arch}.tar.xz"
+    fi
     sh_ci_url="https://github.com/llvm/llvm-project/releases/download/${sh_ci_tag}/${sh_ci_asset}"
-    # The x86_64 tree extracted to ~12GB here, plus ~1.9GB of parts held at the
-    # same time, and a view in the hundreds of MB; both roots are named so a
-    # small host refuses before spending the transfer.
+    # The x86_64 tree extracted to ~12GB here, plus the parts held at the
+    # same time. The home is named because that is where the tree goes; the
+    # exec root is priced by the promote gate, which counts launcher copies
+    # in launch mode and full copies otherwise.
     sh_space_need 16000 home || return 1
-    sh_space_need 3000 exec || return 1
+    sh_space_need "$(tc_clang_exec_mb)" exec || return 1
     if [ "$SH_DRY_RUN" = 1 ]; then
         sh_step "would install $sh_ci_url into $sh_ci_root"
         return 0

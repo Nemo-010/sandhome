@@ -682,7 +682,9 @@ sh_space_need() {
 # that used `du -sk` over the whole tree therefore over-counted by hundreds of
 # megabytes and refused rust on a root the real view fits in. The walk mirrors
 # sh_promote_tree's copy rule and is a queue for the same reason (rule 5, no
-# recursion in POSIX sh).
+# recursion in POSIX sh). du reads disk usage, so a compressed home prices
+# below what an uncompressed exec root pays; the gate's headroom covers the
+# difference, and the feas total inherits the same approximation.
 sh_view_copy_kb() {
     sh_vck_src=$1
     if [ ! -d "$sh_vck_src" ] || ! sh_have du; then
@@ -706,6 +708,21 @@ sh_view_copy_kb() {
             # A symlink is mirrored as a link, never copied.
             [ -L "$sh_vck_e" ] && continue
             sh_is_exec_file "$sh_vck_e" || continue
+            sh_vck_rel=${sh_vck_e#"$sh_vck_src"/}
+            # In launch mode the view holds a launcher copy per executable,
+            # priced off the helper, not off the payload: a 15MB rustc costs
+            # the exec root 20KB. sh_memexec_template_kb answers 32 when the
+            # helper is not there yet, which over-prices rather than
+            # under-prices the gate. A copy-listed executable is priced at
+            # its real size: it lands as bytes, so the gate must hold room.
+            if [ "${SH_VIEW_MODE:-copy}" = launch ] && ! sh_copy_listed "$sh_vck_rel"; then
+                sh_vck_k=$(sh_memexec_template_kb 2>/dev/null)
+                case "$sh_vck_k" in
+                    ''|*[!0-9]*) sh_vck_k=32 ;;
+                esac
+                sh_vck_total=$((sh_vck_total + sh_vck_k))
+                continue
+            fi
             sh_vck_k=$(du -sk "$sh_vck_e" 2>/dev/null | { read -r sh_vck_kb _ || :; printf '%s' "$sh_vck_kb"; })
             case "$sh_vck_k" in
                 ''|*[!0-9]*) continue ;;
@@ -717,13 +734,106 @@ sh_view_copy_kb() {
     printf '%s' "$sh_vck_total"
 }
 
-# sh_view_need SRC -> refuse before mirroring when the exec root plainly cannot
-# hold the view. Uses the free-space number the planner already measures and
-# the COPY size of SRC (sh_view_copy_kb), not its whole-tree size, because only
-# regular executables are copied (issue #33 constrains #29: a 172MB zig binary
-# does not fit a 245MB tmpfs that already holds views plus GOCACHE).
+# sh_view_current SRC DST -> 0 when DST already mirrors SRC, so a rebuild
+# would change nothing. Every regular file under SRC must exist under DST
+# and be no older than it (`-nt` is POSIX, no stat needed); symlinks and
+# directories must exist. A wrapper the module wrote into the view after the
+# mirror (rust's --sysroot wrapper) is NEWER than the home file and passes:
+# current means "nothing to do", not "identical bytes". The walk is a
+# queue, like every other walk here (rule 5, no recursion).
+#
+# This is what keeps a no-op re-run green on a small exec root (issue #71):
+# the size gate refuses a rebuild the root cannot hold, but a view that is
+# already current needs no rebuild at all, so gating it is refusing work
+# that was never going to happen. The framework's post-promote probe still
+# runs afterwards, so a view that is current-but-broken is caught, not
+# blessed.
+sh_view_current() {
+    sh_vc_src=$1
+    sh_vc_dst=$2
+    [ -d "$sh_vc_src" ] || return 1
+    [ -d "$sh_vc_dst" ] || return 1
+    sh_vc_queue="${SH_HOME_TMP:-${TMPDIR:-/tmp}}/.viewcur.$$"
+    printf '%s\n' "$sh_vc_src" > "$sh_vc_queue" 2>/dev/null || return 1
+    sh_vc_ok=0
+    while IFS= read -r sh_vc_d; do
+        [ -n "$sh_vc_d" ] || continue
+        for sh_vc_e in "$sh_vc_d"/* "$sh_vc_d"/.[!.]* "$sh_vc_d"/..?*; do
+            [ -e "$sh_vc_e" ] || [ -L "$sh_vc_e" ] || continue
+            sh_vc_rel=${sh_vc_e#"$sh_vc_src"/}
+            if [ -d "$sh_vc_e" ] && [ ! -L "$sh_vc_e" ]; then
+                [ -e "$sh_vc_dst/$sh_vc_rel" ] || { sh_vc_ok=1; break; }
+                printf '%s\n' "$sh_vc_e" >> "$sh_vc_queue"
+                continue
+            fi
+            [ -e "$sh_vc_dst/$sh_vc_rel" ] && [ ! "$sh_vc_e" -nt "$sh_vc_dst/$sh_vc_rel" ] || { sh_vc_ok=1; break; }
+            # An executable that the view holds as a symlink back into the
+            # HOME tree is not current: both modes land executables as
+            # regular files (copies or launcher stamps), and a link to the
+            # source is the stale remainder of an older mirror - exactly what
+            # the copy branch removes before writing. A link whose target
+            # stays inside the view (an in-tree relative link remapped onto
+            # it, like a proxy to a toolchain binary) is legitimate and
+            # passes; data files stay symlinks either way.
+            if sh_is_exec_file "$sh_vc_e" && [ -L "$sh_vc_dst/$sh_vc_rel" ]; then
+                if sh_have readlink; then
+                    sh_vc_t=$(readlink "$sh_vc_dst/$sh_vc_rel" 2>/dev/null)
+                    case "$sh_vc_t" in
+                        /*) : ;;
+                        *)
+                            case "$sh_vc_rel" in
+                                */*) sh_vc_t=$(sh_lex_normalize "$sh_vc_dst/${sh_vc_rel%/*}/$sh_vc_t") ;;
+                                *) sh_vc_t=$(sh_lex_normalize "$sh_vc_dst/$sh_vc_t") ;;
+                            esac
+                            ;;
+                    esac
+                    case "$sh_vc_t" in
+                        "$sh_vc_src"/*) sh_vc_ok=1; break ;;
+                    esac
+                else
+                    sh_vc_ok=1; break
+                fi
+            fi
+            # In launch mode mtime cannot tell a launcher from a real copy,
+            # so a module that newly names a copy-list entry (or a rebuilt
+            # helper) would leave a working-looking view holding the wrong
+            # bytes. cmp closes it. A copy-listed entry must byte-match its
+            # home payload. Any other executable is current when it matches
+            # the helper (a launcher stamped from it) or is newer than the
+            # helper (a wrapper the module wrote after the mirror, like
+            # rust's --sysroot wrapper); older-and-different means the
+            # helper was rebuilt since the stamp. Without cmp, or without a
+            # helper to compare against, the mtime verdict above stands. In
+            # copy mode the mirror is byte-exact by construction and mtime
+            # suffices.
+            if [ "${SH_VIEW_MODE:-copy}" = launch ] && sh_have cmp && sh_is_exec_file "$sh_vc_e"; then
+                if sh_copy_listed "$sh_vc_rel"; then
+                    cmp -s "$sh_vc_e" "$sh_vc_dst/$sh_vc_rel" 2>/dev/null || { sh_vc_ok=1; break; }
+                else
+                    sh_vc_help=${SH_EXEC_BIN:-}/sandhome-memexec
+                    if [ -f "$sh_vc_help" ] && ! cmp -s "$sh_vc_help" "$sh_vc_dst/$sh_vc_rel" 2>/dev/null; then
+                        [ "$sh_vc_dst/$sh_vc_rel" -nt "$sh_vc_help" ] || { sh_vc_ok=1; break; }
+                    fi
+                fi
+            fi
+        done
+        [ "$sh_vc_ok" = 0 ] || break
+    done < "$sh_vc_queue"
+    rm -f "$sh_vc_queue" 2>/dev/null
+    [ "$sh_vc_ok" = 0 ]
+}
+
+# sh_view_need SRC [DST] -> refuse before mirroring when the exec root plainly
+# cannot hold the view. Uses the free-space number the planner already measures
+# and the COPY size of SRC (sh_view_copy_kb), not its whole-tree size, because
+# only regular executables are copied (issue #33 constrains #29: a 172MB zig
+# binary does not fit a 245MB tmpfs that already holds views plus GOCACHE).
+# When DST names the view being replaced, its present size is credited: the
+# rebuild frees those bytes first, so charging the gross size refuses rebuilds
+# that fit (issue #71).
 sh_view_need() {
     sh_vn_src=$1
+    sh_vn_dst=${2:-}
     [ -d "$sh_vn_src" ] || return 0
     sh_vn_need=$(sh_view_copy_kb "$sh_vn_src" 2>/dev/null)
     case "$sh_vn_need" in
@@ -735,6 +845,13 @@ sh_view_need() {
     case "$sh_vn_free" in
         ''|*[!0-9]*) sh_vn_free=0 ;;
     esac
+    if [ -n "$sh_vn_dst" ] && [ -d "$sh_vn_dst" ] && sh_have du; then
+        sh_vn_have=$(du -sk "$sh_vn_dst" 2>/dev/null | { read -r sh_vn_h _ || :; printf '%s' "$sh_vn_h"; })
+        case "$sh_vn_have" in
+            ''|*[!0-9]*) ;;
+            *) sh_vn_free=$((sh_vn_free + sh_vn_have / 1024)) ;;
+        esac
+    fi
     if [ "$sh_vn_free" -lt "$sh_vn_need_mb" ]; then
         sh_warn "$SH_EXEC has ${sh_vn_free}MB free and the $sh_vn_src view wants about ${sh_vn_need_mb}MB; set SANDHOME_EXEC to a roomy root (--exec DIR) and re-run"
         return 1
@@ -776,7 +893,8 @@ sh_promote_tree() {
     # Size-gate before writing anything (class C): name the constraint rather
     # than failing at ENOSPC mid-copy. A hard failure here is a refusal, and
     # the caller reports it; a soft warning would leave a half view behind.
-    sh_view_need "$sh_pt_src" || return 1
+    # The destination is named so the gate credits the view being replaced.
+    sh_view_need "$sh_pt_src" "$sh_pt_dst" || return 1
     sh_pt_root_src=$(sh_lex_normalize "$sh_pt_src")
     sh_pt_root_dst=$(sh_lex_normalize "$sh_pt_dst")
     mkdir -p "$sh_pt_dst" 2>/dev/null || return 1
@@ -875,11 +993,29 @@ sh_promote_tree() {
                 continue
             fi
             if sh_is_exec_file "$sh_pt_e"; then
-                if cp -f "$sh_pt_e" "$sh_pt_d/$sh_pt_b" 2>/dev/null; then
-                    chmod 0755 "$sh_pt_d/$sh_pt_b" 2>/dev/null || true
+                sh_pt_rel=${sh_pt_e#"$sh_pt_src"/}
+                # Launch mode: a launcher copy maps itself back to this file
+                # at runtime and runs it from memory, so the exec root holds
+                # kilobytes per entry. A copy-listed executable lands as real
+                # bytes instead: it is spawned by path and locates its
+                # siblings exe-relative, which a memfd image cannot do (see
+                # sh_copy_listed). A stamp that fails falls back to the copy
+                # below, which is the old behavior and always works where
+                # the view itself is writable.
+                if [ "${SH_VIEW_MODE:-copy}" = launch ] && ! sh_copy_listed "$sh_pt_rel" && sh_memexec_stamp "$sh_pt_e" "$sh_pt_d/$sh_pt_b"; then
+                    :
                 else
-                    sh_warn "could not copy $sh_pt_e into the exec view; symlinking it instead, and it will not run"
-                    ln -sfn "$sh_pt_e" "$sh_pt_d/$sh_pt_b" 2>/dev/null || true
+                    # The destination is removed first: it may be a symlink
+                    # from an earlier view pointing back at this same source,
+                    # and cp follows it and refuses with "are the same file",
+                    # leaving a symlink to the noexec home that cannot run.
+                    rm -f "$sh_pt_d/$sh_pt_b" 2>/dev/null
+                    if cp -f "$sh_pt_e" "$sh_pt_d/$sh_pt_b" 2>/dev/null; then
+                        chmod 0755 "$sh_pt_d/$sh_pt_b" 2>/dev/null || true
+                    else
+                        sh_warn "could not copy $sh_pt_e into the exec view; symlinking it instead, and it will not run"
+                        ln -sfn "$sh_pt_e" "$sh_pt_d/$sh_pt_b" 2>/dev/null || true
+                    fi
                 fi
             else
                 ln -sfn "$sh_pt_e" "$sh_pt_d/$sh_pt_b" 2>/dev/null || cp -f "$sh_pt_e" "$sh_pt_d/$sh_pt_b" 2>/dev/null || true
@@ -929,14 +1065,58 @@ sh_toolchain_adopted_root() {
 # the home root it never had. A BINARY FOUND ON PATH THAT CANNOT RUN FROM ITS OWN
 # DIRECTORY (the noexec-home case) IS MIRRORED THROUGH AN EXEC VIEW LIKE ANY
 # OTHER TREE, and a refusal is reported rather than swallowed.
+# sh_copy_listed REL -> 0 when REL is named in SH_COPY_ONLY, the per-module
+# list of executables that must be REAL copies even in launch mode. A
+# process that is SPAWNED by path and locates its siblings exe-relative
+# (gcc's ld.lld wrapper resolving its parent directory) cannot run from a
+# memfd image, which has no stable directory; stamping it answers the exec
+# and then dies locating itself. Measured: a launcher ld.lld links nothing
+# (`lld-wrapper: parent directory could not be determined`) while a real
+# copy of the same file links fine. The list is short (~4MB for rust) and
+# the module names it; everything else stays a launcher.
+sh_copy_listed() {
+    case " ${SH_COPY_ONLY:-} " in
+        *" $1 "*) return 0 ;;
+    esac
+    return 1
+}
+
+# sh_copy_only_set NAME -> resolve the module's real-copy list into
+# SH_COPY_ONLY. The promote step and the size gate both price off it, so it
+# is resolved in one place: a list the gate cannot see under-prices the
+# view it guards (measured: rust priced 198KB up front for a 17MB view,
+# because the copy-listed linkers were priced as launchers).
+sh_copy_only_set() {
+    SH_COPY_ONLY=''
+    if command -v "tc_${1:-}_copy_bins" >/dev/null 2>&1; then
+        SH_COPY_ONLY=$("tc_${1:-}_copy_bins" 2>/dev/null)
+    fi
+    export SH_COPY_ONLY
+}
+
 sh_promote_toolchain() {
     sh_ptc_name=$1
     shift
+    # The view mode defaults to the copy the tree always did; the processes
+    # that install (bootstrap, install, repair) run sh_memexec_ensure first
+    # and export launch when the helper proves itself here.
+    : "${SH_VIEW_MODE:=copy}"
+    # The module's real-copy list, resolved against the tree it names (the
+    # triple in rust's gcc-ld path is only known at install time, so this
+    # is a function, not a variable). Empty when the module names none.
+    sh_copy_only_set "$sh_ptc_name"
     sh_ptc_root=$(sh_toolchain_root "$sh_ptc_name")
     sh_ptc_view=$(sh_toolchain_view "$sh_ptc_name")
     if [ -d "$sh_ptc_root" ]; then
         if [ "$SH_HOME_EXEC" = yes ]; then
             sh_ptc_view=$sh_ptc_root
+        elif sh_view_current "$sh_ptc_root" "$sh_ptc_view"; then
+            # The view already mirrors the payload: rebuilding it would
+            # change nothing, so the size gate is not consulted at all. A
+            # no-op re-run on a drained exec root stays green (issue #71),
+            # and the bin links below are still (re)made, so a view whose
+            # links were lost is repaired without a rebuild.
+            sh_step "the $sh_ptc_name view is current; leaving it in place"
         else
             sh_promote_tree "$sh_ptc_root" "$sh_ptc_view" || sh_fail "could not build the exec view for $sh_ptc_name"
         fi

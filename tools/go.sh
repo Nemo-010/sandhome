@@ -2,6 +2,7 @@
 # go - the Go toolchain, from the official tarball into the sandhome root.
 TC_go_DESC='Go, from the official go.dev tarball (GOROOT stays in the home root)'
 TC_go_BINS='go/bin/go go/bin/gofmt'
+TC_go_EXEC_MB=150
 
 tc_go_probe() {
     sh_have go && go version >/dev/null 2>&1
@@ -118,7 +119,7 @@ tc_go_install() {
     # gated: without the exec line an install succeeded into a root too small
     # to build in, and the first build died with ENOSPC (issue #66).
     sh_space_need 400 home || return 1
-    sh_space_need 150 exec || return 1
+    sh_space_need "$TC_go_EXEC_MB" exec || return 1
     sh_gi_url="https://go.dev/dl/${sh_gi_ver}.${sh_gi_os}-${sh_gi_arch}.tar.gz"
     if [ "$SH_DRY_RUN" = 1 ]; then
         sh_step "would install $sh_gi_url into $sh_gi_root"

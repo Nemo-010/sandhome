@@ -216,6 +216,12 @@ usage: sh bootstrap.sh [options]
                       the pipe, or set it on the sh side
                       (curl ... | SANDHOME_REF=X sh -s -- ...): a VAR=value
                       prefix on curl never reaches the piped sh.
+  SANDHOME_FORCE      install toolchains locally even when the host already
+                      carries a working copy, which is otherwise adopted.
+                      1 (or all) forces every requested toolchain; a comma
+                      list forces the names in it (SANDHOME_FORCE=rust,go).
+                      Same placement rule as SANDHOME_REF. `sandhome install
+                      --force NAME` is the same decision per command.
   SANDHOME_SHA256     a default digest for any download that has no pin of its
                       own. Same placement rule as SANDHOME_REF: export it or
                       set it on the sh side. Prefer the per-download forms below, which do not
@@ -242,7 +248,7 @@ sh_load_library() {
     SH_LIB_DIR="$SH_SELF_DIR/lib"
     SH_REPO_DIR="$SH_SELF_DIR"
     export SH_LIB_DIR SH_REPO_DIR
-    for sh_ll_mod in common detect space fetch env toolchain shim report; do
+    for sh_ll_mod in common detect space fetch env toolchain shim memexec report; do
         if [ ! -r "$SH_LIB_DIR/$sh_ll_mod.sh" ]; then
             printf 'bootstrap: [-] missing library %s\n' "$SH_LIB_DIR/$sh_ll_mod.sh" >&2
             exit 2
@@ -432,6 +438,22 @@ sandhome_bootstrap_main() {
     : "${SANDHOME_HOME:=$SH_HOME}"
     : "${SANDHOME_EXEC:=$SH_EXEC}"
     export SANDHOME_HOME SANDHOME_EXEC
+    # SANDHOME_FORCE forces a local install even when the host already
+    # carries a working copy: 1 (or all) forces every requested toolchain,
+    # a comma list forces the names in it. A usable host copy is otherwise
+    # adopted, which is the common case; the force is for when the operator
+    # wants the toolchain under sandhome's own control (a newer release, a
+    # split-root view, a clean reinstall). `sandhome install --force NAME`
+    # is the same decision per command.
+    case "${SANDHOME_FORCE:-}" in
+        ''|0|no|off|false) SH_FORCE_LIST='' ;;
+        1|all|yes|on|true) SH_FORCE_LIST='*' ;;
+        *) SH_FORCE_LIST=",${SANDHOME_FORCE}," ;;
+    esac
+    export SH_FORCE_LIST
+    # The helper that lets views run from memory is built before any
+    # toolchain installs, so the first promote already prices kilobytes.
+    sh_memexec_ensure
     # # NOTE: PICK UP WHAT AN EARLIER RUN INSTALLED BEFORE DECIDING WHAT TO INSTALL.
     # Without this, the second bootstrap of an already-set-up sandbox downloads
     # jq again because its probe ran against a PATH that did not yet carry the
@@ -459,9 +481,29 @@ sandhome_bootstrap_main() {
         sh_mb_wanted="$sh_mb_wanted $sh_mb_name"
     done
 
-    for sh_mb_name in $sh_mb_wanted; do
-        sh_toolchain_ensure "$sh_mb_name" || true
-    done
+    # Price the whole request before spending anything (issue #75): one line
+    # per toolchain with what it wants and whether the root holds it, then
+    # the total against the ceiling. A dry run prints this alongside the
+    # per-toolchain would-lines and stops having written nothing; a real run
+    # refuses the no-fit names up front - naming --exec DIR, gc, and a smaller
+    # toolset as the three ways out - and installs only what fits, instead of
+    # installing what fits and then failing partway with the root already
+    # partly consumed.
+    # shellcheck disable=SC2086
+    sh_feasibility_plan $sh_mb_wanted
+    if [ "${SH_DRY_RUN:-0}" = 1 ]; then
+        # shellcheck disable=SC2086
+        for sh_mb_name in $SH_FEASIBLE; do
+            sh_toolchain_ensure "$sh_mb_name" || true
+        done
+    else
+        for sh_mb_name in $SH_INFEASIBLE; do
+            sh_fail "toolchain $sh_mb_name does not fit the exec root (see the feas lines above); re-run with --exec DIR on a roomy exec-capable path, run 'sandhome gc' to reclaim caches, or ask for a smaller toolset"
+        done
+        for sh_mb_name in $SH_FEASIBLE; do
+            sh_toolchain_ensure "$sh_mb_name" || true
+        done
+    fi
     # What was ASKED for, recorded so `sandhome doctor` can check it later. The
     # names are what the run wanted, not what it managed: a toolchain that
     # failed to install is exactly the one the readiness gate has to see, and

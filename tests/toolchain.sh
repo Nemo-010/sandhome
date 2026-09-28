@@ -550,7 +550,7 @@ t_contains "$real_probe" 'PROBE=adopt' \
 tc39=$work/no-tests
 mkdir -p "$tc39/lib" "$tc39/bin"
 cp "$ROOT/bin/sandhome" "$tc39/bin/sandhome"
-for m in common detect space fetch env toolchain shim report; do
+for m in common detect space fetch env toolchain shim memexec report; do
     cp "$ROOT/lib/$m.sh" "$tc39/lib/$m.sh"
 done
 mkdir -p "$tc39/tests"    # the directory is absent in a real network-only
@@ -616,7 +616,7 @@ d38_out=$( SH_HOME="$d38/home" SH_EXEC="$d38/exec" SH_EXEC_BIN="$d38/exec/bin" \
     SH_EXEC_VIEWS="$d38/exec/views" SH_HOME_TOOLCHAINS="$d38/tc" \
     SH_HOME_TMP="$d38/tmp" SH_HOME_EXEC=no SH_SELF=test \
     env SANDHOME_REPO_DIR="$ROOT" PATH="$ROOT/bin:$PATH" \
-    sh -c 'for m in common detect space fetch env toolchain shim report; do
+    sh -c 'for m in common detect space fetch env toolchain shim memexec report; do
                . "$SANDHOME_REPO_DIR/lib/$m.sh"
            done
            # Present, but with no version: the state the issue describes.
@@ -635,6 +635,213 @@ esac
 case "$d38_out" in
     *FAIL\ toolchain_clang*) t_ok 1 'a toolchain nobody asked for is not a failure (#38)' ;;
     *) t_ok 0 'a toolchain nobody asked for is not a failure (#38)' ;;
+esac
+
+# A KEPT PAYLOAD IS NOT DOWNLOADED AGAIN (issue #73). After a tmpfs restart
+# the exec view is gone while the home payload survives; the probe reads that
+# as "not present" because it answers through the view. The framework must
+# rebuild the view from the bytes already here. Fixture: a module whose
+# install records that it ran, and a home payload already in place.
+cat > "$work/repo/tools/keepme.sh" <<'EOF'
+TC_keepme_BINS='bin/keepme'
+tc_keepme_probe() { sh_have keepme && keepme --check; }
+tc_keepme_install() {
+    printf 'downloaded\n' >> "$SH_KEEPME_LOG"
+    mkdir -p "$(sh_toolchain_root keepme)/bin" || return 1
+    printf '#!/bin/sh\n[ "$1" = --check ] && exit 0\nexit 0\n' > "$(sh_toolchain_root keepme)/bin/keepme"
+    chmod 0755 "$(sh_toolchain_root keepme)/bin/keepme"
+    return 0
+}
+EOF
+cat > "$work/keep-ensure.sh" <<EOF
+for m in common detect space fetch env toolchain; do
+    . "$ROOT/lib/\$m.sh"
+done
+mkdir -p "\$SH_EXEC_BIN" "\$SH_EXEC_VIEWS" "\$SH_HOME_TOOLCHAINS" "\$SH_HOME_TMP" 2>/dev/null
+sh_toolchain_ensure "\$1"
+echo "STATUS=\$?"
+EOF
+run_keep() {
+    SH_LIB_DIR="$work/repo/lib" SH_REPO_DIR="$work/repo" \
+    SH_HOME_TOOLCHAINS="$work/ktc" SH_EXEC="$work/kexec" SH_HOME="$work/khome" \
+    SH_EXEC_BIN="$work/kexec/bin" SH_EXEC_VIEWS="$work/kexec/views" \
+    SH_HOME_TMP="$work/khome/tmp" SH_HOME_EXEC=no SH_DRY_RUN=0 SH_SELF=test \
+    SH_KEEPME_LOG="$work/dl.log" \
+    sh "$work/keep-ensure.sh" "$1"
+}
+# The payload survives in the home; the view is absent (fresh kexec).
+mkdir -p "$work/ktc/keepme/bin" "$work/khome/tmp"
+printf '#!/bin/sh\n[ "$1" = --check ] && exit 0\nexit 0\n' > "$work/ktc/keepme/bin/keepme"
+chmod 0755 "$work/ktc/keepme/bin/keepme"
+rm -f "$work/dl.log"
+keep_out=$(run_keep keepme 2>&1)
+t_contains "$keep_out" 'STATUS=0' 'a kept payload rebuilds its view without failing'
+t_contains "$keep_out" 'without downloading' 'the reuse says it did not download (#73)'
+case "$(cat "$work/dl.log" 2>/dev/null)" in
+    *downloaded*) t_ok 1 'no download ran for a kept payload' ;;
+    *) t_ok 0 'no download ran for a kept payload' ;;
+esac
+t_ok "$([ -x "$work/kexec/bin/keepme" ]; echo $?)" 'the rebuilt view is on the exec bin'
+# A half-written payload fails the probe and falls back to a real install.
+rm -rf "$work/ktc/keepme" "$work/kexec"
+mkdir -p "$work/ktc/keepme/bin" "$work/khome/tmp"
+printf '#!/bin/sh\nexit 3\n' > "$work/ktc/keepme/bin/keepme"
+chmod 0755 "$work/ktc/keepme/bin/keepme"
+rm -f "$work/dl.log"
+keep_out2=$(run_keep keepme 2>&1)
+t_contains "$keep_out2" 'STATUS=0' 'a corrupt kept payload still ends installed, via download'
+t_contains "$keep_out2" 'downloading a fresh copy' 'the fallback names the fresh download (#73)'
+case "$(cat "$work/dl.log" 2>/dev/null)" in
+    *downloaded*) t_ok 0 'the fallback ran a real download' ;;
+    *) t_ok 1 'the fallback ran a real download' ;;
+esac
+
+# A PROJECT RUNS ON A NOEXEC WORK TREE (issue #74). `sandhome project NAME`
+# creates the project on the exec root, links ./NAME to it, and sets up the
+# venv and the npm project inside - the one dance instead of three. Fakes
+# stand in for uv, node and npm; what is asserted is placement, linking and
+# the refusal shapes, not the real tools.
+mkdir -p "$work/fakeproj/bin"
+printf '#!/bin/sh\nmkdir -p "$2/bin"\n: > "$2/bin/python"\nchmod 0755 "$2/bin/python"\n' > "$work/fakeproj/bin/uv"
+chmod 0755 "$work/fakeproj/bin/uv"
+printf '#!/bin/sh\nexit 0\n' > "$work/fakeproj/bin/node"
+chmod 0755 "$work/fakeproj/bin/node"
+printf '#!/bin/sh\n: > ./package.json\n' > "$work/fakeproj/bin/npm"
+chmod 0755 "$work/fakeproj/bin/npm"
+run_project() {
+    SANDHOME_HOME="$work/phome" SANDHOME_EXEC="$work/pexec" SANDHOME_REPO_DIR="$ROOT" \
+    PATH="$work/fakeproj/bin:/usr/bin:/bin" \
+    sh "$ROOT/bin/sandhome" project "$@"
+}
+mkdir -p "$work/pwork"
+proj_out=$(cd "$work/pwork" && run_project demo 2>&1)
+proj_rc=$?
+t_is "$proj_rc" 0 'project exits 0 when both halves set up'
+t_ok "$([ -d "$work/pexec/projects/demo" ]; echo $?)" 'the project lives on the exec root'
+t_ok "$([ -L "$work/pwork/demo" ]; echo $?)" './NAME links to the project'
+t_ok "$([ -x "$work/pexec/projects/demo/.venv/bin/python" ]; echo $?)" 'the venv python stands in the project'
+t_ok "$([ -f "$work/pexec/projects/demo/package.json" ]; echo $?)" 'npm init ran in the project'
+case "$proj_out" in
+    *'native CLIs'*) t_ok 0 'the summary names native CLIs' ;;
+    *) t_ok 1 'the summary names native CLIs' ;;
+esac
+proj_out2=$(cd "$work/pwork" && run_project demo 2>&1)
+t_is "$?" 0 'a second project run is a no-op success'
+case "$proj_out2" in
+    *'already links'*) t_ok 0 'the second run names the existing link' ;;
+    *) t_ok 1 'the second run names the existing link' ;;
+esac
+if ( cd "$work/pwork" && run_project '../evil' >/dev/null 2>&1 ); then
+    t_ok 1 'a NAME that escapes the directory is refused'
+else
+    t_ok 0 'a NAME that escapes the directory is refused'
+fi
+t_ok "$([ ! -e "$work/pexec/projects/evil" ]; echo $?)" 'the refused NAME created nothing'
+proj_node=$(cd "$work/pwork" && run_project --node jsonly 2>&1)
+t_is "$?" 0 'project --node exits 0'
+t_ok "$([ ! -e "$work/pexec/projects/jsonly/.venv" ]; echo $?)" '--node sets up no venv'
+proj_bare=$(cd "$work/pwork" && SANDHOME_HOME="$work/phome" SANDHOME_EXEC="$work/pexec" \
+    SANDHOME_REPO_DIR="$ROOT" PATH="/usr/bin:/bin" \
+    sh "$ROOT/bin/sandhome" project --node barejs 2>&1)
+case "$proj_bare" in
+    *'half skipped'*) t_ok 0 'a missing toolchain skips its half with a warning' ;;
+    *) t_ok 1 "a missing toolchain skips its half with a warning (got: $proj_bare)" ;;
+esac
+t_is "$?" 0 'the skipped half still exits 0'
+
+# THE REQUEST IS PRICED BEFORE ANYTHING IS SPENT (issue #75). One feas
+# line per toolchain plus a total, all on stderr; names that do not fit
+# are refused before any fit name installs. The free space is stubbed
+# small, so a big module lands infeasible without touching a disk.
+cat > "$work/repo/tools/huge.sh" <<'EOF'
+TC_huge_DESC='a big fixture'
+TC_huge_BINS='bin/huge'
+TC_huge_EXEC_MB=500
+tc_huge_probe() { return 1; }
+tc_huge_install() { return 0; }
+EOF
+cat > "$work/repo/tools/tiny.sh" <<'EOF'
+TC_tiny_DESC='a small fixture'
+TC_tiny_BINS='bin/tiny'
+TC_tiny_EXEC_MB=4
+tc_tiny_probe() { return 1; }
+tc_tiny_install() { return 0; }
+EOF
+cat > "$work/feas-driver.sh" <<EOF
+for m in common detect space fetch env toolchain memexec; do
+    . "$ROOT/lib/\$m.sh"
+done
+sh_free_mb() { printf '100'; }
+sh_space_max_exec_free() { printf '100'; }
+SH_EXEC=/nowhere
+SH_HOME_TOOLCHAINS=/nowhere-tc
+SH_HOME_TMP="$work"
+SH_EXEC_VIEWS=/nowhere-views
+SH_VIEW_MODE=copy
+sh_feasibility_plan huge tiny nosuchmod
+printf 'FEASIBLE=[%s]\n' "\$SH_FEASIBLE"
+printf 'INFEASIBLE=[%s]\n' "\$SH_INFEASIBLE"
+EOF
+feas_out=$(SH_LIB_DIR="$work/repo/lib" SH_REPO_DIR="$work/repo" sh "$work/feas-driver.sh" 2>&1)
+t_contains "$feas_out" 'feas huge need_mb=500 free_mb=100 fit=no' \
+    'a toolchain bigger than the root is infeasible (#75)'
+t_contains "$feas_out" 'feas tiny need_mb=4 free_mb=100 fit=yes' \
+    'a toolchain smaller than the root is feasible'
+t_contains "$feas_out" 'feas nosuchmod need_mb=unknown' \
+    'an unknown name prints unknown, not an invented number'
+t_contains "$feas_out" 'total_exec_need_mb=504 max_exec_free_mb=100' \
+    'the total sums the priced needs against the ceiling'
+case "$feas_out" in
+    *'FEASIBLE=[tiny nosuchmod]'*) t_ok 0 'only the fit names stay feasible' ;;
+    *) t_ok 1 "only the fit names stay feasible (got: $feas_out)" ;;
+esac
+case "$feas_out" in
+    *'INFEASIBLE=[huge]'*) t_ok 0 'the no-fit name is refused up front' ;;
+    *) t_ok 1 "the no-fit name is refused up front (got: $feas_out)" ;;
+esac
+# THE COPY LIST PRICES TOO. A copy-listed payload lands as real bytes, so
+# pricing it as a launcher under-reads a hundredfold (measured: rust priced
+# 198KB for a 17MB view, because the list resolves only inside the promote).
+# Fixture: a 1MB payload named by tc_big_copy_bins; the estimate must hold
+# megabytes, not the template's kilobytes plus headroom.
+cat > "$work/repo/tools/bigc.sh" <<'EOF'
+TC_bigc_BINS='bin/bigc'
+TC_bigc_EXEC_MB=9999
+tc_bigc_probe() { return 1; }
+tc_bigc_install() { return 0; }
+tc_bigc_copy_bins() { printf 'bin/bigc'; }
+EOF
+mkdir -p "$work/bigtc/bigc/bin"
+dd if=/dev/urandom of="$work/bigtc/bigc/bin/bigc" bs=1k count=1024 2>/dev/null
+chmod 0755 "$work/bigtc/bigc/bin/bigc"
+bigc_wait=0
+while [ "$bigc_wait" -lt 30 ]; do
+    bigc_kb=$(du -sk "$work/bigtc/bigc/bin/bigc" 2>/dev/null | { read -r bigc_k _ || :; printf '%s' "$bigc_k"; })
+    case "$bigc_kb" in ''|*[!0-9]*) bigc_kb=0 ;; esac
+    [ "$bigc_kb" -gt 512 ] && break
+    sleep 2
+    bigc_wait=$((bigc_wait + 2))
+done
+cat > "$work/bigc-driver.sh" <<EOF
+for m in common detect space fetch env toolchain memexec; do
+    . "$ROOT/lib/\$m.sh"
+done
+SH_HOME_TOOLCHAINS="$work/bigtc"
+SH_EXEC_VIEWS="$work/noviews"
+SH_HOME_TMP="$work"
+SH_VIEW_MODE=launch
+printf 'need=%s\n' "\$(sh_toolchain_exec_mb bigc 2>/dev/null)"
+EOF
+bigc_out=$(SH_LIB_DIR="$work/repo/lib" SH_REPO_DIR="$work/repo" sh "$work/bigc-driver.sh" 2>&1)
+bigc_need=$(printf '%s' "$bigc_out" | sed -n 's/^need=//p')
+case "$bigc_need" in
+    ''|*[!0-9]*) t_ok 1 'the copy-listed payload is priced' ;;
+    *)
+        if [ "$bigc_need" -ge 21 ]; then
+            t_ok 0 'the copy-listed payload is priced at its real megabytes'
+        else
+            t_ok 1 "the copy-listed payload is priced at its real megabytes (got $bigc_need)"
+        fi ;;
 esac
 
 t_end

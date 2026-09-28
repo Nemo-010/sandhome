@@ -2,6 +2,7 @@
 # fd - the friendlier find. A single musl binary from GitHub releases.
 TC_fd_DESC='fd, a fast and user-friendly find replacement'
 TC_fd_BINS='bin/fd'
+TC_fd_EXEC_MB=16
 
 tc_fd_probe() {
     sh_have fd && fd --version >/dev/null 2>&1

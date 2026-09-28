@@ -28,6 +28,9 @@ usage: sandhome COMMAND [args]
   selftest shims         build and exercise the LD_PRELOAD shims
   selftest exec          the noexec-home end-to-end: install, promote, run
   shell [args]           run errandsh, the line discipline with a userspace pty
+  project NAME [--python|--node]   a project that runs on a noexec work tree:
+                         creates it on the exec root, links ./NAME to it,
+                         and sets up the venv and npm project inside
   pty CMD...             run CMD with a userspace pty (no /dev/ptmx needed)
   exec CMD...            run CMD with the sandhome environment loaded
   report [--json]        the full report
@@ -75,6 +78,10 @@ Environment:
                       parsers can be tested offline
   SANDHOME_RUST_TARGETS   comma list of rust cross targets to add on install
                       (same as install rust --target T)
+  SANDHOME_FORCE      install toolchains locally even when the host already
+                      carries a working copy, which is otherwise adopted.
+                      1 (or all) forces every requested toolchain; a comma
+                      list forces the names in it. Same as install --force.
   SANDHOME_ZIG_VERSION    pin the zig release (default latest from index)
   SANDHOME_ZIG_INDEX_URL  point the zig version parser at a mirror for tests
 ```
@@ -113,6 +120,12 @@ usage: sh bootstrap.sh [options]
                       the pipe, or set it on the sh side
                       (curl ... | SANDHOME_REF=X sh -s -- ...): a VAR=value
                       prefix on curl never reaches the piped sh.
+  SANDHOME_FORCE      install toolchains locally even when the host already
+                      carries a working copy, which is otherwise adopted.
+                      1 (or all) forces every requested toolchain; a comma
+                      list forces the names in it (SANDHOME_FORCE=rust,go).
+                      Same placement rule as SANDHOME_REF. `sandhome install
+                      --force NAME` is the same decision per command.
   SANDHOME_SHA256     a default digest for any download that has no pin of its
                       own. Same placement rule as SANDHOME_REF: export it or
                       set it on the sh side. Prefer the per-download forms below, which do not
@@ -156,6 +169,7 @@ usage: sh bootstrap.sh [options]
 | `SANDHOME_FAKEPTY_ID` | env.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_FETCH_CHUNK_MB` | fetch.sh | `256` |
 | `SANDHOME_FETCH_DIR` | bootstrap.sh | `$SH_FETCH_DIR` |
+| `SANDHOME_FORCE` | toolchain.sh bootstrap.sh sandhome rust.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_GO_DL_JSON_URL` | sandhome go.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_GO_VERSION_URL` | sandhome go.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_HERE` | profile.sh | `unset, and the feature is off until it is set` |

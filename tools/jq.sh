@@ -3,6 +3,7 @@
 # complete test of the install -> promote -> exec path.
 TC_jq_DESC='jq, the command-line JSON processor (single static binary)'
 TC_jq_BINS='bin/jq'
+TC_jq_EXEC_MB=8
 
 tc_jq_probe() {
     sh_have jq && jq --version >/dev/null 2>&1

@@ -6,6 +6,7 @@
 # names `python3 -m ensurepip` and venv instead of claiming uv is present.
 TC_python_DESC='CPython, installed by uv (uv is always left on PATH)'
 TC_python_BINS=''
+TC_python_EXEC_MB=30
 
 tc_python_probe() {
     if sh_have python3 && python3 --version >/dev/null 2>&1; then
@@ -82,7 +83,7 @@ tc_python_ensure_uv() {
         Darwin:arm64)               sh_pu_arch='aarch64-apple-darwin' ;;
         *) sh_warn "no uv build for ${SH_KERNEL:-unknown} ${SH_ARCH:-unknown}"; return 1 ;;
     esac
-    sh_space_need 30 exec || return 1
+    sh_space_need "$TC_python_EXEC_MB" exec || return 1
     mkdir -p "$sh_pu_root/bin" 2>/dev/null || return 1
     sh_pu_url="https://github.com/astral-sh/uv/releases/latest/download/uv-${sh_pu_arch}.tar.gz"
     if ! sh_fetch_unpack "$sh_pu_url" "$sh_pu_root/uv"; then

@@ -657,10 +657,10 @@ if grep -q 'bad interpreter' "$ROOT/lib/report.sh" 2>/dev/null; then
 else
     t_ok 1 'the noexec note names the bad-interpreter case (#42)'
 fi
-if grep -q 'venvs' "$ROOT/lib/report.sh" 2>/dev/null; then
-    t_ok 0 'the noexec note names the exec-root venv as the fix (#42)'
+if grep -q 'venvs\|sandhome project' "$ROOT/lib/report.sh" 2>/dev/null; then
+    t_ok 0 'the noexec note names the exec-root venv as the fix (#42, #74: sandhome project succeeds the venvs dance)'
 else
-    t_ok 1 'the noexec note names the exec-root venv as the fix (#42)'
+    t_ok 1 'the noexec note names the exec-root venv as the fix (#42, #74: sandhome project succeeds the venvs dance)'
 fi
 if grep -q 'bad interpreter' "$ROOT/docs/guide.md" 2>/dev/null; then
     t_ok 0 'the guide has a row for a half-working venv (#42)'

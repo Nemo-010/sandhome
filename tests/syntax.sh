@@ -138,4 +138,16 @@ print(" ".join(sorted(bad)))
 else
     t_skip 'no python3 to scan for committed ELF binaries'
 fi
+
+# Sourcing a module must be silent. `dash -n` accepts a bare word on its own
+# line (it is syntactically valid), so a truncated comment that leaves one
+# behind parses cleanly and then fails at every source with `X: not found`.
+# Measured: a `driver.` line in tools/rust.sh passed both parsers and broke
+# every repair. Sourcing must print nothing.
+sh_src_noise=$(for f in "$ROOT"/lib/*.sh "$ROOT"/tools/*.sh; do
+    [ -f "$f" ] || continue
+    sh -c '. "$1"' sh "$f" 2>&1
+ done)
+t_is "$sh_src_noise" '' 'sourcing every library and tool module prints nothing'
+
 t_end

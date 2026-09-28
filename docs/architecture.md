@@ -34,6 +34,34 @@ measured fix rather than a preference:
 | a symlink whose target is **missing** | **reproduced naming that same missing path** | `cp` dereferences, so the copy fails; the old fallback linked the entry to itself |
 | everything else, including `.so` | **symlinked back** to the home | `mmap(PROT_EXEC)` is allowed where `execve` is not, and copying a 191MB `libLLVM.so` onto a 250MB root does not fit |
 
+### Launch mode: run from memory instead of copying
+
+Copying every executable costs ~100MB per toolchain on the exec root (rust)
+and ~270MB (clang). Where the machine allows it the view holds 20KB launcher
+copies of one helper instead: `shims/memexec.c` (`sandhome-memexec` on the
+exec bin) copies the payload bytes into an anonymous `memfd` and executes
+them from the file descriptor, falling back to `fexecve` where `/proc` is
+absent. The mechanism (memfd plus exec-from-fd) is transcribed from the
+description in `hackerschoice/memexec`, studied as reference only; what runs
+here is written from scratch for this tree. Measured on a noexec home:
+direct exec fails `EACCES`, ELF, dynamic ELF and `#!` scripts all run from
+the fd, and the rust view shrinks from ~100MB of copies to ~17MB (launchers
+plus the few real copies below).
+
+A launcher copy maps itself back to its home payload at runtime (the
+`views/<name>` to `toolchains/<name>` convention, argv unchanged), so
+exe-relative tools keep working: clang finds its resource dir and re-execs
+`-cc1` through the view path. Two shapes cannot run from a memfd image and
+stay real copies, named per module by `tc_<name>_copy_bins`: a binary that
+is *spawned by path and locates its siblings exe-relative* (gcc's `ld.lld`
+wrapping, `cargo-clippy` finding `clippy-driver`), and the sysroot rustc
+reports, which still needs the `--sysroot` wrapper because the driver loads
+from the home path in every mode. `SH_VIEW_MODE` is `launch` when the helper
+is built and passes its probe here, `copy` otherwise; `copy` is the old
+behavior and the fallback, and the report prints which (`view=`). A usable
+host copy is still adopted with no workaround at all; `SANDHOME_FORCE` (or
+`install --force`) installs locally regardless.
+
 ### Exec-only caches
 
 A build cache is not data. `go run` and `go test` compile into `GOCACHE` and

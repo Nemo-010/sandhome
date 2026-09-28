@@ -19,6 +19,31 @@ sh_toolchain_status() {
     fi
 }
 
+# sh_report_view -> launch or copy for this machine, read-only. The mode is
+# a fact about the machine (split home plus a helper that probes here), not
+# a memory of what installed it: SH_VIEW_MODE lives only in the installing
+# process, so a fresh report would otherwise always say copy. sh_memexec_mode
+# never builds, so the report changes nothing by asking. Guarded for drivers
+# that source the report without the memexec module.
+sh_report_view() {
+    if command -v sh_memexec_mode >/dev/null 2>&1; then
+        sh_memexec_mode 2>/dev/null || printf 'copy'
+    else
+        printf '%s' "${SH_VIEW_MODE:-copy}"
+    fi
+}
+
+# sh_report_memexec -> the one line sh_memexec_report prints, or `unknown`
+# when the module is not loaded. Same guard as sh_report_view: drivers that
+# source the report without memexec get a word, not a raw shell error.
+sh_report_memexec() {
+    if command -v sh_memexec_report >/dev/null 2>&1; then
+        sh_memexec_report 2>/dev/null
+    else
+        printf 'unknown'
+    fi
+}
+
 # sh_report_text -> the human report on stdout. Everything else is stderr.
 #
 # STOP: EVERY PROBE-DERIVED FIELD DEFAULTS BEFORE IT IS FORMATTED (issue #8).
@@ -59,6 +84,8 @@ sh_report_text() {
     printf 'shims=%s\n'       "$(sh_lead "$(sh_shim_present 2>/dev/null)")"
     printf 'shims_missing=%s\n' "$(sh_lead "$(sh_shim_needed_missing 2>/dev/null)")"
     printf 'shims_built_this_run=%s\n' "$(sh_lead "${SH_SHIMS_BUILT:-}")"
+    printf 'view=%s\n' "$(sh_report_view 2>/dev/null)"
+    printf 'memexec=%s\n' "$(sh_report_memexec 2>/dev/null)"
     for sh_rt_name in $(sh_toolchain_available 2>/dev/null); do
         # TEXT ONLY, on purpose (judge finding 8-A): the JSON object carries no
         # toolchain map. A version is free text from the tool itself, and this
@@ -102,8 +129,10 @@ sh_report_json() {
         "$(sh_json_escape "$(sh_lead "${SH_INSTALLED:-}")")" \
         "$(sh_json_escape "$(sh_lead "${SH_ADOPTED:-}")")" \
         "$(sh_json_escape "$(sh_lead "$(sh_shim_present 2>/dev/null)")")"
-    printf ',"shims_missing":"%s"' \
-        "$(sh_json_escape "$(sh_lead "$(sh_shim_needed_missing 2>/dev/null)")")"
+    printf ',"shims_missing":"%s","view":"%s","memexec":"%s"' \
+        "$(sh_json_escape "$(sh_lead "$(sh_shim_needed_missing 2>/dev/null)")")" \
+        "$(sh_json_escape "$(sh_report_view 2>/dev/null)")" \
+        "$(sh_json_escape "$(sh_report_memexec 2>/dev/null)")"
     printf ',"failures":%s}\n' "$sh_rj_fail"
 }
 
@@ -153,16 +182,16 @@ sh_doctor() {
     #   .venv/bin/cowsay: .venv/bin/python: bad interpreter: Permission denied
     # The same for node: `npm install` exits 0, and ./node_modules/.bin/CLI dies
     # the same way while `node node_modules/CLI/index.js` works. The remedy is
-    # the same in both cases and is the exec root, so it is named once.
+    # one command, not two incantations: `sandhome project` puts the project
+    # on the exec root with its venv inside it (where its shebangs resolve)
+    # and links ./NAME back to it.
     sh_doc_cwd=${PWD:-.}
     if ! sh_exec_probe "$sh_doc_cwd" 2>/dev/null; then
         printf 'note   workdir=%s is noexec; build and run output under %s\n' "$sh_doc_cwd" "${SH_EXEC:-.}"
         printf 'note   a .venv or node_modules here half-works: python -m runs, but every\n'
         printf 'note     console script has a shebang into this tree and exits "bad\n'
-        printf 'note     interpreter: Permission denied". Put the venv on the exec root:\n'
-        printf 'note     uv venv %s/venvs/NAME && uv pip install --python %s/venvs/NAME/bin/python PKG\n' "${SH_EXEC:-.}" "${SH_EXEC:-.}"
-        printf 'note   same for JS: npm run, npx and .bin/ fail here. Put the project on\n'
-        printf 'note     the exec root and symlink it back: mkdir -p %s/jsproj && ln -s %s/jsproj ./jsproj (issue #58; tmpfs does not survive a restart)\n' "${SH_EXEC:-.}" "${SH_EXEC:-.}"
+        printf 'note     interpreter: Permission denied". One command does the dance:\n'
+        printf 'note     sandhome project NAME [--python|--node]\n'
     fi
     # A cleared tmpfs exec root (container restart) leaves a valid env.sh with
     # no sandhome on it. Name the state rather than failing silently.

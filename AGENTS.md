@@ -88,6 +88,7 @@ Drop `tools/<name>.sh`:
 TC_<name>_DESC='one line for sandhome toolchains'
 TC_<name>_BINS='bin/tool'          # every executable that must be on PATH
 TC_<name>_REQUIRES='other'         # optional; ensured first
+TC_<name>_EXEC_MB=32               # fresh-install exec need in MB, for the feas plan
 tc_<name>_probe()   { ...; }       # 0 when a working copy is already here
 tc_<name>_install() { ...; }       # install into $(sh_toolchain_root <name>)
 tc_<name>_env()     { ...; }       # write the env fragment (optional)

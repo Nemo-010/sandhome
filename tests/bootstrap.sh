@@ -226,7 +226,9 @@ esac
 # from the machine, and one line saying otherwise is the claim this tree refuses.
 dryhome="$work/dry-home"
 dryout=$(SANDHOME_HOME="$dryhome" SANDHOME_EXEC="$work/dry-exec" \
-         sh "$ROOT/bootstrap.sh" --toolset minimal --no-profile --no-path-line --dry-run 2>/dev/null)
+         sh "$ROOT/bootstrap.sh" --toolset minimal --no-profile --no-path-line --dry-run 2>&1)
+t_contains "$dryout" 'feas jq need_mb=' 'a dry run prices each requested toolchain (#75)'
+t_contains "$dryout" 'total_exec_need_mb=' 'a dry run totals the request against the ceiling (#75)'
 t_contains "$dryout" 'shims=' 'a dry run reports no built shims'
 case "$dryout" in
     *'shims=fakepty'*|*'shims=fakepwd'*) t_ok 1 'a dry run names no built shim' ;;
@@ -234,6 +236,28 @@ case "$dryout" in
 esac
 t_ok "$([ ! -e "$dryhome/shims/fakepty.so" ]; echo $?)" 'a dry run writes no shim object'
 t_ok "$([ ! -d "$dryhome/toolchains/jq" ]; echo $?)" 'a dry run downloads no toolchain'
+# A dry run persists no durable library either (issue #70): sh_repo_persist
+# was the one write step with no dry-run branch, so a preview from a pipe
+# (SH_REPO_DIR under a scratch dir) left 39 files in a fresh home. Driven
+# directly: a scratch repo dir plus a fresh home, with and without the flag.
+cat > "$work/persist-driver.sh" <<'DRIVER'
+for m in common detect space fetch env toolchain shim memexec report; do
+    . "$1/lib/$m.sh"
+done
+SH_REPO_DIR=$2; SH_HOME=$3; SH_DRY_RUN=$4; SH_SELF=test
+SH_HOME_TMP=$3/tmp
+sh_repo_persist
+DRIVER
+mkdir -p "$work/scratch/lib" "$work/scratch/tools"
+: > "$work/scratch/lib/common.sh"
+# The repo dir must read as a scratch fetch dir (under TMPDIR), which is the
+# only shape that persists; a clone path takes no branch either way.
+sh "$work/persist-driver.sh" "$ROOT" "$work/scratch" "$work/phome" 1 > "$work/persist.out" 2>&1
+t_contains "$(cat "$work/persist.out" 2>/dev/null)" 'would install the durable library' \
+    'a dry run names the durable library as would-install'
+t_ok "$([ ! -e "$work/phome/repo" ]; echo $?)" 'a dry run writes no durable library (#70)'
+sh "$work/persist-driver.sh" "$ROOT" "$ROOT" "$work/phome2" 0 >/dev/null 2>&1
+t_ok "$([ ! -e "$work/phome2/repo" ]; echo $?)" 'a clone checkout persists nothing (nothing to persist)'
 SANDHOME_REPO="$ROOT" SANDHOME_HOME="$dryhome" SANDHOME_EXEC="$work/dry-exec" \
     sh "$ROOT/bin/sandhome" doctor >/dev/null 2>&1
 if [ $? -eq 0 ]; then

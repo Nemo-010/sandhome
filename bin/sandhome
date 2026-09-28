@@ -131,6 +131,8 @@ export SH_REPO_DIR SH_LIB_DIR SANDHOME_BIN_DIR
 . "$SH_LIB_DIR/toolchain.sh"
 # shellcheck source=../lib/shim.sh
 . "$SH_LIB_DIR/shim.sh"
+# shellcheck source=../lib/memexec.sh
+. "$SH_LIB_DIR/memexec.sh"
 # shellcheck source=../lib/report.sh
 . "$SH_LIB_DIR/report.sh"
 
@@ -174,6 +176,9 @@ usage: sandhome COMMAND [args]
   selftest shims         build and exercise the LD_PRELOAD shims
   selftest exec          the noexec-home end-to-end: install, promote, run
   shell [args]           run errandsh, the line discipline with a userspace pty
+  project NAME [--python|--node]   a project that runs on a noexec work tree:
+                         creates it on the exec root, links ./NAME to it,
+                         and sets up the venv and npm project inside
   pty CMD...             run CMD with a userspace pty (no /dev/ptmx needed)
   exec CMD...            run CMD with the sandhome environment loaded
   report [--json]        the full report
@@ -221,6 +226,10 @@ Environment:
                       parsers can be tested offline
   SANDHOME_RUST_TARGETS   comma list of rust cross targets to add on install
                       (same as install rust --target T)
+  SANDHOME_FORCE      install toolchains locally even when the host already
+                      carries a working copy, which is otherwise adopted.
+                      1 (or all) forces every requested toolchain; a comma
+                      list forces the names in it. Same as install --force.
   SANDHOME_ZIG_VERSION    pin the zig release (default latest from index)
   SANDHOME_ZIG_INDEX_URL  point the zig version parser at a mirror for tests
 USAGE
@@ -275,6 +284,17 @@ would be removed and removes nothing. Toolchain views are never removed;
 `sandhome repair` rebuilds them.
 HELP
             return 0 ;;
+        project)
+            cat <<'HELP'
+usage: sandhome project NAME [--python|--node] [--no-link]
+A project that runs on a noexec work tree. Creates NAME under the exec
+root, links ./NAME to it, and sets up the venv (uv or python -m venv)
+and the npm project (npm init) inside, so console scripts, npx and
+native CLIs run where they stand. With neither --python nor --node
+both halves are set up; a half whose toolchain is absent is skipped
+with a warning. --no-link skips the ./NAME symlink.
+HELP
+            return 0 ;;
         report)
             cat <<'HELP'
 usage: sandhome report [--json]
@@ -287,7 +307,7 @@ usage: sandhome toolchains [--json]
 Name, status, version, description and PATH reach for every known toolchain.
 HELP
             return 0 ;;
-        env|path|exec|shims|shell|pty|test|selftest|version)
+        env|path|project|exec|shims|shell|pty|test|selftest|version)
             usage; return 0 ;;
         *)
             sh_die "no help for '$1'; run 'sandhome help' for the command list"
@@ -396,6 +416,16 @@ cmd_install() {
     done
     export SH_RUST_TARGETS
     export SH_FORCE
+    # SANDHOME_FORCE is the bootstrap spelling of the same decision; honor
+    # it here too, so the environment forces regardless of entry point.
+    if [ "$SH_FORCE" = 0 ]; then
+        case "${SANDHOME_FORCE:-}" in
+            ''|0|no|off|false) SH_FORCE_LIST='' ;;
+            1|all|yes|on|true) SH_FORCE_LIST='*' ;;
+            *) SH_FORCE_LIST=",${SANDHOME_FORCE}," ;;
+        esac
+        export SH_FORCE_LIST
+    fi
     if [ -z "$(sh_trim "$sh_c_args")" ]; then
         sh_die 'install needs at least one toolchain name'
     fi
@@ -410,6 +440,10 @@ cmd_install() {
         fi
     done
     sh_env_load
+    # The helper may postdate the exec root (an older setup, a wiped tmpfs
+    # recovered by repair): rebuild the decision before any promote, so a
+    # missing helper reads as copy mode rather than as a broken view.
+    sh_memexec_ensure
     for sh_c_n in $sh_c_args; do
         sh_toolchain_ensure "$sh_c_n" || true
     done
@@ -444,6 +478,7 @@ cmd_repair() {
         -h|--help) cmd_help repair; return 0 ;;
     esac
     sh_env_load
+    sh_memexec_ensure
     sh_rp_names=''
     for sh_rp_arg in "$@"; do
         case "$sh_rp_arg" in
@@ -472,6 +507,15 @@ cmd_repair() {
         [ -n "$sh_rp_bins" ] || continue
         # shellcheck disable=SC2086
         if sh_promote_toolchain "$sh_rp_name" $sh_rp_bins; then
+            # The module gets its post-promote step, as it does on install:
+            # a promote copies executables over the view, so a module that
+            # rewrites one of them afterwards (rust's --sysroot wrapper)
+            # would have that work undone by repair. Install calls
+            # tc_<name>_env after the promote; repair leaves the view in
+            # the same state.
+            if command -v "tc_${sh_rp_name}_env" >/dev/null 2>&1; then
+                "tc_${sh_rp_name}_env" >/dev/null 2>&1 || true
+            fi
             sh_say "repaired the exec view for $sh_rp_name"
         else
             sh_fail "could not rebuild the exec view for $sh_rp_name"
@@ -602,6 +646,125 @@ cmd_gc() {
     sh_say "$sh_cg_line"
     return 0
 }
+# cmd_project NAME [--python|--node] [--no-link] -> a project that runs on
+# a noexec work tree (issue #74). The working tree refuses execve, so every
+# naive setup half-works: `uv venv .venv` builds scripts with a shebang
+# into the tree (`bad interpreter: Permission denied`), `npm install` exits
+# 0 and `npx` fails, a native CLI dies with `spawnSync ... EACCES`. Each was
+# documented as its own hand-rolled dance; this does the whole dance once:
+# the project lives under the exec root (where it runs), and ./NAME links
+# to it (where the work happens to be). With neither --python nor --node
+# both halves are attempted; a half whose toolchain is absent is skipped
+# with a warning rather than failing the other half.
+#
+# STOP: THE NAME IS CLOSED TO PATH-SAFE CHARACTERS, BECAUSE IT BECOMES A
+# DIRECTORY AND A SYMLINK IN THE CURRENT DIRECTORY. A `../x` or an absolute
+# path would write outside the project the caller meant, and a name starting
+# with `-` already parses as a flag. The check below refuses all three.
+cmd_project() {
+    sh_pj_name=''
+    sh_pj_py=0
+    sh_pj_node=0
+    sh_pj_seen=0
+    sh_pj_link=1
+    for sh_pj_arg in "$@"; do
+        case "$sh_pj_arg" in
+            --python) sh_pj_py=1; sh_pj_seen=1 ;;
+            --node) sh_pj_node=1; sh_pj_seen=1 ;;
+            --no-link) sh_pj_link=0 ;;
+            -h|--help) cmd_help project; return 0 ;;
+            -*) sh_die "project does not take '$sh_pj_arg'; run 'sandhome help project' for the form it takes" ;;
+            *)
+                if [ -n "$sh_pj_name" ]; then
+                    sh_die 'project takes one NAME'
+                fi
+                sh_pj_name=$sh_pj_arg
+                ;;
+        esac
+    done
+    if [ -z "$sh_pj_name" ]; then
+        sh_die 'project needs a NAME'
+    fi
+    case "$sh_pj_name" in
+        ''|.|..|*/*)
+            sh_die "project NAME '$sh_pj_name' would not stay in this directory; use [A-Za-z0-9_.-]+" ;;
+        *[!A-Za-z0-9_.-]*)
+            sh_die "project NAME '$sh_pj_name' would not stay in this directory; use [A-Za-z0-9_.-]+" ;;
+    esac
+    if [ "$sh_pj_seen" = 0 ]; then
+        sh_pj_py=1
+        sh_pj_node=1
+    fi
+    sh_pj_dir=$SH_EXEC/projects/$sh_pj_name
+    if ! mkdir -p "$sh_pj_dir" 2>/dev/null; then
+        sh_fail "could not create $sh_pj_dir"
+        return 1
+    fi
+    sh_say "project $sh_pj_name at $sh_pj_dir"
+    if [ "$sh_pj_link" = 1 ]; then
+        if [ -L ./"$sh_pj_name" ] && sh_have readlink; then
+            sh_pj_cur=$(readlink ./"$sh_pj_name" 2>/dev/null)
+            if [ "$sh_pj_cur" = "$sh_pj_dir" ]; then
+                sh_say "./$sh_pj_name already links there"
+            else
+                sh_fail "./$sh_pj_name links elsewhere ($sh_pj_cur); move it aside first"
+                return 1
+            fi
+        elif [ -e ./"$sh_pj_name" ] || [ -L ./"$sh_pj_name" ]; then
+            sh_fail "./$sh_pj_name exists and is not this project; move it aside first"
+            return 1
+        else
+            if ln -s "$sh_pj_dir" ./"$sh_pj_name" 2>/dev/null; then
+                sh_say "linked ./$sh_pj_name to $sh_pj_dir"
+            else
+                sh_warn "could not link ./$sh_pj_name; work in $sh_pj_dir directly"
+            fi
+        fi
+    fi
+    if [ "$sh_pj_py" = 1 ]; then
+        if [ -d "$sh_pj_dir/.venv" ]; then
+            sh_say "python: .venv already present"
+        elif sh_have uv; then
+            if uv venv "$sh_pj_dir/.venv" >/dev/null 2>&1; then
+                sh_say "python: uv venv $sh_pj_dir/.venv"
+            else
+                sh_warn 'uv venv failed; python half skipped'
+            fi
+        elif sh_have python3; then
+            if python3 -m venv "$sh_pj_dir/.venv" >/dev/null 2>&1; then
+                sh_say "python: venv $sh_pj_dir/.venv"
+            else
+                sh_warn 'python -m venv failed; python half skipped'
+            fi
+        else
+            sh_warn 'no uv or python3 on PATH; python half skipped (sandhome install python)'
+        fi
+        if [ -x "$sh_pj_dir/.venv/bin/python" ]; then
+            sh_say "python: use ./$sh_pj_name/.venv/bin/python (or source ./$sh_pj_name/.venv/bin/activate)"
+        fi
+    fi
+    if [ "$sh_pj_node" = 1 ]; then
+        if sh_have node; then
+            if [ ! -f "$sh_pj_dir/package.json" ]; then
+                if ( CDPATH='' cd -- "$sh_pj_dir" 2>/dev/null && npm init -y >/dev/null 2>&1 ); then
+                    sh_say "node: npm init in $sh_pj_dir"
+                else
+                    sh_warn 'npm init failed; node half skipped'
+                fi
+            else
+                sh_say 'node: package.json already present'
+            fi
+            sh_say "node: work in ./$sh_pj_name (npm install, npx, native CLIs all run there)"
+        else
+            sh_warn 'no node on PATH; node half skipped (sandhome install node)'
+        fi
+    fi
+    # The two limits, said once, where the project will feel them: a tmpfs
+    # exec root does not survive a restart (re-run this command), and a
+    # native payload must live here, not on the work tree (issue #72).
+    sh_say "note: $sh_pj_dir lives on the exec root; a tmpfs restart clears it, and this command rebuilds it"
+    return 0
+}
 # # NOTE: BOTH PROGRAMS REPORT THE SAME SCHEMA STRING, AND A READER WHO CHECKS
 # ONE HAS TO CHECK THE SAME ONE. `bootstrap.sh --version` printed `bootstrap/1`
 # and `sandhome version` printed `sandhome/1`: two spellings of the same value,
@@ -719,7 +882,7 @@ cmd_test() {
 case "${2:-}" in
     -h|--help)
         case "${1:-}" in
-            doctor|env|path|space|toolchains|install|ensure|repair|shims|shell|pty|exec|report|gc|test|selftest|version|help)
+            doctor|env|path|space|toolchains|install|ensure|repair|shims|shell|pty|exec|report|gc|project|test|selftest|version|help)
                 cmd_help "${1:-help}"
                 exit 0 ;;
         esac ;;
@@ -739,6 +902,7 @@ case "${1:-help}" in
     exec)        shift; cmd_exec "$@" ;;
     report)      shift; cmd_report "$@" ;;
     gc) case "${2:-}" in -h|--help) shift; cmd_gc "$@" ;; *) sh_cmd_needs_roots gc; shift; cmd_gc "$@" ;; esac ;;
+    project) case "${2:-}" in -h|--help) shift; cmd_project "$@" ;; *) sh_cmd_needs_roots project; shift; cmd_project "$@" ;; esac ;;
     test)        cmd_test ;;
     selftest)    shift; cmd_selftest "${1:-}" ;;
     version|--version) cmd_version ;;

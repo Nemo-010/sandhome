@@ -2,6 +2,7 @@
 # deno - the Deno runtime, from the official denoland/deno release zip.
 TC_deno_DESC='Deno, a TypeScript/JavaScript runtime (single binary, from GitHub)'
 TC_deno_BINS='deno'
+TC_deno_EXEC_MB=150
 
 tc_deno_probe() {
     sh_have deno && deno --version >/dev/null 2>&1
@@ -27,7 +28,7 @@ tc_deno_install() {
     sh_di_stage=${SH_HOME_TMP:-${TMPDIR:-/tmp}}
     mkdir -p "$sh_di_stage" 2>/dev/null || return 1
     sh_space_need 300 home || return 1
-    sh_space_need 150 exec || return 1
+    sh_space_need "$TC_deno_EXEC_MB" exec || return 1
     if [ "$SH_DRY_RUN" = 1 ]; then
         sh_step "would install $sh_di_url into $sh_di_root"
         return 0

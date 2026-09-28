@@ -814,4 +814,80 @@ case "$doc_full" in
     *) t_ok 1 "doctor names a full exec root as full (#60) (got: $(printf '%s' "$doc_full" | tail -2))" ;;
 esac
 
+# # STOP: A CURRENT VIEW IS NOT REBUILT, SO A NO-OP RE-RUN STAYS GREEN ON A
+# DRAINED ROOT (issue #71). The size gate refuses a rebuild the root cannot
+# hold; a view that already mirrors the payload needs no rebuild, so gating
+# it turned a healthy re-run into failures=1. sh_view_current is the check:
+# every home file present in the view and no older than it.
+v71="$tmp-v71"
+rm -rf "$v71"
+mkdir -p "$v71/home/toolchains/w/bin" "$v71/exec/bin" "$v71/exec/views" "$v71/home/tmp"
+printf '#!/bin/sh\nexit 0\n' > "$v71/home/toolchains/w/bin/w"
+chmod 0755 "$v71/home/toolchains/w/bin/w"
+sh -c '
+    for m in common detect space fetch env toolchain; do . "$1/lib/$m.sh"; done
+    SH_HOME=$2/home; SH_HOME_TOOLCHAINS=$2/home/toolchains; SH_EXEC=$2/exec
+    SH_EXEC_BIN=$2/exec/bin; SH_EXEC_VIEWS=$2/exec/views; SH_HOME_TMP=$2/home/tmp; SH_HOME_EXEC=no
+    SH_VIEW_MODE=copy; SH_DRY_RUN=0; SH_SELF=test
+    export SH_HOME SH_HOME_TOOLCHAINS SH_EXEC SH_EXEC_BIN SH_EXEC_VIEWS SH_HOME_TMP SH_HOME_EXEC SH_VIEW_MODE SH_DRY_RUN SH_SELF
+    sh_promote_toolchain w bin/w >/dev/null 2>&1
+    if sh_view_current "$SH_HOME_TOOLCHAINS/w" "$SH_EXEC_VIEWS/w"; then printf "current-after-promote\n"; fi
+    # Drain the gate: no free space at all must still leave a current view alone.
+    sh_free_mb() { printf "0"; }
+    if sh_promote_toolchain w bin/w >/dev/null 2>&1; then printf "repromote-ok\n"; fi
+    # A newer home file makes the view stale, and then the gate does refuse.
+    # The refusal is recorded in SH_FAILURES (the count the bootstrap
+    # reports), not in the promote status, so that is what is read.
+    sleep 1
+    printf "# bump\n" >> "$SH_HOME_TOOLCHAINS/w/bin/w"
+    SH_FAILURES=0
+    export SH_FAILURES
+    sh_promote_toolchain w bin/w >/dev/null 2>&1 || true
+    printf "stale-failures=$SH_FAILURES\n"
+' sh "$ROOT" "$v71" > "$v71/out" 2>/dev/null
+v71_out=$(cat "$v71/out" 2>/dev/null)
+t_contains "$v71_out" 'current-after-promote' 'a fresh promote leaves a current view'
+t_contains "$v71_out" 'repromote-ok' 'a current view is not rebuilt when the root is drained (#71)'
+t_contains "$v71_out" 'stale-failures=1' 'a stale view is still gated on space, not silently kept'
+rm -rf "$v71"
+
+# BYTE CURRENCY IN LAUNCH MODE. mtime cannot tell a launcher from a real
+# copy, so three shapes need bytes: a launcher must match the helper, a
+# copy-listed entry must match its home payload, and a module wrapper (newer
+# than the helper, matching neither) still counts as current. The helper
+# here is any file: currency compares bytes, it never executes.
+lb="$tmp-launch"
+rm -rf "$lb"
+mkdir -p "$lb/home/toolchains/l/bin" "$lb/exec/bin" "$lb/exec/views" "$lb/home/tmp"
+printf 'helper-v1\n' > "$lb/exec/bin/sandhome-memexec"
+printf '#!/bin/sh\necho tool\n' > "$lb/home/toolchains/l/bin/tool"
+chmod 0755 "$lb/home/toolchains/l/bin/tool"
+sh -c '
+    for m in common detect space fetch env toolchain memexec; do . "$1/lib/$m.sh"; done
+    SH_HOME=$2/home; SH_HOME_TOOLCHAINS=$2/home/toolchains; SH_EXEC=$2/exec
+    SH_EXEC_BIN=$2/exec/bin; SH_EXEC_VIEWS=$2/exec/views; SH_HOME_TMP=$2/home/tmp; SH_HOME_EXEC=no
+    SH_VIEW_MODE=launch; SH_DRY_RUN=0; SH_SELF=test; SH_COPY_ONLY=""
+    export SH_HOME SH_HOME_TOOLCHAINS SH_EXEC SH_EXEC_BIN SH_EXEC_VIEWS SH_HOME_TMP SH_HOME_EXEC SH_VIEW_MODE SH_DRY_RUN SH_SELF SH_COPY_ONLY
+    sh_promote_toolchain l bin/tool >/dev/null 2>&1
+    if sh_view_current "$SH_HOME_TOOLCHAINS/l" "$SH_EXEC_VIEWS/l"; then printf "launch-current\n"; fi
+    sleep 1
+    printf "helper-v2\n" > "$SH_EXEC_BIN/sandhome-memexec"
+    if sh_view_current "$SH_HOME_TOOLCHAINS/l" "$SH_EXEC_VIEWS/l"; then printf "helper-rebuilt-current\n"; else printf "helper-rebuilt-stale\n"; fi
+    sleep 1
+    printf "wrapper\n" > "$SH_EXEC_VIEWS/l/bin/tool"
+    if sh_view_current "$SH_HOME_TOOLCHAINS/l" "$SH_EXEC_VIEWS/l"; then printf "wrapper-current\n"; fi
+    SH_COPY_ONLY="bin/tool"
+    export SH_COPY_ONLY
+    if sh_view_current "$SH_HOME_TOOLCHAINS/l" "$SH_EXEC_VIEWS/l"; then printf "listed-wrapper-current\n"; else printf "listed-wrapper-stale\n"; fi
+    cp "$SH_HOME_TOOLCHAINS/l/bin/tool" "$SH_EXEC_VIEWS/l/bin/tool"
+    if sh_view_current "$SH_HOME_TOOLCHAINS/l" "$SH_EXEC_VIEWS/l"; then printf "listed-real-current\n"; fi
+' sh "$ROOT" "$lb" > "$lb/out" 2>&1
+lb_out=$(cat "$lb/out" 2>/dev/null)
+t_contains "$lb_out" 'launch-current' 'a stamped launcher matches its helper'
+t_contains "$lb_out" 'helper-rebuilt-stale' 'a rebuilt helper stales the launchers stamped from it'
+t_contains "$lb_out" 'wrapper-current' 'a module wrapper newer than the helper counts as current'
+t_contains "$lb_out" 'listed-wrapper-stale' 'a copy-listed entry holding other bytes is stale'
+t_contains "$lb_out" 'listed-real-current' 'a copy-listed entry holding its payload is current'
+rm -rf "$lb"
+
 t_end

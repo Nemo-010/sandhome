@@ -10,11 +10,22 @@ One module per toolchain at `tools/<name>.sh`, declaring:
 TC_<name>_DESC        one line for `sandhome toolchains`
 TC_<name>_BINS        relative executables to expose on the exec bin
 TC_<name>_REQUIRES    other toolchains to ensure first (optional)
+TC_<name>_EXEC_MB     fresh-install exec need in MB (see below)
 tc_<name>_probe       return 0 when a working copy is already here
 tc_<name>_install     install into $(sh_toolchain_root <name>)
 tc_<name>_env         write the env fragment (optional)
 tc_<name>_version     print a version (optional)
+tc_<name>_exec_mb     computed fresh-install exec need in MB (optional)
+tc_<name>_copy_bins   executables that stay real copies in launch mode (optional)
 ```
+
+`TC_<name>_EXEC_MB` prices a fresh install for the up-front feasibility
+plan (`feas` lines plus `total_exec_need_mb`), and the module's own install
+gate reads the same number, so the two never disagree. A module whose need
+depends on the view mode (rust: 25 launch, 150 copy) defines
+`tc_<name>_exec_mb` instead. `tc_<name>_copy_bins` names the executables a
+memfd image cannot run: anything spawned by path that locates its siblings
+exe-relative (measured: gcc's `ld.lld` wrapper, `cargo-clippy`).
 
 Functions are namespaced by name because POSIX sh has no namespaces and two
 modules defining `install` would silently shadow each other.

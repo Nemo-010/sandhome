@@ -10,6 +10,7 @@
 # publisher's own digest into a real check.
 TC_zig_DESC='zig cc cross compiler and linker, from the official tarball'
 TC_zig_BINS='zig'
+TC_zig_EXEC_MB=200
 
 # tc_zig_resolve PLATFORM [VERSION] -> "VERSION URL SHA" for PLATFORM
 # (`x86_64-linux`), the newest STABLE release by default. The first top-level key
@@ -114,7 +115,7 @@ tc_zig_install() {
     # The zig binary is about 180MB and the extracted tree is larger; both roots
     # are gated before anything is written.
     sh_space_need 400 home || return 1
-    sh_space_need 200 exec || {
+    sh_space_need "$TC_zig_EXEC_MB" exec || {
         sh_warn "no exec root with 200MB free for zig; set SANDHOME_EXEC to a roomy root (--exec DIR)"
         return 1
     }

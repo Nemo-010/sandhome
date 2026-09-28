@@ -139,7 +139,7 @@ sh bootstrap.sh [options]
 | `--no-shims` / `--require-shims` | do not build, or refuse without, the shims |
 | `--no-shell` | do not install `errandsh` |
 | `--no-profile` / `--no-path-line` | leave the login files alone |
-| `--dry-run` / `--json` | preview, or one JSON report |
+| `--dry-run` / `--json` | preview (with per-toolchain `feas` lines and a `total_exec_need_mb` total), or one JSON report |
 | `--doh-url URL` | DNS-over-HTTPS resolver for a confirmed no-resolver cage (see `SANDHOME_DOH_URL` in the reference). Off unless set. |
 
 The five toolsets, and the difference between them is the compilers:
@@ -154,8 +154,10 @@ The five toolsets, and the difference between them is the compilers:
 
 `clang` is the one toolchain in no toolset, and is asked for by name:
 `sandhome install clang` or `bootstrap.sh --with clang`. Its download is above
-1GB and its exec view wants a roomy root, so a toolset that every sandbox
-would pay for it is the wrong shape.
+1GB and its tree wants ~16GB on the home root; in launch mode its exec view
+is launcher copies, so a small exec root holds it. A toolchain already on
+`PATH` is adopted, not downloaded; `SANDHOME_FORCE=1` (or a comma list of
+names, or `sandhome install --force NAME`) installs locally regardless.
 
 The run: detects the machine, plans the roots, adopts or installs each toolchain,
 builds the shims this machine actually needs, writes `$SANDHOME_HOME/env.sh`,
@@ -228,6 +230,7 @@ Drop `tools/<name>.sh`. It declares:
 TC_<name>_DESC='one line for sandhome toolchains'
 TC_<name>_BINS='bin/tool'          # relative executables to expose
 TC_<name>_REQUIRES='other'         # optional; ensured first
+TC_<name>_EXEC_MB=32               # fresh-install exec need in MB, for the feas plan
 
 tc_<name>_probe()   { ...; }       # 0 when a working copy is already here
 tc_<name>_install() { ...; }       # install into $(sh_toolchain_root <name>)
@@ -389,10 +392,11 @@ SANDHOME_FAKEPTY_SIZE=120x40 sandhome pty less big.log
 | `fork/exec ... permission denied` after a successful `go build` | the Go build cache landed on a noexec root; re-run the install so `GOCACHE` is written to `SANDHOME_EXEC` |
 | `go install` binary neither runs nor is on PATH | `GOBIN` now points at `$SANDHOME_EXEC/go-bin` and is on PATH; re-run `sandhome install go`, then `go install`. Build output in a noexec work tree still will not run: build under `$SANDHOME_EXEC` |
 | `npm i -g` CLI not found or `bad interpreter` | the prefix now lives on `$SANDHOME_EXEC/npm-global` with `bin` on PATH; re-run `sandhome install node`. Project-local `.bin` on a noexec checkout has the same cause: run the project from `$SANDHOME_EXEC` |
-| `collect2: posix_spawnp: Permission denied` linking rust | the sysroot linker is on the noexec home, so it cannot be exec'd at all. A `-fuse-ld=` flag does not fix it: rustc appends its own `-fuse-ld=lld` and `-B<sysroot>` after any `-C link-arg`, so the last one wins. `sandhome install --force rust` puts the toolchain on the exec root, where a plain `rustc -O hello.rs -o out` links and runs with no `RUSTFLAGS` |
+| `collect2: posix_spawnp: Permission denied` linking rust | the sysroot linker is on the noexec home, so it cannot be exec'd at all. A `-fuse-ld=` flag does not fix it: rustc appends its own `-fuse-ld=lld` and `-B<sysroot>` after any `-C link-arg`, so the last one wins. `sandhome install --force rust` installs a toolchain whose data lives on the home and whose executables run from the exec view, where a plain `rustc -O hello.rs -o out` links and runs with no `RUSTFLAGS` |
 | the working tree itself is noexec | `sandhome doctor` prints a note naming `$SANDHOME_EXEC`; build and run output there, not in the checkout |
+| a project needs a venv, npm, or native CLIs on a noexec checkout | one command does the whole dance: `sandhome project NAME [--python|--node]` creates `$SANDHOME_EXEC/projects/NAME`, links `./NAME` to it, and sets up the venv and the npm project inside, so console scripts, `npx` and native CLIs run where they stand. A tmpfs exec root does not survive a restart; re-running the command rebuilds it |
 | a per-project `.venv` half-works: `python -m` runs, every console script says `bad interpreter: Permission denied` | the venv is on a noexec checkout, and each console script's shebang is an absolute path into it. `uv venv` has already made the symlink, which is why python itself works. Put the venv on the exec root: `uv venv "$SANDHOME_EXEC/venvs/NAME" && uv pip install --python "$SANDHOME_EXEC/venvs/NAME/bin/python" PKG` (#42) |
-| `npm install` exits 0 and `./node_modules/.bin/CLI` says `bad interpreter: Permission denied` | same cause: the shebang is `/usr/bin/env node` resolved through a noexec tree. `node node_modules/CLI/index.js` always works, because node reads the file rather than exec'ing it (#42). For the normal project commands (`npm run`, `npx`, `.bin/CLI`), put the project itself on the exec root and symlink it back: `mkdir -p "$SANDHOME_EXEC/jsproj" && ln -s "$SANDHOME_EXEC/jsproj" ./jsproj`, then work in `./jsproj` (#58). Symlinking only `node_modules` does not survive `npm install`, which replaces the symlink with a real directory. A tmpfs exec root does not survive a restart |
+| `npm install` exits 0 and `./node_modules/.bin/CLI` says `bad interpreter: Permission denied` | same cause: the shebang is `/usr/bin/env node` resolved through a noexec tree. `node node_modules/CLI/index.js` works only for a pure-JS CLI, because node reads the file rather than exec'ing it (#42): a CLI that ships a native payload (`@typescript/typescript-linux-x64`, `@esbuild/*`, `sharp`) then dies with `spawnSync .../node_modules/... EACCES`, which is the same noexec refusal one level down, not a missing dependency. For the normal project commands (`npm run`, `npx`, `.bin/CLI`), and always for a native payload, put the project itself on the exec root and symlink it back: `mkdir -p "$SANDHOME_EXEC/jsproj" && ln -s "$SANDHOME_EXEC/jsproj" ./jsproj`, then work in `./jsproj` (#58). Symlinking only `node_modules` does not survive `npm install`, which replaces the symlink with a real directory. A tmpfs exec root does not survive a restart |
 | no echo / no line editing over ssh | the shims are not loaded; `SANDHOME_SHIMS=1` and restart the shell |
 | an ssh login is refused with `publickey` | the login name is absent from the synthetic passwd; set `SANDHOME_PASSWD_USERS` |
 | a full-screen program runs in batch mode | it is statically linked (nothing to interpose into), or `faketty` is not built. `sandhome pty CMD` forces the userspace pty; `sandhome shims build` builds it |

@@ -279,11 +279,19 @@ newmod_url() {
         esac
     )
 }
+# The zst asset is preferred where zstd exists; the xz is the fallback. The
+# expectation is computed the same way the module decides it, so the clause is
+# about the URL shape rather than about which decompressor this host happens to
+# have.
+t_clang_suffix=tar.xz
+if command -v zstd >/dev/null 2>&1 || command -v unzstd >/dev/null 2>&1; then
+    t_clang_suffix=tar.zst
+fi
 t_is "$(newmod_url clang Linux x86_64 gnu)" \
-    'https://github.com/llvm/llvm-project/releases/download/llvmorg-23.1.2/LLVM-23.1.2-Linux-X64.tar.xz' \
+    "https://github.com/llvm/llvm-project/releases/download/llvmorg-23.1.2/LLVM-23.1.2-Linux-X64.$t_clang_suffix" \
     'clang builds the x86_64 LLVM asset URL'
 t_is "$(newmod_url clang Linux aarch64 gnu)" \
-    'https://github.com/llvm/llvm-project/releases/download/llvmorg-23.1.2/LLVM-23.1.2-Linux-ARM64.tar.xz' \
+    "https://github.com/llvm/llvm-project/releases/download/llvmorg-23.1.2/LLVM-23.1.2-Linux-ARM64.$t_clang_suffix" \
     'clang builds the aarch64 LLVM asset URL'
 t_is "$(newmod_url deno Linux x86_64 gnu)" \
     'https://github.com/denoland/deno/releases/download/v2.9.7/deno-x86_64-unknown-linux-gnu.zip' \
