@@ -165,7 +165,31 @@ frequently on a root that refuses `execve`: a symlink into it answers
 . "$SANDHOME_HOME/env.sh"          # in a shell
 eval "$(sandhome env)"             # without sourcing the file
 sandhome env                       # to read it
+sandhome path                       # the exec bin directory, for a script
+sandhome exec CMD...               # run CMD with the environment already loaded
 ```
+
+Two of those exist for scripts, and neither was documented until this was
+noticed by looking for the reverse of what `tests/docs.sh` checks. That test
+fails when a document names a command the code does not have, which is the
+direction that bites a reader. It cannot see the other direction: a command the
+code has and no document names, which is a capability that exists and that
+nobody can find.
+
+- `sandhome path` prints `$SANDHOME_EXEC/bin` and nothing else, so a script can
+  extend `PATH` without parsing `env.sh`. A tool harness that wants the exec
+  directory and is handed `sandhome` has no other way to learn it.
+- `sandhome exec CMD...` loads the environment and `exec`s. It is the form for a
+  caller that cannot source a file into its own shell, which is the same
+  situation `eval "$(sandhome env)"` covers for a shell but not for a process
+  that was not given one:
+
+  ```sh
+  sandhome exec make -j"$(nproc)"   # a build with GOCACHE and the tool bins set
+  ```
+
+  It replaces the `sh -c '. "$SANDHOME_HOME/env.sh" && ...'` incantation, which is
+  what every caller wrote before this existed.
 
 The installed profile fragment de-duplicates `PATH`, gives history a home that
 survives the session, and moves an interactive shell out of a mounted Windows

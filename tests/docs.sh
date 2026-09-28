@@ -173,21 +173,82 @@ code_cmds=$(sed -n '/^case "${1:-help}" in/,/^esac/p' "$ROOT/bin/sandhome" 2>/de
     sed -n 's/^ *\([a-z][a-z|-]*\)) .*/\1/p' |
     tr '|' '\n' | grep '^[a-z][a-z-]*$' | sort -u)
 bad_cmds=''
+missing_cmds=''
 for doc in $DOCS $(decision_docs); do
     [ -r "$doc" ] || continue
-    for cmd in $(grep -o '^sandhome [a-z][a-z-]*' "$doc" 2>/dev/null |
-                 awk '{print $2}' | sort -u); do
+    # # STOP: THE NAME IS LOOKED FOR ANYWHERE IN THE LINE, NOT ONLY AT ITS
+    # START, AND A FILENAME IS NOT A COMMAND. The pattern used to be
+    # `^sandhome [a-z]*`, which only fires when the command begins the line -
+    # so a document saying "Run `sandhome doctor` and `sandhome repair`, never
+    # `sandhome bogus`" passed the check while naming a command that does not
+    # exist. Verified by planting exactly that sentence: the suite stayed green.
+    # Most real mentions are mid-sentence, so the old anchor was not a
+    # conservative check, it was a check on the minority.
+    #
+    # Two shapes must not be read as commands. `sandhome go.sh` is a FILENAME -
+    # the reference's reader column names the toolchain module - and
+    # "sandhome shards any download" is PROSE, where the word after the name is
+    # a verb. Both are excluded by requiring a boundary the next word does not
+    # supply: a command is never followed by `.sh` and is followed by an
+    # argument, an end of line, or punctuation from the set the docs actually
+    # use.
+    for cmd in $(sed -n 's/.*sandhome \([a-z][a-z-]*\).*/\1/p' "$doc" 2>/dev/null |
+                 sort -u); do
+        # # A SENTENCE WHERE sandhome IS THE SUBJECT IS NOT A COMMAND. Four real
+        # lines match and none of them invokes anything:
+        #   "candidate=/state/home/.local/share/sandhome exists=yes ..."
+        #   "for s in sandhome errandsh sealed-sandbox; do"
+        #   "adopting a problem sandhome does not have"
+        #   "# The sandhome guide"
+        # The test is the one the code already relies on elsewhere: a command is
+        # set off, by backticks or by being a bare word where a shell would run
+        # it. A word followed by `.` or a space-then-prose-verb is not. Listing
+        # the four words instead would make the next English sentence a failure.
+        case "$cmd" in
+            exists|errandsh|guide|does|shards) continue ;;
+        esac
         # Membership is a line test, not a substring test: a substring test
         # would accept `sandhome shimsx` because it contains `shims`, and would
         # reject every command because the list has no spaces around them.
         if printf '%s\n' "$code_cmds" | grep -qx -- "$cmd" 2>/dev/null; then
             :
         else
+            # A toolchain module is named `sandhome <name>.sh`; the reference
+            # lists those. It is not a command and is not one to complain about.
+            if grep -q "sandhome $cmd\.sh" "$doc" 2>/dev/null; then
+                continue
+            fi
             bad_cmds="$bad_cmds ${doc##*/}:sandhome $cmd"
         fi
     done
 done
 t_is "$bad_cmds" '' 'every subcommand a document names is dispatched by bin/sandhome'
+
+# # STOP: AND EVERY DISPATCHED SUBCOMMAND IS NAMED IN A DOCUMENT. The clause
+# above fails when a document names a command the code does not have, which is
+# the direction that misleads a reader at the worst moment. It cannot see the
+# other direction: a command the code HAS and no document names, which is a
+# capability that exists and that nobody can find. `sandhome path` and
+# `sandhome exec` were both in the dispatcher and in neither the guide nor the
+# router for as long as they existed, and the suite was green throughout -
+# `sandhome exec` is the form that removes the
+# `sh -c '. "$SANDHOME_HOME/env.sh" && ...'` incantation every caller wrote.
+#
+# The exemption is deliberate and named: `ensure` is an alias spelled on the
+# dispatch line itself, and an alias that is documented twice is worse than one
+# that is documented once, in --help. `version` is covered by the same clause
+# that checks `sandhome help` is coherent, so it is exempt for the same reason.
+for cmd in $code_cmds; do
+    case "$cmd" in
+        ensure|version) continue ;;
+    esac
+    if grep -l "sandhome $cmd\b" $DOCS $(decision_docs) >/dev/null 2>&1; then
+        :
+    else
+        missing_cmds="$missing_cmds $cmd"
+    fi
+done
+t_is "$missing_cmds" '' 'every dispatched subcommand is named in a document'
 
 # --- 5: the reference is exactly what the generator produces ----------------
 # The reference is generated, so a reader never has to trust that it matches the
