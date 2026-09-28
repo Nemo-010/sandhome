@@ -13,7 +13,6 @@
 # final report, a `sandhome env` block, or a machine-readable object.
 : "${SH_SELF:=sandhome}"
 : "${SH_FAILURES:=0}"
-: "${SH_SKIPPED:=}"
 : "${SH_DRY_RUN:=0}"
 
 sh_say()  { printf '%s: %s\n'   "$SH_SELF" "$*" >&2; }
@@ -24,14 +23,6 @@ sh_fail() { printf '%s: [-] %s\n' "$SH_SELF" "$*" >&2; SH_FAILURES=$((SH_FAILURE
 
 sh_reset_failures() { SH_FAILURES=0; }
 sh_failures() { printf '%s' "$SH_FAILURES"; }
-
-# sh_note NAME appends a logical name to the skipped list once.
-sh_skip() {
-    case " $SH_SKIPPED " in
-        *" $1 "*) ;;
-        *) SH_SKIPPED="$SH_SKIPPED $1" ;;
-    esac
-}
 
 # ------------------------------------------------------------ shell helpers --
 # sh_have NAME -> the name resolves to something runnable. `command -v` answers
