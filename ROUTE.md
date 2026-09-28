@@ -128,6 +128,31 @@ could not be done, `2` could not run at all. Every flag, variable and
 command is specified in `docs/reference.md`, which is generated from the
 code, so it overrules any other page that disagrees with it.
 
+### The skills, where the harness finds them.
+
+A harness discovers skills from `~/.agents/skills/` (Pi also reads
+`~/.pi/agent/skills/`). Without a clone, fetch each one by URL:
+
+```sh
+mkdir -p "$HOME/.agents/skills/sandhome" "$HOME/.agents/skills/errandsh" "$HOME/.agents/skills/sealed-sandbox"
+curl -fsSL https://raw.githubusercontent.com/talaria0101/sandhome/main/skills/sandhome/SKILL.md -o "$HOME/.agents/skills/sandhome/SKILL.md"
+curl -fsSL https://raw.githubusercontent.com/talaria0101/sandhome/main/skills/errandsh/SKILL.md -o "$HOME/.agents/skills/errandsh/SKILL.md"
+curl -fsSL https://raw.githubusercontent.com/talaria0101/sandhome/main/skills/sealed-sandbox/SKILL.md -o "$HOME/.agents/skills/sealed-sandbox/SKILL.md"
+```
+
+From a clone, link instead of copying, so later pulls update them:
+
+```sh
+ln -s "$PWD/skills" "$HOME/.agents/skills/sandhome"
+```
+
+Confirm all three landed, then read them in this session. A new session
+picks them up on start. There is no reload command.
+
+```sh
+ls "$HOME/.agents/skills/sandhome/SKILL.md" "$HOME/.agents/skills/errandsh/SKILL.md" "$HOME/.agents/skills/sealed-sandbox/SKILL.md"
+```
+
 ---
 
 ## Step 3. One table. The symptom decides the row.
