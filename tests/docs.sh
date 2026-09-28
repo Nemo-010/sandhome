@@ -22,6 +22,7 @@ ROOT=$(CDPATH='' cd -- "$HERE/.." && pwd)
 
 DOCS="$ROOT/AGENTS.md
       $ROOT/README.md
+      $ROOT/ROUTE.md
       $ROOT/docs/guide.md
       $ROOT/docs/architecture.md
       $ROOT/skills/README.md

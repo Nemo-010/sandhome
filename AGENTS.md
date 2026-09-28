@@ -5,14 +5,16 @@ teach. Everything below is a pointer, and every pointer is checked by
 `tests/docs.sh` so it cannot rot.
 
 **If you are a CONSUMER and not a maintainer, you do not need this file.** The
-skill is the entry point:
+entry point is:
 
 ```
-skills/sandhome/SKILL.md
+https://raw.githubusercontent.com/talaria0101/sandhome/main/ROUTE.md
 ```
 
-That one file tells an agent how to install, activate, check, get to work, and
-diagnose a failure, without reading anything else.
+That one file tells an agent how to set up, check, get to work, and diagnose
+a failure, without reading anything else. The skill at
+`skills/sandhome/SKILL.md` carries the same fast path for harnesses that
+discover skills from a `skills/` directory.
 
 ## What this repository is
 
