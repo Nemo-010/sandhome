@@ -187,9 +187,15 @@ The default is off for a measured reason: the terminal interposer makes
 every terminal aware program colourise a pipe, which breaks clean output
 from tools like jq and git.
 
-The environment file is the single source of truth. Read it in a shell
-that sources files, and use the `env` subcommand through eval where
-sourcing is not possible.
+The environment file is the single source of truth, and sourcing it is a per-session cost, not a setup step. Every new shell, including every non-login tool shell, must load it again before `sandhome` or any toolchain is on PATH. In a shell that sources files, source it. Where sourcing is not possible, load it through eval, which survives `sh -c`:
+
+```sh
+eval "$(sandhome env)"
+```
+
+```sh
+sh -c 'eval "$(sandhome env)"; sandhome doctor'
+```
 
 A toolchain that installed without an error and still does not answer is
 reported as a failure. Run the `install` subcommand for that name again:

@@ -63,6 +63,12 @@ sh_detect_all
 # (install, shims, gc) re-plan with creation. tests/space.sh asserts both
 # directions, including that `install` still creates.
 sh_space_plan --no-create
+# The plan owns the values; the exports adopt them when the caller did not
+# set them, so every `sh_env_load` below sources fragments that cannot abort
+# under `set -u`. See the same binding in bootstrap.sh after its create plan.
+: "${SANDHOME_HOME:=$SH_HOME}"
+: "${SANDHOME_EXEC:=$SH_EXEC}"
+export SANDHOME_HOME SANDHOME_EXEC
 
 usage() {
     cat <<'USAGE'
@@ -303,6 +309,9 @@ sh_cmd_needs_roots() {
         return 0
     fi
     sh_space_plan || return 2
+    : "${SANDHOME_HOME:=$SH_HOME}"
+    : "${SANDHOME_EXEC:=$SH_EXEC}"
+    export SANDHOME_HOME SANDHOME_EXEC
     if [ "${SH_EXEC_UNUSABLE:-0}" = 1 ]; then
         if [ -n "${SANDHOME_EXEC:-}" ]; then
             sh_die "SANDHOME_EXEC=$SANDHOME_EXEC is not writable or does not allow exec"

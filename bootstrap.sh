@@ -413,6 +413,16 @@ sandhome_bootstrap_main() {
 
     sh_detect_all
     sh_space_plan
+    # # STOP: THE EXPORTED NAMES ARE BOUND FROM THE PLAN BEFORE ANY LOAD.
+    # Under `set -u` a reference to an unset `$SANDHOME_HOME` is a runtime
+    # abort, and `sh_env_load` sources every `$SH_HOME/env.d/*.sh`, whose
+    # fragments reference those names. A single leftover fragment killed every
+    # toolset on a re-run, including `minimal`, and on a virgin home the adopt
+    # path wrote the first fragment and then aborted loading it. The plan owns
+    # the values; the exports adopt them when the caller did not set them.
+    : "${SANDHOME_HOME:=$SH_HOME}"
+    : "${SANDHOME_EXEC:=$SH_EXEC}"
+    export SANDHOME_HOME SANDHOME_EXEC
     # # NOTE: PICK UP WHAT AN EARLIER RUN INSTALLED BEFORE DECIDING WHAT TO INSTALL.
     # Without this, the second bootstrap of an already-set-up sandbox downloads
     # jq again because its probe ran against a PATH that did not yet carry the

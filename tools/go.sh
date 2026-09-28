@@ -157,12 +157,14 @@ tc_go_env() {
         return 0
     fi
     mkdir -p "$SH_EXEC/tmp" "$SH_EXEC/cache/go-build" 2>/dev/null || true
-    # # STOP: GOCACHE IS ON THE EXEC ROOT, NOT THE HOME. `go run` and `go test` build
-    # an executable into the build cache and then execve it; a cache on a noexec
-    # home made every one of them fail with `fork/exec ... permission denied`
-    # after a successful compile. Downloads and the module cache are data and stay
-    # in the home.
+    # # STOP: THE FRAGMENT DEFAULTS BEFORE IT DEREFERENCES, SO IT CANNOT ABORT
+    # UNDER `set -u`. A leftover `go.sh` referencing an unset `$SANDHOME_HOME`
+    # killed every toolset on a re-run. The concrete home and exec at install
+    # time are the fallback; the exports adopt them only when unset.
     sh_env_write_fragment go <<EOF
+: "\${SANDHOME_HOME:=$SH_HOME}"
+: "\${SANDHOME_EXEC:=$SH_EXEC}"
+export SANDHOME_HOME SANDHOME_EXEC
 GOROOT="$sh_ge_root"
 GOPATH="\$SANDHOME_HOME/go"
 GOCACHE="\$SANDHOME_EXEC/cache/go-build"

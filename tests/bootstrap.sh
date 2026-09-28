@@ -328,5 +328,44 @@ unknown_rc=$?
 t_contains "$unknown_out" 'unknown toolchain nosuchtool' 'an unknown toolchain is named'
 t_is "$unknown_rc" 1 'an unknown toolchain exits non-zero'
 
+# NOTE: THE DOCUMENTED INVOCATION SETS NOTHING BY HAND (issues #18/#26, class A).
+# All nine invocations above pre-set SANDHOME_HOME/SANDHOME_EXEC, so the suite
+# was structurally unable to catch the documented ROUTE.md path aborting with
+# "SANDHOME_HOME: parameter not set" under `set -u`. This runs it the way the
+# router documents it: a fresh non-login shell with the names absent.
+# Trigger 1 (pre-install load with a leftover fragment) and trigger 2 (the
+# adopt path writing the first fragment) are the same binding, tested twice.
+doc_home_base=$work/doc-names-absent
+doc_fake_home=$doc_home_base/home
+mkdir -p "$doc_fake_home"
+# Virgin run with the names absent must exit 0 and write env.sh.
+doc_out=$(env -i PATH=/usr/bin:/bin HOME="$doc_fake_home" \
+    sh "$ROOT/bootstrap.sh" --toolset minimal --no-profile --no-path-line \
+    --no-shell --no-shims 2>&1)
+doc_rc=$?
+t_is "$doc_rc" 0 'the documented invocation with the names absent exits 0'
+doc_default_home="$doc_fake_home/.local/share/sandhome"
+if [ -r "$doc_default_home/env.sh" ]; then
+    t_ok 0 'the documented invocation writes env.sh at the default home'
+else
+    t_ok 1 'the documented invocation writes env.sh at the default home'
+fi
+# A leftover fragment in the old shape (bare `$SANDHOME_HOME`) must not abort
+# the next run with the names absent: the binding and the defensive load own
+# this, not the fragment that happens to be on disk.
+mkdir -p "$doc_default_home/env.d"
+cat > "$doc_default_home/env.d/node.sh" <<'FRAG'
+NPM_CONFIG_PREFIX="$SANDHOME_HOME/npm-global"
+export NPM_CONFIG_PREFIX
+FRAG
+doc_out2=$(env -i PATH=/usr/bin:/bin HOME="$doc_fake_home" \
+    sh "$ROOT/bootstrap.sh" --toolset minimal --no-profile --no-path-line \
+    --no-shell --no-shims 2>&1)
+t_is "$?" 0 'a re-run with a leftover fragment and the names absent exits 0'
+case "$doc_out2" in
+    *'parameter not set'*) t_ok 1 'the re-run shows no set -u abort' ;;
+    *) t_ok 0 'the re-run shows no set -u abort' ;;
+esac
+
 rm -rf "$home" 2>/dev/null
 t_end

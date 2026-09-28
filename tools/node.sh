@@ -143,7 +143,11 @@ tc_node_env() {
     fi
     sh_ne_view=$(sh_toolchain_view node)
     mkdir -p "$SH_HOME/npm-global" "$SH_HOME/cache/npm" 2>/dev/null || true
+    # Self-sufficient under `set -u`: a leftover fragment must not abort a shell
+    # that sources it with the names unset. See tools/go.sh for the shape.
     sh_env_write_fragment node <<EOF
+: "\${SANDHOME_HOME:=$SH_HOME}"
+export SANDHOME_HOME
 NPM_CONFIG_PREFIX="\$SANDHOME_HOME/npm-global"
 NPM_CONFIG_CACHE="\$SANDHOME_HOME/cache/npm"
 NPM_CONFIG_UPDATE_NOTIFIER=false

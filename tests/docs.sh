@@ -446,4 +446,69 @@ else
     t_ok 1 'a variable in the help text and in no implementation would be reported'
 fi
 
+# --- 11: fragments are self-sufficient and the binding precedes the load -----
+# Class A (issues #18/#26/#30): every `env.d` fragment that references
+# `$SANDHOME_HOME`/`$SANDHOME_EXEC` must default it first, so sourcing the
+# fragment under `set -u` with the names unset cannot abort. And `sh_env_load`
+# must never run before the `: "${SANDHOME_HOME:=$SH_HOME}"` binding in
+# either entry point, or a leftover fragment aborts the run that was meant to
+# adopt it.
+bad_frag=''
+for frag_src in "$ROOT"/tools/*.sh; do
+    [ -r "$frag_src" ] || continue
+    # Only the bytes that land in `env.d/*.sh` matter: the heredoc bodies after
+    # `sh_env_write_fragment ... <<EOF` (and the `cat >> ... <<EOF` second
+    # fragment in python.sh). A `$SANDHOME_EXEC` in a code comment names no
+    # fragment and is not examined.
+    frag_body=$(awk '/<<EOF/{flag=1;next} /^EOF$/{flag=0} flag' "$frag_src" 2>/dev/null)
+    [ -n "$frag_body" ] || continue
+    case "$frag_body" in
+        *SANDHOME_HOME*)
+            case "$frag_body" in
+                *'SANDHOME_HOME:='*|*'SANDHOME_HOME:-'*) ;;
+                *) bad_frag="$bad_frag ${frag_src##*/}:SANDHOME_HOME" ;;
+            esac
+            ;;
+    esac
+    case "$frag_body" in
+        *SANDHOME_EXEC*)
+            case "$frag_body" in
+                *'SANDHOME_EXEC:='*|*'SANDHOME_EXEC:-'*) ;;
+                *) bad_frag="$bad_frag ${frag_src##*/}:SANDHOME_EXEC" ;;
+            esac
+            ;;
+    esac
+done
+t_is "$bad_frag" '' 'every fragment that names SANDHOME_HOME/EXEC defaults it first'
+
+bad_order=''
+for entry in "$ROOT/bootstrap.sh" "$ROOT/bin/sandhome"; do
+    [ -r "$entry" ] || continue
+    # Code lines only: a `#` comment naming `sh_env_load` is not a call, and a
+    # comment naming the binding is not a binding. Strip comments before asking
+    # for line numbers.
+    bind_line=$(grep -n '^[^#]*SANDHOME_HOME:=' "$entry" 2>/dev/null | head -1 | cut -d: -f1)
+    load_line=$(grep -n '^[^#]*sh_env_load' "$entry" 2>/dev/null | head -1 | cut -d: -f1)
+    # lib/env.sh defines sh_env_load; it must default before it dereferences.
+    if [ "${entry##*/}" = "env.sh" ]; then
+        continue
+    fi
+    if [ -n "$load_line" ]; then
+        if [ -z "$bind_line" ]; then
+            bad_order="$bad_order ${entry##*/}:no-binding"
+        elif [ "$bind_line" -gt "$load_line" ]; then
+            bad_order="$bad_order ${entry##*/}:load-before-bind"
+        fi
+    fi
+done
+# lib/env.sh itself must default inside sh_env_load.
+if grep -q 'sh_env_load' "$ROOT/lib/env.sh" 2>/dev/null; then
+    if grep -q 'SANDHOME_HOME:=' "$ROOT/lib/env.sh" 2>/dev/null; then
+        :
+    else
+        bad_order="$bad_order env.sh:no-default"
+    fi
+fi
+t_is "$bad_order" '' 'sh_env_load never runs before the SANDHOME binding'
+
 t_end

@@ -242,9 +242,23 @@ sh_install_profile() {
 # sh_env_load -> make this shell match the written environment, so a run that
 # installed a tool can then probe for it in the same process. Exported variables
 # only; the exec view is on PATH.
+#
+# STOP: IT DEFAULTS BEFORE IT DEREFERENCES, BECAUSE IT SOURCES UNTRUSTED-BY-AGE
+# FRAGMENTS UNDER `set -u`. A leftover `env.d/*.sh` referencing an unset
+# `$SANDHOME_HOME` aborted every toolset on a re-run, and `$SH_EXEC_BIN` unset
+# before any plan aborted the prepend itself. The plan owns the values; this
+# adopts them when the caller did not set them, so no fragment can abort.
 sh_env_load() {
-    sh_path_prepend "$SH_EXEC_BIN"
-    if [ -r "$SH_HOME/prefs.sh" ]; then
+    : "${SH_HOME:=}"
+    : "${SH_EXEC:=}"
+    : "${SH_EXEC_BIN:=}"
+    : "${SANDHOME_HOME:=${SH_HOME:-}}"
+    : "${SANDHOME_EXEC:=${SH_EXEC:-}}"
+    export SANDHOME_HOME SANDHOME_EXEC
+    if [ -n "${SH_EXEC_BIN:-}" ]; then
+        sh_path_prepend "$SH_EXEC_BIN"
+    fi
+    if [ -n "${SH_HOME:-}" ] && [ -r "$SH_HOME/prefs.sh" ]; then
         # shellcheck disable=SC1090
         . "$SH_HOME/prefs.sh"
     fi

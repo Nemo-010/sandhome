@@ -80,7 +80,12 @@ tc_python_env() {
         fi
     done
     mkdir -p "$SH_HOME/cache/uv" 2>/dev/null || true
+    # Self-sufficient under `set -u`: see tools/go.sh. Which fragment aborts
+    # first depends on host state (uv present or not), so the fix is the binding
+    # and not one fragment.
     sh_env_write_fragment python <<EOF
+: "\${SANDHOME_HOME:=$SH_HOME}"
+export SANDHOME_HOME
 UV_PYTHON_INSTALL_DIR="$sh_pe_root/python"
 UV_CACHE_DIR="\$SANDHOME_HOME/cache/uv"
 UV_PYTHON_DOWNLOADS=never
