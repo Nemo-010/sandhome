@@ -197,11 +197,11 @@ usage: sh bootstrap.sh [options]
 
 | variable | default |
 | --- | --- |
-| `ERRANDSH_HISTORY` | `(unset)` |
-| `ERRANDSH_MAXHIST` | `(unset)` |
-| `ERRANDSH_NAME` | `(unset)` |
-| `ERRANDSH_PTY` | `(unset)` |
-| `ERRANDSH_SHELL` | `(unset)` |
+| `ERRANDSH_HISTORY` | `$HOME/.errandsh-history` |
+| `ERRANDSH_MAXHIST` | `500` |
+| `ERRANDSH_NAME` | `the hostname, or errand` |
+| `ERRANDSH_PTY` | `1 (the automatic path is on unless this is 0)` |
+| `ERRANDSH_SHELL` | `/bin/sh` |
 
 ## pty shim variables
 

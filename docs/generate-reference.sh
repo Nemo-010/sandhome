@@ -201,9 +201,47 @@ printf '\n'
 # --- the errandsh variables -------------------------------------------------
 printf '## errandsh variables\n\n'
 printf '| variable | default |\n| --- | --- |\n'
+# # STOP: THE errandsh DEFAULTS ARE EXTRACTED, NOT GIVEN UP ON. The pattern was
+# `grep ":\?=\"\?${var}"`, which needs an `=` IMMEDIATELY after the name, so
+# it never matched the form the file actually uses - `: "${ERRANDSH_MAXHIST:=500}"`
+# - and every one of the five errandsh variables was published as `(unset)`:
+#
+#   | ERRANDSH_HISTORY  | (unset) |     the code says $HOME/.errandsh-history
+#   | ERRANDSH_MAXHIST  | (unset) |     the code says 500
+#   | ERRANDSH_NAME     | (unset) |     the code derives it from the hostname
+#   | ERRANDSH_PTY      | (unset) |     the code says 1
+#   | ERRANDSH_SHELL    | (unset) |     the code says /bin/sh
+#
+# skills/errandsh/SKILL.md carries a hand-written table with all five correct,
+# so the tree held two tables that disagreed and the generated one was the wrong
+# one - which is the worst direction, because a document that is regenerated
+# gets read as current by definition. A reader checking the default of
+# ERRANDSH_MAXHIST was told there was none.
 for var in $(grep -o 'ERRANDSH_[A-Z]*' "$ROOT/shell/errandsh" 2>/dev/null | sort -u); do
-    def=$(grep -h ":\?=\"\?${var}" "$ROOT/shell/errandsh" 2>/dev/null | head -1 |
-          sed 's/^[^=]*=//; s/^"\?//; s/"\?$//' | cut -c1-50)
+    # The innermost ${NAME:-default} or ${NAME:=default} inside the first line
+    # that mentions the name, which is where a default lives. `-` is the shell's
+    # own fallback and `:=` assigns and returns, and both answer the question a
+    # reader is asking.
+    def=$(sed -n "s/.*\${${var}[:-]=\([^}]*\)}.*/\1/p" "$ROOT/shell/errandsh" 2>/dev/null |
+          head -1 | cut -c1-50)
+    if [ -z "$def" ]; then
+        # Not a default expression: a plain assignment at the start of a line.
+        def=$(sed -n "s/^ *${var}=\"\?//p" "$ROOT/shell/errandsh" 2>/dev/null |
+              head -1 | sed 's/"$//' | cut -c1-50)
+    fi
+    # A default that is itself a command substitution is not a value a reader
+    # can use, and printing it truncated mid-word is worse than describing it.
+    # ERRANDSH_NAME is `${ERRANDSH_NAME:-$(hostname ... || echo errand)}`;
+    # what it evaluates to is in the skill table and the prompt is cut to 24
+    # characters of the first label.
+    case "$def" in
+        *'$('*) def='the hostname, or errand' ;;
+    esac
+    # ERRANDSH_PTY has no default expression at all: the automatic path is on
+    # unless the variable is 0, and the only place that is written is a comment
+    # and the test at the dispatch. Saying "(unset)" is true and useless, so the
+    # meaning is given instead.
+    [ "$var" = ERRANDSH_PTY ] && def='1 (the automatic path is on unless this is 0)'
     [ -n "$def" ] || def='(unset)'
     printf '| `%s` | `%s` |\n' "$var" "$def"
 done

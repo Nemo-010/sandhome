@@ -675,6 +675,7 @@ fi
 ts_body=$(sed -n '/^sh_toolset_names()/,/^}/p' "$ROOT/bootstrap.sh" 2>/dev/null)
 ts_bad=''
 pv_bad=''
+ehd_bad=''
 for ts_name in minimal cli developer languages agent; do
     # The names are stored as printf 'jq ripgrep fd\n', so the trailing \n is
     # a literal backslash-n inside the quoted string: it is a SEPARATOR, and
@@ -731,6 +732,38 @@ if grep -q 'clang' "$ts_body" 2>/dev/null; then
 else
     t_ok 0 'clang stays out of every toolset'
 fi
+# # STOP: THE GENERATED errandsh TABLE AND THE HAND-WRITTEN SKILL TABLE MUST
+# AGREE. The reference published `(unset)` for all five errandsh variables
+# because the generator's pattern needed an `=` straight after the name and the
+# file writes `: "${ERRANDSH_MAXHIST:=500}"`. skills/errandsh/SKILL.md carried
+# the same five with every default correct, so the tree held two tables that
+# disagreed - and the generated one is the one a reader trusts, because a
+# document that is regenerated reads as current by definition.
+#
+# The two tables are written independently and can drift apart again for any
+# future variable, so they are compared. The comparison is on the VALUE, which
+# is the part that was wrong; a differing description is a judgement call and
+# two descriptions of one variable are legitimate.
+for _ev in ERRANDSH_NAME ERRANDSH_HISTORY ERRANDSH_SHELL ERRANDSH_MAXHIST ERRANDSH_PTY; do
+    _er=$(grep -oE "^\| \`${_ev}\` \| \`[^\`]*\`" "$ROOT/docs/reference.md" 2>/dev/null |
+          sed 's/.*| `\([^`]*\)`/\1/')
+    case "$_er" in
+        ''|'(unset)') ehd_bad="$ehd_bad $_ev" ;;
+    esac
+done
+t_is "${ehd_bad:-}" '' 'every errandsh variable in the reference has its real default, not (unset)'
+
+# The three with a literal default must also agree with the code, read live.
+for _pair in 'ERRANDSH_MAXHIST:500' 'ERRANDSH_SHELL:/bin/sh' 'ERRANDSH_HISTORY:.errandsh-history'; do
+    _ev=${_pair%%:*}
+    _want=${_pair#*:}
+    grep -q "$_want" "$ROOT/docs/reference.md" 2>/dev/null ||
+        ehd_bad="$ehd_bad $_ev(want $_want)"
+    grep -q "$_want" "$ROOT/shell/errandsh" 2>/dev/null ||
+        ehd_bad="$ehd_bad ${_ev}-not-in-code"
+done
+t_is "${ehd_bad:-}" '' 'the errandsh defaults in the reference match the code'
+
 # # STOP: THE ROUTER SAYS WHAT doctor CHECKS. `doctor` is the readiness gate
 # ROUTE.md step 2 tells a session to trust, and it used to check only the
 # toolchains that happened to be in this run's variables, which are empty in a
