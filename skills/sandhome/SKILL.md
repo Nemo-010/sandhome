@@ -83,11 +83,12 @@ installed without an error and does not answer is reported as a failure.
 | symptom | fix |
 | --- | --- |
 | `Permission denied` on a binary | the exec view was not built; `sandhome install <name>` |
-| `collect2: posix_spawnp: Permission denied` linking rust | split-root sysroot; `RUSTFLAGS` forces bfd, or `sandhome install zig` plus `sandhome install rust --target <triple>` |
-| `fork/exec ...: permission denied` after a successful `go build` | the build cache was on a noexec root; `sandhome install go` puts `GOCACHE` and `GOBIN` on the exec root |
+| `collect2: posix_spawnp: Permission denied` linking rust | the sysroot linker is on the noexec home and cannot be exec'd; no `-fuse-ld` value fixes it. `sandhome install --force rust` puts the toolchain on the exec root |
+| `fork/exec ...: permission denied` after a successful `go build` | the build cache was on a noexec root; `sandhome install go` puts `GOCACHE` and `GOBIN` on the exec root, for an adopted go too |
 | `npm i -g` CLI missing or `bad interpreter` | prefix was on the noexec home; `sandhome install node` moves it to the exec root |
 | ANSI codes inside `jq` or `git` output | `fakepty` is on; `SANDHOME_SHIMS=0` |
 | a tool is absent from a fresh shell | `$SANDHOME_HOME/env.sh` was not read |
+| a tool is absent even after `env.sh` was read | it was adopted and could not be linked into the exec view; `sandhome install --force <name>` |
 
 ## Add a toolchain
 

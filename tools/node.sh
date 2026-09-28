@@ -135,9 +135,17 @@ tc_node_install() {
 # than left to fail inside a later build.
 tc_node_env() {
     sh_ne_root=$(sh_toolchain_root node)
-    # An adopted system node has no sandhome root; its npm configuration is not
-    # ours to rewrite, and probing a view that was never built would warn about a
-    # tool that is present and working.
+    # # STOP: A NODE WHOSE npm DOES NOT RUN GETS ONE, HERE, BEFORE ANY FRAGMENT
+    # IS WRITTEN. This used to return 0 for an adopted node on the grounds that
+    # "an adopted system node has no sandhome root; its npm configuration is not
+    # ours to rewrite" - and the toolset then exited 0 with no working npm
+    # (issue #46). Not rewriting the HOST's npm is right and is still what
+    # happens: the repair puts a working npm on the exec view, which is ours.
+    # A node whose npm already answers takes the version probe only and fetches
+    # nothing, so a healthy host pays one command.
+    if ! npm --version >/dev/null 2>&1; then
+        tc_node_ensure_npm || sh_warn "npm does not run on this machine; run 'sandhome install --force node' for a node that ships one"
+    fi
     if [ ! -d "$sh_ne_root" ]; then
         return 0
     fi
@@ -169,13 +177,150 @@ esac
 export PATH
 EOF
     sh_ne_frag=$?
-    if ! "$sh_ne_view/bin/node" --version >/dev/null 2>&1; then
+    # # STOP: THE VIEW IS ONLY WARNED ABOUT WHEN A VIEW WAS ACTUALLY BUILT. An
+    # adopted node has no toolchain root, so no exec view was made for it, and
+    # this check ran anyway and named a directory that does not exist:
+    #   the promoted node at /tmp/views/node/bin/node does not run
+    # while `node --version` answered v26.8.1 from the exec bin the whole time.
+    # A warning about a path that was never made is a false alarm about the
+    # machine, and a consumer who reads it has been told to go fix something that
+    # is not broken. The file's own rule is that a probe is a question about the
+    # world, not about what we made; the directory has to exist first.
+    if [ -x "$sh_ne_view/bin/node" ] && ! "$sh_ne_view/bin/node" --version >/dev/null 2>&1; then
         sh_warn "the promoted node at $sh_ne_view/bin/node does not run; node needs an exec-capable home or a larger exec root"
     fi
     if ! tc_node_behavioural >/dev/null 2>&1; then
         sh_warn "node installed without an error and still does not run a script from the exec view (home $SH_HOME is noexec)"
     fi
     return "$sh_ne_frag"
+}
+
+# tc_node_ensure_npm -> 0 when `npm` runs, fetching and shimming a real one
+# when it does not.
+#
+# # STOP: AN ADOPTED NODE WITH A BROKEN npm GETS A WORKING ONE, NOT AN EXCUSE.
+# The old behaviour checked npm only when a toolchain root existed, which is
+# precisely the adopted case, and excused a borrowed node on the grounds that a
+# broken host npm is "the host's defect, not this toolchain's". The result was
+# `--toolset developer` exiting 0 and reporting a working node while
+# `npm --version` died with MODULE_NOT_FOUND and `npx` was not on PATH at all
+# (issue #46). Whose defect it is does not change what the consumer got. The
+# ask was a developer toolset where npm works, and a warning is not a tool.
+tc_node_npm_url() {
+    # # STOP: THE npm VERSION IS NOT THE NODE VERSION, AND THE REGISTRY ANSWER
+    # IS ONE LINE. Two mistakes this replaces, both measured. Asking for
+    # npm-<node version>.tgz, which the first draft did, is a 404: node v26.8.1
+    # and npm 11.x have independent version lines, so the URL built was
+    # https://registry.npmjs.org/npm/-/npm-26.8.1.tgz -> HTTP 404. And /latest
+    # is a single line of JSON, so taking its first line yields the whole
+    # document and a match for a tarball name never finds one.
+    #
+    # The version is read out of the document by key, and the tarball URL is
+    # built from npm's documented layout rather than guessed from a field.
+    sh_nu_tmp=$SH_HOME_TMP/npm-latest.$$
+    sh_fetch 'https://registry.npmjs.org/npm/latest' "$sh_nu_tmp" || {
+        rm -f "$sh_nu_tmp" 2>/dev/null
+        return 1
+    }
+    sh_nu_ver=''
+    # # STOP: THE FIRST "version" IN THE DOCUMENT IS NOT THE PACKAGE'S. The
+    # npm manifest carries nested objects that have their own version key -
+    # `"tap":{"nyc":{...,"version":"5.1.1"...}}` - and taking the first match
+    # resolved npm 5.1.1, whose tarball is a 404, on a registry whose current npm
+    # is 12.1.0. The top-level version is the one that ends the document in this
+    # layout, but relying on that is fragile, so the name is checked as well: a
+    # match is only accepted when the document says it is the npm manifest.
+    sh_nu_is_npm=no
+    case "$(cat "$sh_nu_tmp")" in
+        *'"name":"npm"'*) sh_nu_is_npm=yes ;;
+    esac
+    if [ "$sh_nu_is_npm" = yes ]; then
+        # The last "version" in a flat npm manifest is the package's own; the
+        # nested ones belong to objects that come earlier.
+        for sh_nu_line in $(tr ',' '\n' < "$sh_nu_tmp" | grep '"version"'); do
+            sh_nu_rest=${sh_nu_line#*'"version"'}
+            sh_nu_rest=${sh_nu_rest#*:}
+            sh_nu_rest=${sh_nu_rest#*\"}
+            sh_nu_ver=${sh_nu_rest%%\"*}
+        done
+    fi
+    rm -f "$sh_nu_tmp" 2>/dev/null
+    case "$sh_nu_ver" in
+        [0-9]*.[0-9]*)
+            printf 'https://registry.npmjs.org/npm/-/npm-%s.tgz' "$sh_nu_ver"
+            return 0 ;;
+    esac
+    return 1
+}
+
+tc_node_ensure_npm() {
+    sh_have npm && npm --version >/dev/null 2>&1 && return 0
+
+    sh_en_root=$(sh_toolchain_root node)
+    sh_en_lib=$(sh_toolchain_adopted_root node)
+    if [ -n "$sh_en_lib" ]; then
+        for sh_en_c in "$sh_en_lib/npm/lib/node_modules/npm" "$sh_en_lib/npm"; do
+            [ -r "$sh_en_c/bin/npm-cli.js" ] && { sh_en_lib=$sh_en_c; break; }
+        done
+    fi
+    if [ -z "$sh_en_lib" ] || [ ! -r "$sh_en_lib/bin/npm-cli.js" ]; then
+        sh_en_url=$(tc_node_npm_url) || {
+            sh_warn "could not resolve an npm for node $(node --version 2>/dev/null); npm and npx are unavailable"
+            return 1
+        }
+        sh_space_need 20 home || return 1
+        rm -rf "$sh_en_root/npm" 2>/dev/null
+        mkdir -p "$sh_en_root/npm" 2>/dev/null || return 1
+        if ! sh_fetch_unpack "$sh_en_url" "$sh_en_root/npm"; then
+            sh_warn "could not fetch or unpack $sh_en_url"
+            rm -rf "$sh_en_root/npm" 2>/dev/null
+            return 1
+        fi
+        # A registry tarball unpacks as package/.
+        if [ -d "$sh_en_root/npm/package" ] && [ ! -d "$sh_en_root/npm/package/lib" ]; then
+            for sh_en_f in "$sh_en_root/npm/package"/* "$sh_en_root/npm/package"/.[!.]*; do
+                [ -e "$sh_en_f" ] || continue
+                mv "$sh_en_f" "$sh_en_root/npm/" 2>/dev/null || true
+            done
+            rmdir "$sh_en_root/npm/package" 2>/dev/null || true
+        fi
+        for sh_en_c in "$sh_en_root/npm/lib/node_modules/npm" "$sh_en_root/npm"; do
+            if [ -r "$sh_en_c/bin/npm-cli.js" ]; then
+                sh_en_lib=$sh_en_c
+                break
+            fi
+        done
+    fi
+    if [ -z "$sh_en_lib" ] || [ ! -r "$sh_en_lib/bin/npm-cli.js" ]; then
+        sh_warn 'the npm that was fetched has no bin/npm-cli.js'
+        return 1
+    fi
+
+    # Shims on the exec view. The node beside this npm is not ours to rewrite,
+    # and a `#!/usr/bin/env node` script does not run from a noexec root, so the
+    # shims live where they can be exec'd.
+    mkdir -p "$SH_EXEC_BIN" 2>/dev/null || true
+    sh_en_saved=$PATH
+    PATH="$SH_EXEC_BIN:$PATH"
+    export PATH
+    for sh_en_name in npm npx; do
+        sh_en_cli="$sh_en_lib/bin/${sh_en_name}-cli.js"
+        [ -r "$sh_en_cli" ] || continue
+        printf '#!/bin/sh\n# written by sandhome: the npm beside this node does not run here\nexec node %s "$@"\n' \
+            "$sh_en_cli" > "$SH_EXEC_BIN/$sh_en_name" 2>/dev/null || continue
+        chmod 0755 "$SH_EXEC_BIN/$sh_en_name" 2>/dev/null || true
+    done
+    # Report what is true: the shim runs, or it does not.
+    if npm --version >/dev/null 2>&1; then
+        PATH=$sh_en_saved
+        export PATH
+        sh_step "provided a working npm $(npm --version 2>/dev/null) for node $(node --version 2>/dev/null)"
+        return 0
+    fi
+    PATH=$sh_en_saved
+    export PATH
+    sh_warn 'the npm that was fetched does not run on this machine'
+    return 1
 }
 
 tc_node_behavioural() {
@@ -185,14 +330,25 @@ tc_node_behavioural() {
         rm -rf "$sh_nb_tmp" 2>/dev/null
         return 1
     fi
-    # npm must work when node was installed here (the prefix lives on the exec
-    # view); an adopted host node with a broken host npm is the host's defect,
-    # not this toolchain's, so node running is enough there.
-    if [ -d "$(sh_toolchain_root node)" ]; then
-        if ! npm --version >/dev/null 2>&1; then
-            rm -rf "$sh_nb_tmp" 2>/dev/null
-            return 1
-        fi
+    # # STOP: npm IS PART OF THE PROBE FOR AN ADOPTED NODE TOO. The old probe
+    # checked npm only when a toolchain root existed, which is precisely the
+    # adopted case, and excused a borrowed node on the grounds that a broken
+    # host npm is "the host's defect, not this toolchain's". The result was
+    # `--toolset developer` exiting 0 and reporting a working node while
+    # `npm --version` died with MODULE_NOT_FOUND and `npx` was not on PATH at
+    # all (issue #46). Whether the base image is broken is a fact about the base
+    # image; what the consumer asked for is a toolset where npm works.
+    #
+    # THIS IS A PROBE AND IT HAS NO SIDE EFFECTS. It answers "does node with its
+    # npm work here", and it is what the post-promote check in
+    # sh_toolchain_install_one reads. Repairing is tc_node_ensure_npm's job and
+    # it runs from tc_node_env, so a probe that fails says so instead of
+    # quietly fetching something. A probe with side effects also cannot be
+    # asserted on: tests/toolchain.sh calls this directly and a probe that tries
+    # to fix what it finds is a probe whose result depends on the network.
+    if ! npm --version >/dev/null 2>&1; then
+        rm -rf "$sh_nb_tmp" 2>/dev/null
+        return 1
     fi
     rm -rf "$sh_nb_tmp" 2>/dev/null
     return 0

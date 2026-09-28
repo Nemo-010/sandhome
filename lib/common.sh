@@ -40,6 +40,51 @@ sh_skip() {
 # here and would not be inside somebody's interactive shell.
 sh_have() { command -v "$1" >/dev/null 2>&1; }
 
+# # sh_path_where NAME -> the absolute path NAME resolves to, with the exec
+# view REMOVED from the answer, or nothing.
+#
+# WHY IT EXISTS, IN ONE MEASUREMENT. Once env.sh has been read, $SH_EXEC_BIN is
+# the first PATH entry, and the exec view holds symlinks this tree created. A
+# `command -v` for a tool that was adopted therefore answers with the exec-view
+# symlink rather than with the real binary underneath it, and any code that then
+# links "wherever the tool is" onto the exec view writes the symlink over
+# itself:
+#   $ . env.sh; sandhome install jq; readlink /dev/shm/bin/jq
+#   /dev/shm/bin/jq
+#   $ /dev/shm/bin/jq --version
+#   Too many levels of symbolic links        (exit 126)
+# 8 runs of the documented recovery left jq, rg or fd broken in 8 of them.
+#
+# The answer wanted is "the tool that was really there", so the exec view is not
+# consulted at all. The search walks PATH by hand rather than filtering
+# `command -v`, because there is no way to say "the second answer" in POSIX sh
+# and because a symlink in the view may dangle or be a self-link.
+sh_path_where() {
+    sh_pw_name=$1
+    [ -n "$sh_pw_name" ] || return 0
+    case "$sh_pw_name" in
+        */*) [ -x "$sh_pw_name" ] && printf '%s' "$sh_pw_name"; return 0 ;;
+    esac
+    sh_pw_rest=${PATH:-}
+    while [ -n "$sh_pw_rest" ]; do
+        case "$sh_pw_rest" in
+            *:*) sh_pw_dir=${sh_pw_rest%%:*}; sh_pw_rest=${sh_pw_rest#*:} ;;
+            *)   sh_pw_dir=$sh_pw_rest; sh_pw_rest='' ;;
+        esac
+        [ -n "$sh_pw_dir" ] || continue
+        # The exec view is this tree's own artefact, never a working copy.
+        if [ -n "${SH_EXEC_BIN:-}" ]; then
+            case "$sh_pw_dir" in
+                "$SH_EXEC_BIN") continue ;;
+            esac
+        fi
+        if [ -x "$sh_pw_dir/$sh_pw_name" ] && [ ! -d "$sh_pw_dir/$sh_pw_name" ]; then
+            printf '%s' "$sh_pw_dir/$sh_pw_name"
+            return 0
+        fi
+    done
+}
+
 # sh_first_line COMMAND... -> the command's first line, or nothing. `head -1`
 # without head, which Photon and openSUSE minimal images do not always carry.
 # STOP: `read` RETURNS NON-ZERO AT EOF WITHOUT A NEWLINE and still sets the variable;

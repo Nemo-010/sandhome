@@ -133,6 +133,15 @@ this machine actually needs, writes `env.sh`, and prints a report read from
 the machine. The third command exits 0 only when every invariant holds.
 The fourth names what is here and how each tool reaches PATH.
 
+**`exec_free_mb` is a decision, not trivia.** The exec root is where every
+build artifact has to land, because the home often refuses `execve`. A few
+hundred megabytes is a hello-world; a multi-target Rust or Go build is not. The
+run picks the *roomiest* exec-capable path it finds and prints how much that
+was. If it is small, or if a build later fails with ENOSPC or "not writable or
+does not allow exec", re-run the first command with `--exec DIR` naming a roomy
+exec-capable path. `sandhome space --probe` lists every candidate with its free
+space.
+
 Toolsets: `minimal` (jq), `cli` (plus ripgrep and fd), `developer` (plus
 python and node, the default), `languages` and `agent` (both plus rust and
 go). Add one with `--with rust`, drop one with `--without node`. Both flags
@@ -185,6 +194,9 @@ More than one row can apply and then both are read.
 | an ssh login is refused, a program needs a passwd entry or a terminal, bind is denied, there is no pty | `skills/sealed-sandbox/SKILL.md` |
 | a local dev server, `npm run dev`, or any process that listens | nothing can listen here; see `skills/sealed-sandbox/SKILL.md` no-listen row: dial out to a relay or emit static output |
 | the exec root is full | `docs/guide.md` section 7, which carries the `gc` row |
+| `doctor` reports `FAIL exec_link_<tool>=broken` | a link in the exec view is not executable, or points at itself; `sandhome install <tool>` rebuilds it. A tool that was adopted rather than installed is the usual cause |
+| a tool is on PATH but a shell that inherited nothing cannot find it | it was adopted and could not be linked into the exec view; `sandhome install --force <tool>` puts a copy there |
+| `doctor` reports a `FAIL <VAR>=unset` for `GOBIN`, `GOCACHE`, `CARGO_INSTALL_ROOT` or `NPM_CONFIG_PREFIX` | that toolchain was adopted, so its fragment did not carry the exec-root paths; `sandhome install --force <tool>` writes a fragment that does |
 | the exec root was cleared by a restart (tmpfs) and `sandhome` is gone | re-run step 2, then `sandhome install <name>` to rebuild the exec view |
 | the exact spelling of a flag, a variable or a command | `docs/reference.md` and nothing else; without a clone use `sandhome help` and `sandhome <cmd> --help` |
 | change this repository: a lib file, a toolchain, a shim, the line discipline | `AGENTS.md`, which is the maintainer router |

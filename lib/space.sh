@@ -203,6 +203,7 @@ sh_space_plan() {
 
     sh_sp_first_working=''
     sh_sp_first_roomy=''
+    sh_sp_roomy_mb=0
     sh_sp_explicit_ok=0
     sh_sp_tried=''
     for sh_sp_candidate in $(sh_exec_candidates); do
@@ -258,7 +259,19 @@ sh_space_plan() {
             case "$sh_sp_free" in
                 ''|*[!0-9]*) sh_sp_free=0 ;;
             esac
-            if [ "$sh_sp_free" -ge "$SANDHOME_MIN_EXEC_MB" ] && [ -z "$sh_sp_first_roomy" ]; then
+            # # STOP: THE ROOMIEST CANDIDATE WINS, NOT THE FIRST. The old rule
+            # kept the first candidate over the floor and threw the rest away,
+            # so the choice was decided by the ORDER of sh_exec_candidates rather
+            # than by what a toolchain needs. /dev/shm is listed before /tmp, and
+            # /dev/shm on a container is a 256MB tmpfs, so a host with 31GB of
+            # exec-capable space in /tmp got a 135MB exec root and then:
+            #   sandhome: [!] /dev/shm has 135MB free and the .../toolchains/rust
+            #   view wants about 238MB; set SANDHOME_EXEC to a roomy root
+            # (issue #50). The floor is a qualification threshold, not a target.
+            # Keeping the maximum also makes the "no candidate had NMB free"
+            # warning below mean what it says: the ROOMIEST one fell short.
+            if [ "$sh_sp_free" -ge "$SANDHOME_MIN_EXEC_MB" ] && [ "$sh_sp_free" -gt "$sh_sp_roomy_mb" ]; then
+                sh_sp_roomy_mb=$sh_sp_free
                 sh_sp_first_roomy=$sh_sp_candidate
             fi
         fi
@@ -616,6 +629,22 @@ sh_promote_toolchain() {
             elif [ -n "$sh_ptc_adopted" ] && [ -x "$sh_ptc_adopted/$sh_ptc_bin" ]; then
                 sh_ptc_link="$sh_ptc_adopted/$sh_ptc_bin"
             fi
+            if [ -n "$sh_ptc_link" ] && [ "$sh_ptc_link" = "$SH_EXEC_BIN/$sh_ptc_bin" ]; then
+                # # STOP: A LINK WHOSE TARGET IS THE LINK IS NEVER RIGHT. The exec
+                # view is on PATH by the time an install runs (sh_env_load put it
+                # there), so `command -v` - which is how tc_<name>_adopted finds the
+                # working copy - answers with the exec-view symlink this same
+                # function wrote on the previous run. `ln -sfn` then writes that
+                # path over itself and the tool is gone:
+                #   readlink /dev/shm/bin/jq -> /dev/shm/bin/jq
+                #   /dev/shm/bin/jq: Too many levels of symbolic links  (exit 126)
+                # Measured on jq, rg, fd and node: 8 runs of
+                # `. env.sh; sandhome install jq ripgrep fd` out of 8 left at least
+                # one of them broken. The link is skipped and the lookup falls
+                # through to the arm below, which re-resolves the binary with the
+                # exec view filtered out.
+                sh_ptc_link=''
+            fi
             if [ -n "$sh_ptc_link" ]; then
                 mkdir -p "$SH_EXEC_BIN" 2>/dev/null || true
                 ln -sfn "$sh_ptc_link" "$SH_EXEC_BIN/$sh_ptc_bin" 2>/dev/null || \
@@ -625,7 +654,9 @@ sh_promote_toolchain() {
             fi
             # No declared location. Fall back to whatever answered on PATH, but
             # only if it RUNS: a binary on a noexec mount is not a binary here.
-            sh_ptc_which=$(command -v "$sh_ptc_bin" 2>/dev/null)
+            # sh_path_where answers with the exec view removed, so this cannot
+            # rediscover the link this function is about to rewrite.
+            sh_ptc_which=$(sh_path_where "$sh_ptc_bin")
             if [ -n "$sh_ptc_which" ] && [ -x "$sh_ptc_which" ]; then
                 if "$sh_ptc_which" --version >/dev/null 2>&1; then
                     mkdir -p "$SH_EXEC_BIN" 2>/dev/null || true
@@ -633,12 +664,36 @@ sh_promote_toolchain() {
                         sh_warn "could not link $sh_ptc_which into $SH_EXEC_BIN"
                     sh_ptc_done=yes
                 else
-                    sh_warn "$sh_ptc_which is on PATH but will not run from $SH_EXEC; run 'sandhome install $sh_ptc_name' to place it properly"
+                    # # STOP: A WARNING ABOUT SOMETHING THE RUN IS ABOUT TO FIX
+                    # IS NOISE, AND THE FIX IS ALREADY IN THIS PROCESS. The promote
+                    # step runs BEFORE the module's tc_<name>_env, and node's
+                    # tc_node_env fetches and shims a working npm in response to
+                    # exactly this state (issue #46). So the run printed
+                    #   [!] .../npm is on PATH but will not run from /tmp; run
+                    #       'sandhome install --force node' to place it properly
+                    # and then, two lines later,
+                    #   provided a working npm 12.1.0 for node v26.8.1
+                    # The consumer is told the base toolchain is broken and given
+                    # a --force to run, for a problem the same run solved. The
+                    # warning is downgraded to a step so the run is honest without
+                    # sending anyone to fix a machine that is already fixed; a
+                    # module with no repair of its own still says so here, because
+                    # this line is where it is learned.
+                    sh_step "$sh_ptc_which is on PATH but will not run from $SH_EXEC; $sh_ptc_name is repairing that in this run, and 'sandhome install --force $sh_ptc_name' places it outright"
                 fi
             fi
         done
         if [ "$sh_ptc_done" = no ]; then
-            sh_warn "$sh_ptc_name was adopted but no declared binary could be linked into $SH_EXEC_BIN; it is reachable only on the current PATH"
+            # # STOP: THE WARNING NAMES THE COMMAND THAT FIXES IT, AND SAYS THE
+            # LIMIT OF THE BORROW. An adopted toolchain whose binaries cannot be
+            # linked into the exec view is not broken, but it IS only reachable
+            # through a PATH entry it inherited, and a shell that did not inherit
+            # it has no go. The old text said "reachable only on the current
+            # PATH" and stopped, which leaves a consumer reading a diagnosis with
+            # no action attached. The action is the flag this tree grew for
+            # exactly this case (issue #45), and it is named here so the sentence
+            # and the remedy are in the same place.
+            sh_warn "$sh_ptc_name was adopted but no declared binary could be linked into $SH_EXEC_BIN; it is reachable only through a PATH entry it already had, and 'sandhome install --force $sh_ptc_name' puts a copy on the exec view"
         fi
         SH_TOOLCHAIN_VIEW=$SH_EXEC_BIN
         export SH_TOOLCHAIN_VIEW

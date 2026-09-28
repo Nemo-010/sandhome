@@ -340,4 +340,131 @@ case "$gc_dry" in
     *) t_ok 0 'gc dry-run counts entries (#33)' ;;
 esac
 
+# --- class H: the exec root is the ROOMIEST candidate, not the first ---------
+# # STOP: A CLAUSE THAT MEASURES THE REAL HOST PROVES NOTHING ABOUT THE RULE.
+# /dev/shm and /tmp differ per machine, so the choice is proved by stubbing
+# sh_free_mb - which is what the planner reads - and asking which path comes
+# back. The failure pinned here is #50: the old rule kept the FIRST candidate
+# over the floor, so the order of sh_exec_candidates decided the answer, a host
+# with 31GB in /tmp was given a 135MB /dev/shm, and the rust install then failed
+# with "set SANDHOME_EXEC to a roomy root".
+tmp=$tmp/roomy
+mkdir -p "$tmp/roomy-a" "$tmp/roomy-b" 2>/dev/null
+cat > "$tmp/pick.sh" <<'PICK'
+set -u
+. "$1/lib/common.sh"
+. "$1/lib/space.sh"
+# # STOP: THE STUBS GO IN AFTER THE LIBRARY IS SOURCED, NOT BEFORE. Defining
+# sh_free_mb or sh_dir_writable ahead of the source is silently undone by the
+# definitions in the file itself, and a test that stubs the wrong function
+# measures the real one instead of the rule. These override the three inputs
+# sh_space_plan reads, so what is left under test is the SELECTION.
+sh_free_mb() {
+    case "$1" in
+        */roomy-a) printf '%s' "$SH_TEST_FREE_A" ;;
+        */roomy-b) printf '%s' "$SH_TEST_FREE_B" ;;
+        *)         printf 0 ;;
+    esac
+}
+sh_dir_writable() { [ -d "$1" ]; }
+sh_exec_probe()  { [ -d "$1" ]; }
+# Only the two fixture candidates are in play, in this order: a first.
+# # STOP: THE STUBS TAKE NO POSITIONAL ARGUMENTS. sh_space_plan calls the
+# directory helpers with none, so a stub that reads "$1" aborts under set -u and
+# the candidate list comes back empty - which looks exactly like a planner that
+# found nothing. The paths come in through the environment instead.
+sh_exec_candidates() { printf '%s %s' "$SH_TEST_A" "$SH_TEST_B"; }
+sh_home_default()    { printf '%s' "$SH_TEST_A"; }
+# An inherited SANDHOME_EXEC is an EXPLICIT choice by the caller and the planner
+# honours it over anything it would pick, so it has to be out of the way before
+# the question "which candidate" means anything.
+SANDHOME_EXEC=''
+export SANDHOME_EXEC
+sh_space_plan --no-create
+printf '%s' "$SH_EXEC"
+PICK
+roomy_pick=$(SH_TEST_A="$tmp/roomy-a" SH_TEST_B="$tmp/roomy-b" \
+    SH_TEST_FREE_A=200 SH_TEST_FREE_B=9000 SANDHOME_MIN_EXEC_MB=128 \
+    sh "$tmp/pick.sh" "$ROOT" 2>/dev/null)
+case "$roomy_pick" in
+    *roomy-b*) t_ok 0 'the roomiest candidate is chosen, not the first over the floor (#50)' ;;
+    *)         t_ok 1 "the roomiest candidate is chosen, not the first over the floor (#50) (got $roomy_pick)" ;;
+esac
+# A candidate over the floor is still used when it is the only one that
+# qualifies: a small exec root that works beats a large one that does not.
+roomy_floor=$(SH_TEST_A="$tmp/roomy-a" SH_TEST_B="$tmp/roomy-b" \
+    SH_TEST_FREE_A=200 SH_TEST_FREE_B=10 SANDHOME_MIN_EXEC_MB=128 \
+    sh "$tmp/pick.sh" "$ROOT" 2>/dev/null)
+case "$roomy_floor" in
+    *roomy-a*) t_ok 0 'a candidate over the floor is still used when it is the only one (#50)' ;;
+    *)         t_ok 1 "a candidate over the floor is still used when it is the only one (#50) (got $roomy_floor)" ;;
+esac
+# Neither qualifies: the first working one is used anyway, with a warning. This
+# is the "a small root that works beats a large one that does not" rule and it
+# must survive the change.
+roomy_none=$(SH_TEST_A="$tmp/roomy-a" SH_TEST_B="$tmp/roomy-b" \
+    SH_TEST_FREE_A=10 SH_TEST_FREE_B=5 SANDHOME_MIN_EXEC_MB=128 \
+    sh "$tmp/pick.sh" "$ROOT" 2>/dev/null)
+case "$roomy_none" in
+    *roomy-a*) t_ok 0 'with no candidate over the floor the first working one is used (#50)' ;;
+    *)         t_ok 1 "with no candidate over the floor the first working one is used (#50) (got $roomy_none)" ;;
+esac
+
+# --- class H: sh_path_where resolves a tool PAST the exec view ---------------
+# # STOP: ASSERTED AGAINST A PATH THIS TEST CONTROLS, NOT AGAINST /dev/shm. The
+# defect (#43) is that `command -v` for an adopted tool answers with the
+# exec-view symlink the tree itself wrote, so the promote step links the view
+# onto itself and the tool is gone with exit 126. A clause that only failed on a
+# host whose view happened to be ahead of PATH would not have caught it.
+pw=$(cat > "$tmp/where.sh" <<'WHERE'
+set -u
+. "$1/lib/common.sh"
+mkdir -p "$2/view" "$2/real" 2>/dev/null
+printf '#!/bin/sh\n' > "$2/real/tool" 2>/dev/null
+chmod 0755 "$2/real/tool" 2>/dev/null
+ln -sfn "$2/real/tool" "$2/view/tool" 2>/dev/null
+SH_EXEC_BIN="$2/view"
+PATH="$2/view:$2/real"
+export SH_EXEC_BIN PATH
+sh_path_where tool
+WHERE
+sh "$tmp/where.sh" "$ROOT" "$tmp/pw" 2>/dev/null)
+case "$pw" in
+    */real/tool) t_ok 0 'sh_path_where resolves a tool past the exec view (#43)' ;;
+    *)           t_ok 1 "sh_path_where resolves a tool past the exec view (#43) (got $pw)" ;;
+esac
+# And the control that matters: it must NOT answer with a view-only link, or
+# the promote step would go looking for something that is not there. This is the
+# other half of a guard, and a guard that only refuses is indistinguishable
+# from a good one until it is shown accepting a correct input.
+pw2=$(cat > "$tmp/where2.sh" <<'WHERE2'
+set -u
+. "$1/lib/common.sh"
+mkdir -p "$2/view" 2>/dev/null
+printf '#!/bin/sh\n' > "$2/view/onlyview" 2>/dev/null
+chmod 0755 "$2/view/onlyview" 2>/dev/null
+SH_EXEC_BIN="$2/view"
+PATH="$2/view"
+export SH_EXEC_BIN PATH
+r=$(sh_path_where onlyview)
+[ -n "$r" ] && printf 'found' || printf 'notfound'
+WHERE2
+sh "$tmp/where2.sh" "$ROOT" "$tmp/pw2" 2>/dev/null)
+t_is "$pw2" 'notfound' 'sh_path_where does not answer with a view-only link (#43)'
+# A tool on neither is reported as absent, not as an empty string that a caller
+# mistakes for a path.
+pw3=$(cat > "$tmp/where3.sh" <<'WHERE3'
+set -u
+. "$1/lib/common.sh"
+mkdir -p "$2/empty" 2>/dev/null
+SH_EXEC_BIN="$2/view"
+PATH="$2/empty"
+export SH_EXEC_BIN PATH
+r=$(sh_path_where nosuchtool)
+[ -n "$r" ] && printf 'found' || printf 'absent'
+WHERE3
+sh "$tmp/where3.sh" "$ROOT" "$tmp/pw3" 2>/dev/null)
+t_is "$(sh "$tmp/where3.sh" "$ROOT" "$tmp/pw3" 2>/dev/null)" 'absent' \
+    'sh_path_where reports a tool that is nowhere as absent (#43)'
+
 t_end

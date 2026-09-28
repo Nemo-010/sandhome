@@ -150,11 +150,54 @@ tc_go_install() {
 tc_go_env() {
     sh_ge_view=$(sh_toolchain_view go)
     sh_ge_root="$sh_ge_view/go"
-    # An adopted system go has no sandhome root. Pointing GOROOT at a tree that
-    # was never installed would break a toolchain that works, so its own
-    # environment is left alone.
-    if [ ! -x "$(sh_toolchain_root go)/go/bin/go" ]; then
-        return 0
+    sh_ge_home=$(sh_toolchain_root go)
+    # # STOP: THE EXEC-ROOT VARIABLES ARE WRITTEN FOR AN ADOPTED GO TOO, AND THIS
+    # IS THE FIX FOR #45. The fragment used to return early whenever there was no
+    # sandhome toolchain root, which is exactly the adopted case, so the four
+    # variables ROUTE.md step 4 promises were silently absent:
+    #   $ . env.sh; go env GOBIN
+    #   /state/home/go/bin        <- the noexec home, so `go install` writes a
+    #                                binary that cannot run and is not on PATH
+    #   $ echo "${CARGO_INSTALL_ROOT:-UNSET}"     (and here it is UNSET)
+    # GOROOT is the one variable that must NOT be set for an adopted go, because
+    # it would point at a tree that was never installed. So the split is: caches
+    # and output locations always point at the exec root, GOROOT only when the
+    # toolchain is ours.
+    sh_ge_own=no
+    [ -x "$sh_ge_home/go/bin/go" ] && sh_ge_own=yes
+    if [ "$sh_ge_own" = no ]; then
+        # Adopted: no GOROOT, and the PATH entry is the copy that answered.
+        sh_ge_adopted=$(sh_toolchain_adopted_root go)
+        sh_ge_bin=''
+        if [ -n "$sh_ge_adopted" ] && [ -x "$sh_ge_adopted/go" ]; then
+            sh_ge_bin="$sh_ge_adopted"
+        elif [ -n "$sh_ge_adopted" ] && [ -x "$sh_ge_adopted/bin/go" ]; then
+            sh_ge_bin="$sh_ge_adopted/bin"
+        else
+            sh_ge_adopted=$(sh_path_where go)
+            [ -n "$sh_ge_adopted" ] && sh_ge_bin=${sh_ge_adopted%/go}
+        fi
+        mkdir -p "$SH_EXEC/tmp" "$SH_EXEC/cache/go-build" "$SH_EXEC/go-bin" 2>/dev/null || true
+        sh_env_write_fragment go <<EOF
+: "\${SANDHOME_HOME:=$SH_HOME}"
+: "\${SANDHOME_EXEC:=$SH_EXEC}"
+export SANDHOME_HOME SANDHOME_EXEC
+GOPATH="\$SANDHOME_HOME/go"
+GOBIN="\$SANDHOME_EXEC/go-bin"
+GOCACHE="\$SANDHOME_EXEC/cache/go-build"
+GOTMPDIR="\$SANDHOME_EXEC/tmp"
+export GOPATH GOBIN GOCACHE GOTMPDIR
+case ":\$PATH:" in
+  *":\$SANDHOME_EXEC/go-bin:"*) ;;
+  *) PATH="\$SANDHOME_EXEC/go-bin:\$PATH" ;;
+esac
+case ":\$PATH:" in
+  *":$sh_ge_bin:"*) ;;
+  *) PATH="$sh_ge_bin:\$PATH" ;;
+esac
+export PATH
+EOF
+        return $?
     fi
     mkdir -p "$SH_EXEC/tmp" "$SH_EXEC/cache/go-build" "$SH_EXEC/go-bin" 2>/dev/null || true
     # # STOP: THE FRAGMENT DEFAULTS BEFORE IT DEREFERENCES, SO IT CANNOT ABORT

@@ -203,11 +203,12 @@ pipes under every shell the host has.
 | symptom | first thing to read |
 | --- | --- |
 | a tool "installed" and is not found | `sandhome space --probe`; the toolchain may have landed on a root that does not run it |
+| a tool is on PATH but a shell that inherited nothing cannot find it | it was adopted, not installed, and its binary could not be linked into the exec view; `sandhome install --force <name>` puts a copy there |
 | `Permission denied` running a binary | the home is noexec and the exec view was not built  -  rerun `sandhome install <name>`. It rebuilds the view and probes the tool afterwards, on the adopt path as well as the install path. |
 | `fork/exec ... permission denied` after a successful `go build` | the Go build cache landed on a noexec root; re-run the install so `GOCACHE` is written to `SANDHOME_EXEC` |
 | `go install` binary neither runs nor is on PATH | `GOBIN` now points at `$SANDHOME_EXEC/go-bin` and is on PATH; re-run `sandhome install go`, then `go install`. Build output in a noexec work tree still will not run: build under `$SANDHOME_EXEC` |
 | `npm i -g` CLI not found or `bad interpreter` | the prefix now lives on `$SANDHOME_EXEC/npm-global` with `bin` on PATH; re-run `sandhome install node`. Project-local `.bin` on a noexec checkout has the same cause: run the project from `$SANDHOME_EXEC` |
-| `collect2: posix_spawnp: Permission denied` linking rust | the sysroot linker is on the noexec home; `RUSTFLAGS` forces bfd (see the rust fragment), or `sandhome install zig` plus `sandhome install rust --target <triple>` for a zig-cc wrapper |
+| `collect2: posix_spawnp: Permission denied` linking rust | the sysroot linker is on the noexec home, so it cannot be exec'd at all. A `-fuse-ld=` flag does not fix it: rustc appends its own `-fuse-ld=lld` and `-B<sysroot>` after any `-C link-arg`, so the last one wins. `sandhome install --force rust` puts the toolchain on the exec root, where a plain `rustc -O hello.rs -o out` links and runs with no `RUSTFLAGS` |
 | the working tree itself is noexec | `sandhome doctor` prints a note naming `$SANDHOME_EXEC`; build and run output there, not in the checkout |
 | no echo / no line editing over ssh | the shims are not loaded; `SANDHOME_SHIMS=1` and restart the shell |
 | an ssh login is refused with `publickey` | the login name is absent from the synthetic passwd; set `SANDHOME_PASSWD_USERS` |

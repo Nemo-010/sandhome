@@ -173,6 +173,57 @@ sh_doctor() {
                 "$([ -n "$sh_doctor_version" ] && printf yes || printf no)" yes
         done
     fi
+    # # STOP: EVERY BINARY THE REPORT ADVERTISES MUST BE THERE AND MUST RUN.
+    # `doctor` is the readiness gate ROUTE.md step 2 tells a session to trust
+    # ("when the check at the end of this step exits 0, the sandbox is ready:
+    # do the task"), and it was answering that question about the two roots and
+    # the shims only. On a host where the toolset was adopted it exited 0 while
+    # GOBIN, GOCACHE, CARGO_INSTALL_ROOT and NPM_CONFIG_PREFIX were unset and
+    # `go install` produced a binary that neither ran nor reached PATH, and it
+    # stayed green while jq, rg and fd were self-symlinks in the exec view and
+    # every one of them exited 126 (issues #43, #45, #47).
+    #
+    # The two loops below close both gaps. The first is the exec view: a link
+    # that does not resolve, or resolves to itself, is a tool that is not there
+    # however green the root checks are. The second is the env file: a variable
+    # ROUTE.md step 4 says "already point[s] there" and does not is a promise
+    # the consumer is told to rely on.
+    if [ -d "$SH_EXEC_BIN" ]; then
+        for sh_doc_link in "$SH_EXEC_BIN"/*; do
+            [ -e "$sh_doc_link" ] || [ -L "$sh_doc_link" ] || continue
+            sh_doc_name=${sh_doc_link##*/}
+            sh_doc_real=$(sh_dirname "$sh_doc_link")
+            sh_doc_target=$(readlink "$sh_doc_link" 2>/dev/null || printf '')
+            # A symlink whose target is its own path is the defect in #43 and it
+            # is invisible to [ -e ] on a shell that follows the link silently.
+            if [ -n "$sh_doc_target" ] && [ "$sh_doc_target" = "$sh_doc_link" ]; then
+                printf 'FAIL exec_link_%s=broken (links to itself)\n' "$sh_doc_name"
+                sh_doc_fail=$((sh_doc_fail + 1))
+                continue
+            fi
+            if [ ! -x "$sh_doc_link" ]; then
+                printf 'FAIL exec_link_%s=broken (not executable)\n' "$sh_doc_name"
+                sh_doc_fail=$((sh_doc_fail + 1))
+            fi
+        done
+    fi
+    for sh_doc_var in GOBIN GOCACHE CARGO_INSTALL_ROOT NPM_CONFIG_PREFIX; do
+        sh_doc_want_exec=''
+        case " $(sh_lead "$ADOPTED") $(sh_lead "$INSTALLED") " in
+            *" go "*)      sh_doc_want_exec=yes ;;
+            *" rust "*)    sh_doc_want_exec=yes ;;
+            *" node "*)    sh_doc_want_exec=yes ;;
+        esac
+        [ -n "$sh_doc_want_exec" ] || continue
+        sh_doc_got=$(eval "printf '%s' \"\${$sh_doc_var:-}\"")
+        case "$sh_doc_got" in
+            "$SH_EXEC"/*) : ;;
+            *)
+                printf 'FAIL %s=unset (expected under %s; run sandhome install --force <name>)\n' \
+                    "$sh_doc_var" "$SH_EXEC"
+                sh_doc_fail=$((sh_doc_fail + 1)) ;;
+        esac
+    done
     printf 'doctor_failures=%s\n' "$sh_doc_fail"
     unset -f sh_doctor_check
     [ "$sh_doc_fail" -gt 0 ] && return 1

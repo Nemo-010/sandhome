@@ -233,7 +233,28 @@ sh_toolchain_install_one() {
     # working copy sat in the home.
     sh_env_load
 
-    if sh_toolchain_probe "$sh_te_name"; then
+    # # STOP: `--force` SKIPS THE PROBE, AND EXISTS BECAUSE THE TOOL PRINTS THE
+    # COMMAND THAT NEEDS IT. The promote step warns, for an adopted toolchain
+    # whose binary cannot run from the exec root:
+    #   "$which is on PATH but will not run from $SH_EXEC; run 'sandhome install
+    #    --force $name' to place it properly"
+    # and without a force the named command adopted again, every time, and
+    # installed nothing. Measured, three runs of `sandhome install go` on a host
+    # with a working /usr/bin/go: "a working copy is already here; adopting it"
+    # three times, and no flag anywhere in the reference to ask otherwise
+    # (issue #45). An instruction the tool prints must be one the tool obeys.
+    #
+    # It installs into the toolchain root and does not touch the copy on PATH,
+    # so a host tool survives a forced install.
+    if [ "${SH_FORCE:-0}" = 1 ]; then
+        sh_toolchain_preflight "$sh_te_name" || return 1
+        sh_say "toolchain $sh_te_name: --force, installing into $SH_HOME_TOOLCHAINS/$sh_te_name"
+        if ! "tc_${sh_te_name}_install"; then
+            sh_fail "toolchain $sh_te_name could not be installed"
+            return 1
+        fi
+        INSTALLED="$INSTALLED $sh_te_name"
+    elif sh_toolchain_probe "$sh_te_name"; then
         sh_say "toolchain $sh_te_name: a working copy is already here; adopting it"
         ADOPTED="$ADOPTED $sh_te_name"
     else

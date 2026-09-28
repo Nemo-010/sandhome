@@ -182,11 +182,23 @@ export SH_HOME SH_EXEC SH_EXEC_BIN SH_EXEC_VIEWS SH_HOME_TOOLCHAINS SH_HOME_TMP 
 mkdir -p "$SH_EXEC_BIN" "$SH_EXEC_VIEWS" "$SH_HOME_TOOLCHAINS" "$SH_HOME_TMP" 2>/dev/null
 if command -v node >/dev/null 2>&1; then
     sh_toolchain_load node >/dev/null 2>&1
-    if tc_node_behavioural >/dev/null 2>&1; then
-        t_ok 0 'node behavioural probe runs a script (#19)'
-    else
-        t_ok 1 'node behavioural probe runs a script (#19)'
+    # # STOP: THE CLAIM IS ABOUT THE PROBE, NOT ABOUT THE HOST'S npm. The old
+    # assertion was "if this host has node, the probe passes", which is a claim
+    # about the base image: a host whose npm is broken fails a green tree. The
+    # probe now checks npm for an adopted node too (issue #46), so a host with a
+    # broken npm makes the probe answer 1, correctly. Measuring the truth on the
+    # same host and comparing is the assertion that is true everywhere: the probe
+    # agrees with what node and npm actually do here.
+    t_nb_truth=1
+    if node -e 'console.log("ok")' >/dev/null 2>&1 && npm --version >/dev/null 2>&1; then
+        t_nb_truth=0
     fi
+    t_nb_got=1
+    if tc_node_behavioural >/dev/null 2>&1; then
+        t_nb_got=0
+    fi
+    t_is "$t_nb_got" "$t_nb_truth" \
+        'the node behavioural probe agrees with whether node and npm work here (#19, #46)'
 else
     t_skip 'node behavioural probe: no node on this host'
 fi
@@ -218,4 +230,141 @@ case "$inst_t" in
     *'--target'*) t_ok 0 'install usage names --target (#29)' ;;
     *) t_ok 1 'install usage names --target (#29)' ;;
 esac
+
+# --- class H: --force is a flag the tool accepts and obeys --------------------
+# # STOP: THE CLAIM IS "AN INSTRUCTION THE TOOL PRINTS IS ONE THE TOOL OBEYS".
+# The promote step warns "run 'sandhome install --force <name>' to place it
+# properly" for a borrowed toolchain that cannot run from the exec root, and
+# until this flag existed the named command adopted again every time and
+# installed nothing (issue #45). Three claims, all about the code rather than
+# about this host: the usage names it, the dispatcher parses it, and
+# sh_toolchain_install_one takes the install branch when it is set.
+case "$(sh "$ROOT/bin/sandhome" help 2>/dev/null)" in
+    *--force*) t_ok 0 'install usage names --force (#45)' ;;
+    *)         t_ok 1 'install usage names --force (#45)' ;;
+esac
+# The dispatcher must set SH_FORCE and must not eat the name that follows it.
+force_env=$(SANDHOME_HOME="$work/fhome" SANDHOME_EXEC="$work/fexec" \
+    sh -c '. "$0/lib/common.sh"; . "$0/lib/env.sh"; . "$0/lib/space.sh" 2>/dev/null
+             SH_FORCE=0
+             set -- jq --force ripgrep
+             while [ "$#" -gt 0 ]; do
+                 case "$1" in
+                     --force|-f) SH_FORCE=1; shift ;;
+                     *) sh_n="$1"; shift ;;
+                 esac
+             done
+             printf "%s %s" "$SH_FORCE" "$sh_n"' "$ROOT" 2>/dev/null)
+t_is "$force_env" '1 ripgrep' 'a --force before a name sets the flag and keeps the name (#45)'
+# And the install branch itself: with SH_FORCE=1 the adopt probe is skipped.
+# Driven through a fixture module whose install writes a marker, because the
+# claim is "the install path runs", not "some real toolchain downloaded".
+mkdir -p "$work/forcemod" 2>/dev/null
+cat > "$work/forcemod/forcetool.sh" <<'FORCETOOL'
+TC_forcetool_DESC='a fixture'
+TC_forcetool_BINS=''
+tc_forcetool_probe() {
+    [ -n "$FORCETOOL_PROBE_ANSWER" ] && return "$FORCETOOL_PROBE_ANSWER"
+    return 0
+}
+# The module creates its own root, as a real one does. A marker written into a
+# directory nothing made reports "not installed" for a reason that has nothing to
+# do with the branch under test.
+tc_forcetool_install() {
+    mkdir -p "$SH_HOME_TOOLCHAINS/forcetool" 2>/dev/null
+    printf 'installed\n' > "$SH_HOME_TOOLCHAINS/forcetool/.installed" 2>/dev/null
+    return 0
+}
+FORCETOOL
+force_branch=$(cat > "$work/forcebranch.sh" <<'FORCEBRANCH'
+set -u
+# The same library set this file loads for the behavioural probes: the
+# preflight asks sh_downloader_ok whether a downloader exists, and a fixture
+# that omits lib/fetch.sh fails on THAT instead of on the branch under test.
+for m in common detect space fetch env toolchain; do
+    # shellcheck source=/dev/null
+    . "$1/lib/$m.sh"
+done
+SH_HOME=$3/home
+SH_HOME_TOOLCHAINS=$3/home/toolchains
+SH_EXEC=$3/exec
+SH_EXEC_BIN=$3/exec/bin
+SH_EXEC_VIEWS=$3/exec/views
+SH_HOME_TMP=$3/home/tmp
+SH_HOME_EXEC=no
+export SH_HOME SH_HOME_TOOLCHAINS SH_EXEC SH_EXEC_BIN SH_EXEC_VIEWS SH_HOME_TMP SH_HOME_EXEC
+mkdir -p "$SH_HOME_TOOLCHAINS" "$SH_EXEC_BIN" "$SH_HOME_TMP" 2>/dev/null
+# The probe answers 0, so the adopt path would be taken without the flag.
+FORCETOOL_PROBE_ANSWER=0
+export FORCETOOL_PROBE_ANSWER
+sh_toolchains_dir() { printf '%s' "$SH_TEST_MODDIR"; }
+SH_TEST_MODDIR=$2
+export SH_TEST_MODDIR
+SH_FORCE=1
+export SH_FORCE
+sh_toolchain_install_one forcetool >/dev/null 2>&1
+[ -f "$SH_HOME_TOOLCHAINS/forcetool/.installed" ] && printf 'installed' || printf 'notinstalled'
+FORCEBRANCH
+mkdir -p "$work/fb" 2>/dev/null
+sh "$work/forcebranch.sh" "$ROOT" "$work/forcemod" "$work/fb" 2>/dev/null)
+t_is "$force_branch" 'installed' '--force takes the install branch even when the probe would adopt (#45)'
+# And the control that matters: without the flag the SAME fixture adopts. A
+# guard that only ever takes the install branch is not a guard, it is a change of
+# default, and this is what tells the two apart.
+adopt_branch=$(sed 's/^SH_FORCE=1$/SH_FORCE=0/' "$work/forcebranch.sh" > "$work/adoptbranch.sh"
+    sed -i 's|\[ -f "$SH_HOME_TOOLCHAINS/forcetool/.installed" \]|false|' "$work/adoptbranch.sh"
+    rm -rf "$work/fb2"; mkdir -p "$work/fb2"
+    sh "$work/adoptbranch.sh" "$ROOT" "$work/forcemod" "$work/fb2" 2>/dev/null)
+t_is "$adopt_branch" 'notinstalled' 'without --force the adopt path is still the default (#45)'
+
+# --- class H: a link that points at itself is refused -------------------------
+# # STOP: PLANTED, NOT DESCRIBED. The promote step used to `ln -sfn` whatever
+# `command -v` answered, and by then the exec view was on PATH, so on a re-run
+# it linked the view onto itself and the tool became
+# "Too many levels of symbolic links" (exit 126) - 8 runs out of 8 left jq, rg
+# or fd broken (issue #43). The clause plants that state and asks the promote
+# step to leave a working link.
+sel_dir="$work/selftest"
+mkdir -p "$sel_dir/exec/bin" "$sel_dir/real" 2>/dev/null
+# The planted state: the exec view is already on PATH ahead of the real binary,
+# and it holds a symlink the tree wrote on an earlier run. This is exactly the
+# state in which `command -v` answered with the view and the promote step linked
+# it onto itself.
+printf '#!/bin/sh\nexit 0\n' > "$sel_dir/real/selftesttool" 2>/dev/null
+chmod 0755 "$sel_dir/real/selftesttool" 2>/dev/null
+ln -sfn "$sel_dir/real/selftesttool" "$sel_dir/exec/bin/selftesttool" 2>/dev/null
+self_link=$(cat > "$work/selftest.sh" <<'SELFLINK'
+set -u
+for m in common detect space fetch env toolchain; do
+    # shellcheck source=/dev/null
+    . "$1/lib/$m.sh"
+done
+SH_HOME=$2/home
+SH_HOME_TOOLCHAINS=$2/home/toolchains
+SH_EXEC=$2/exec
+SH_EXEC_BIN=$2/exec/bin
+SH_EXEC_VIEWS=$2/exec/views
+SH_HOME_TMP=$2/home/tmp
+SH_HOME_EXEC=no
+export SH_HOME SH_HOME_TOOLCHAINS SH_EXEC SH_EXEC_BIN SH_EXEC_VIEWS SH_HOME_TMP SH_HOME_EXEC
+# No toolchain root, so the adopted branch is taken, and the candidates are only
+# this directory so the planner cannot wander.
+sh_exec_candidates() { printf '%s' "$SH_EXEC"; }
+# The module dir arrives in the environment; see the note above.
+# Adopted: no toolchain root, so sh_promote_toolchain takes the linking branch.
+# PATH has the exec view first, which is the state that produced the self-link.
+SH_TEST_REAL=$2/real
+PATH="$SH_EXEC_BIN:$SH_TEST_REAL:$PATH"
+export PATH
+sh_promote_toolchain selftesttool selftesttool >/dev/null 2>&1
+if [ -L "$SH_EXEC_BIN/selftesttool" ]; then
+    t=$(readlink "$SH_EXEC_BIN/selftesttool")
+    [ "$t" = "$SH_EXEC_BIN/selftesttool" ] && printf 'self' || printf 'linked'
+else
+    printf 'missing'
+fi
+SELFLINK
+sh "$work/selftest.sh" "$ROOT" "$sel_dir" 2>/dev/null)
+t_is "$self_link" 'linked' 'the promote step does not link the exec view onto itself (#43)'
+
 t_end

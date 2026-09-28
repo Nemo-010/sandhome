@@ -63,7 +63,11 @@ tc_ripgrep_version() {
 # every module's tc_<name>_adopted to name the directory its own _BINS binary
 # was found in, so the next module that copies this shape is caught.
 tc_ripgrep_adopted() {
-    sh_rg_which=$(command -v rg 2>/dev/null)
+    # sh_path_where, not command -v: the exec view is on PATH by the time an
+    # install runs, so command -v answers with the view this tool is being
+    # linked INTO and the promote step then links the view onto itself (issue
+    # #43). The exec view is not a working copy and is not consulted.
+    sh_rg_which=$(sh_path_where rg)
     [ -n "$sh_rg_which" ] || return 0
     sh_rg_dir=${sh_rg_which%/*}
     [ -n "$sh_rg_dir" ] || sh_rg_dir=.

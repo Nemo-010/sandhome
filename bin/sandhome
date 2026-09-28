@@ -80,6 +80,7 @@ usage: sandhome COMMAND [args]
   space [--probe]        where the two roots are, and every candidate tried
   toolchains             name, one-line description, PATH binaries, versions
   install NAME...        adopt or install each toolchain, then write the env
+  install --force NAME   install NAME even when a working copy is on PATH
   install rust --target T   add rust cross targets (comma list, repeatable)
   ensure NAME...         alias for install
   shims [build]          build the LD_PRELOAD shims this machine needs
@@ -180,8 +181,21 @@ cmd_install() {
     # tools/zig.sh). The flag only applies to rust; other toolchains ignore it.
     SH_RUST_TARGETS=''
     sh_c_args=''
+    # `install --force NAME` skips the adopt probe and installs NAME into the
+    # toolchain root. It exists because the tool PRINTS it: the promote step
+    # warns "run 'sandhome install --force <name>' to place it properly" for a
+    # borrowed toolchain that cannot run from the exec root, and without the
+    # flag the named command adopted again every time and installed nothing
+    # (issue #45). An instruction the tool prints must be one the tool obeys.
+    SH_FORCE=0
     while [ "$#" -gt 0 ]; do
         case "$1" in
+            --force|-f)
+                SH_FORCE=1
+                shift ;;
+            --force=*)
+                case "${1#--force=}" in 0|no|off|false) SH_FORCE=0 ;; *) SH_FORCE=1 ;; esac
+                shift ;;
             --target)
                 [ "$#" -ge 2 ] || sh_die 'install --target needs a value'
                 if [ -n "$SH_RUST_TARGETS" ]; then
@@ -203,6 +217,7 @@ cmd_install() {
         esac
     done
     export SH_RUST_TARGETS
+    export SH_FORCE
     if [ -z "$(sh_trim "$sh_c_args")" ]; then
         sh_die 'install needs at least one toolchain name'
     fi

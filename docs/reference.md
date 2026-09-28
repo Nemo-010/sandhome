@@ -15,6 +15,7 @@ usage: sandhome COMMAND [args]
   space [--probe]        where the two roots are, and every candidate tried
   toolchains             name, one-line description, PATH binaries, versions
   install NAME...        adopt or install each toolchain, then write the env
+  install --force NAME   install NAME even when a working copy is on PATH
   install rust --target T   add rust cross targets (comma list, repeatable)
   ensure NAME...         alias for install
   shims [build]          build the LD_PRELOAD shims this machine needs

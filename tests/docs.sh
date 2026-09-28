@@ -481,6 +481,34 @@ for frag_src in "$ROOT"/tools/*.sh; do
 done
 t_is "$bad_frag" '' 'every fragment that names SANDHOME_HOME/EXEC defaults it first'
 
+# # STOP: EVERY FRAGMENT BODY IS PARSED, NOT JUST INSPECTED. The check above
+# asks whether a fragment names a variable without defaulting it, which is a
+# question about its text. It cannot see a fragment that is not valid shell at
+# all, and one was not:
+#   case ":$SANDHOME_EXEC/go-bin:"*) ;;
+# in the adopted-go fragment - a `case` with no `in` - which dash rejected with
+#   env.d/go.sh: Syntax error: ")" unexpected (expecting "in")
+# and the whole bootstrap died with exit 2, on every shell, on every host. The
+# fragment is what a consumer's shell sources, so a fragment that does not parse
+# is the single worst thing this tree can ship and it is checked here by
+# PARSING, which is the only check that would have caught it.
+#
+# Both interpreters the tree claims to support are asked. A body that parses
+# under bash and not under dash is exactly the defect, and the tree's own rule
+# is POSIX sh.
+bad_parse=''
+for frag_src in "$ROOT"/tools/*.sh; do
+    [ -r "$frag_src" ] || continue
+    frag_body=$(awk '/<<EOF/{flag=1;next} /^EOF$/{flag=0} flag' "$frag_src" 2>/dev/null)
+    [ -n "$frag_body" ] || continue
+    printf '%s\n' "$frag_body" > "$HERE/.frag-body.$$"
+    if ! dash -n "$HERE/.frag-body.$$" 2>/dev/null; then
+        bad_parse="$bad_parse ${frag_src##*/}"
+    fi
+    rm -f "$HERE/.frag-body.$$"
+done
+t_is "$bad_parse" '' 'every env.d fragment body is valid POSIX sh (dash -n)'
+
 bad_order=''
 for entry in "$ROOT/bootstrap.sh" "$ROOT/bin/sandhome"; do
     [ -r "$entry" ] || continue
