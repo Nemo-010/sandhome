@@ -36,9 +36,21 @@ jobs:
 
       # The end-to-end install needs the network. When it cannot run it exits 2
       # and says so; that is `skipped`, not `failed`, and the runner reports
-      # the two separately so a red job always means a defect.
+      # the two separately so a red job always means a defect. The runner has
+      # no writable noexec mount, so the file legitimately ends 2-with-skips
+      # here; a machine-shaped skip must not turn the job red, and the summary
+      # line is read the same way tests/run.sh reads it: a non-zero FAILED
+      # count is the only red this file can produce.
       - name: the end-to-end install
-        run: sh tests/bootstrap.sh
+        run: |
+          set +e
+          sh tests/bootstrap.sh
+          boot_rc=$?
+          case "$boot_rc" in
+              0) exit 0 ;;
+              2) echo "the end-to-end install could not run here (exit 2 = skipped)"; exit 0 ;;
+              *) exit "$boot_rc" ;;
+          esac
 
       - name: the line discipline over pipes
         run: bash tests/errandsh-posix.sh
