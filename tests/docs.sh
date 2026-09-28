@@ -674,6 +674,7 @@ fi
 # table that rots, and it is the kind of drift tests/docs.sh exists to stop.
 ts_body=$(sed -n '/^sh_toolset_names()/,/^}/p' "$ROOT/bootstrap.sh" 2>/dev/null)
 ts_bad=''
+pv_bad=''
 for ts_name in minimal cli developer languages agent; do
     # The names are stored as printf 'jq ripgrep fd\n', so the trailing \n is
     # a literal backslash-n inside the quoted string: it is a SEPARATOR, and
@@ -693,6 +694,38 @@ done
 t_is "$ts_bad" '' 'every toolchain in every toolset is named in the guide'
 # The reverse: clang is deliberately in no toolset, and the guide must say so
 # rather than let a consumer assume `languages` includes it.
+if grep -q 'FAKEPTY_SIZE' "$ROOT/docs/guide.md" 2>/dev/null; then
+    t_ok 0 'the pty variables are documented in the guide, not deferred (#42 follow-up)'
+else
+    t_ok 1 'the pty variables are documented in the guide, not deferred (#42 follow-up)'
+fi
+# # STOP: A CROSS-REFERENCE MUST POINT AT SOMETHING THAT IS THERE. The guide
+# said the pty variables were "described in docs/reference.md" and the reference
+# carried none of them - they are the reader column of a toolchain module and a
+# C shim, neither of which the generator reads. A pointer that resolves to
+# nothing is worse than no pointer, because a reader who follows it concludes
+# the fact does not exist. The variables are now in the reference, so the guide
+# no longer defers, and these two clauses hold both halves of that.
+for _pv in SANDHOME_FAKEPTY SANDHOME_FAKEPTY_SIZE SANDHOME_FAKEPTY_ID SANDHOME_FAKEPTY_CRLF; do
+    grep -q "$_pv" "$ROOT/docs/reference.md" 2>/dev/null ||
+        pv_bad="$pv_bad $_pv"
+done
+t_is "${pv_bad:-}" '' 'every pty variable is in the reference two pages call authoritative'
+# The generator is what puts them there, so the clause has to survive someone
+# deleting the section by hand: the reference is compared byte for byte.
+if grep -q '## pty shim variables' "$ROOT/docs/generate-reference.sh" 2>/dev/null; then
+    t_ok 0 'the pty variables are generated into the reference, not typed into it'
+else
+    t_ok 1 'the pty variables are generated into the reference, not typed into it'
+fi
+# And the guide must not send a reader to a file that does not carry the fact.
+if grep -q 'FAKEPTY_SIZE.*reference\|reference.*FAKEPTY_SIZE' "$ROOT/docs/guide.md" 2>/dev/null; then
+    t_ok 1 'the guide does not defer the pty variables to the reference'
+else
+    t_ok 0 'the guide does not defer the pty variables to the reference'
+fi
+# clang is deliberately in no toolset, and the guide must say so rather than let
+# a consumer assume `languages` includes it.
 if grep -q 'clang' "$ts_body" 2>/dev/null; then
     t_ok 1 'clang stays out of every toolset'
 else

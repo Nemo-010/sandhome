@@ -209,6 +209,21 @@ for var in $(grep -o 'ERRANDSH_[A-Z]*' "$ROOT/shell/errandsh" 2>/dev/null | sort
 done
 printf '\n'
 
+# --- the pty shim variables -------------------------------------------------
+# They live in shims/fakepty.c and shell/faketty, not in a toolchain module, so
+# the variable table above does not reach them - and two pages tell a reader
+# that docs/reference.md is authoritative for "every flag, variable and command".
+# It was not. SANDHOME_FAKEPTY_SIZE and SANDHOME_FAKEPTY_CRLF were documented in
+# no file at all, and the guide deferred to the reference for them, so a reader
+# who followed the pointer concluded the fact did not exist.
+printf '## pty shim variables\n\n'
+printf '| variable | meaning | default |\n| --- | --- | --- |\n'
+printf '| `SANDHOME_FAKEPTY` | the `fakepty.so` to preload | the shim this build wrote, named in env.sh |\n'
+printf '| `SANDHOME_FAKEPTY_SIZE` | the window size a full-screen program is told | `COLUMNSxLINES` when unset, then 80x24; when set it wins outright |\n'
+printf '| `SANDHOME_FAKEPTY_ID` | which descriptors count as the terminal | set by env.sh and by `faketty`; unset, the feature is off |\n'
+printf '| `SANDHOME_FAKEPTY_CRLF` | `0` stops a bare `\\n` becoming `\\r\\n` on output | on, which is what a terminal with `OPOST\\|ONLCR` does |\n'
+printf '\n'
+
 # --- the toolchains, from the modules themselves ----------------------------
 printf '## Toolchains\n\n'
 printf '| name | binaries on PATH | description |\n| --- | --- | --- |\n'

@@ -203,6 +203,15 @@ usage: sh bootstrap.sh [options]
 | `ERRANDSH_PTY` | `(unset)` |
 | `ERRANDSH_SHELL` | `(unset)` |
 
+## pty shim variables
+
+| variable | meaning | default |
+| --- | --- | --- |
+| `SANDHOME_FAKEPTY` | the `fakepty.so` to preload | the shim this build wrote, named in env.sh |
+| `SANDHOME_FAKEPTY_SIZE` | the window size a full-screen program is told | `COLUMNSxLINES` when unset, then 80x24; when set it wins outright |
+| `SANDHOME_FAKEPTY_ID` | which descriptors count as the terminal | set by env.sh and by `faketty`; unset, the feature is off |
+| `SANDHOME_FAKEPTY_CRLF` | `0` stops a bare `\n` becoming `\r\n` on output | on, which is what a terminal with `OPOST\|ONLCR` does |
+
 ## Toolchains
 
 | name | binaries on PATH | description |

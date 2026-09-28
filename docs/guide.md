@@ -333,9 +333,28 @@ the automatic part off. Because the interposer is exported and exec'd, a
 subshell the program spawns keeps the terminal.
 
 The one thing it cannot reach is a STATICALLY LINKED program: LD_PRELOAD has
-nothing to interpose into. The list of programs, and `SANDHOME_FAKEPTY_SIZE`
-(`COLSxROWS`, default `COLUMNSxLINES`, then 80x24), are described in
-`docs/reference.md`.
+nothing to interpose into.
+
+The list of programs `ERRANDSH_PTY_PROGRAMS` auto-runs in the foreground, and
+the rest of that session's variables, are in
+`skills/errandsh/SKILL.md`. `SANDHOME_FAKEPTY_SIZE` (`COLSxROWS`) is documented
+here, because the guide pointed at the reference for it and the reference does
+not carry it:
+
+| variable | meaning | default |
+| --- | --- | --- |
+| `SANDHOME_FAKEPTY` | the `fakepty.so` to preload; `faketty` finds it under the home | the shim this build wrote |
+| `SANDHOME_FAKEPTY_SIZE` | the window size a full-screen program is told | `COLUMNSxLINES` when it is unset, then 80x24. When it **is** set it wins outright and `COLUMNS`/`LINES` are not consulted |
+| `SANDHOME_FAKEPTY_ID` | which descriptors count as the terminal | set by `env.sh` and `faketty`; unset, the feature is off |
+| `SANDHOME_FAKEPTY_CRLF` | `0` stops `\n` becoming `\r\n` on output | on, which is what a terminal with `OPOST\|ONLCR` does |
+
+A full-screen program lays out to this size once and does not ask again, so it
+has to be right before the program starts. Set it when a program is told 80x24
+and the terminal is not:
+
+```sh
+SANDHOME_FAKEPTY_SIZE=120x40 sandhome pty less big.log
+```
 
 ## 7. Troubleshooting
 
