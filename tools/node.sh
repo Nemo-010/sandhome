@@ -70,9 +70,16 @@ tc_node_install() {
     if sh_have curl || sh_have wget; then
         sh_ni_sums="$sh_ni_stage/node-SHASUMS256.$$"
         if sh_fetch "$sh_ni_base/SHASUMS256.txt" "$sh_ni_sums"; then
-            while read -r sh_ni_hex sh_ni_file; do
+            # Shape-validate every manifest field and drop the record if any
+            # one fails (issue #10); carry the last line out of read so a
+            # file with no trailing newline still yields its entry.
+            while read -r sh_ni_hex sh_ni_file || [ -n "$sh_ni_hex" ]; do
                 case "$sh_ni_file" in
-                    *"${sh_ni_name}.tar.xz") sh_ni_sha=$sh_ni_hex; break ;;
+                    *"${sh_ni_name}.tar.xz")
+                        if sh_is_hex64 "$sh_ni_hex" && sh_is_nonempty "$sh_ni_file"; then
+                            sh_ni_sha=$sh_ni_hex
+                        fi
+                        break ;;
                 esac
             done < "$sh_ni_sums"
             rm -f "$sh_ni_sums" 2>/dev/null

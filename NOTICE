@@ -1,0 +1,23 @@
+# Third-party binaries
+
+Where every byte sandhome downloads comes from, which digest it is held to,
+and how the version is resolved. Machine-readable on purpose: `tests/docs.sh`
+requires every module in `tools/` to appear here, so a new download source
+cannot be added without recording it.
+
+| toolchain | bytes | version | digest held to |
+| --- | --- | --- | --- |
+| fd | `https://github.com/sharkdp/fd/releases/download/` | latest-release redirect tag | caller pin only (`SANDHOME_SHA256_FD*`); hashed and printed otherwise |
+| go | `https://go.dev/dl/` | `https://go.dev/VERSION?m=text`, first line | `https://go.dev/dl/?mode=json`, `filename` entry, shape-validated hex64 |
+| jq | `https://github.com/jqlang/jq/releases/latest/download/` | latest-release redirect | caller pin only (`SANDHOME_SHA256_JQ*`); hashed and printed otherwise |
+| node | `https://nodejs.org/dist/` | `https://nodejs.org/dist/index.json`, first entry | `SHASUMS256.txt` entry for the tarball, shape-validated hex64 |
+| python | `https://github.com/astral-sh/uv/releases/latest/download/` (uv installs CPython from python-build-standalone) | latest-release redirect tag | caller pin only (`SANDHOME_SHA256_PYTHON*`); hashed and printed otherwise |
+| ripgrep | `https://github.com/BurntSushi/ripgrep/releases/download/` | release tag | caller pin only (`SANDHOME_SHA256_RIPGREP*`); hashed and printed otherwise |
+| rust | `https://static.rust-lang.org/rustup/dist/` (rustup-init installs the toolchain) | stable channel | caller pin only (`SANDHOME_SHA256_RUST*`); hashed and printed otherwise |
+
+Verification order for every download: bytes land on a sibling temp path,
+never the final name; the digest is taken on what arrived; it is compared
+against the expected value above (more than one accepted); a mismatch
+removes the temp file and returns non-zero; only verified bytes are renamed
+into place. Unpacking happens after that check, never before. md5 is not
+accepted anywhere: a 32-char expected digest is refused by name.

@@ -228,12 +228,12 @@ t_is "$(tc_go_sha_from "$gojson_file" absent.tar.gz)" '' 'go answers nothing for
 # release per line, or any proxy that minifies - returned nothing, and the
 # caller then passed an EMPTY expected digest, so the download went unchecked.
 # Measured here: the compact form below answered nothing before the fix.
-printf '[{"filename":"go1.27.1.linux-amd64.tar.gz","sha256":"compact-digest"}]' > "$tmp/compact.json"
-t_is "$(tc_go_sha_from "$tmp/compact.json" go1.27.1.linux-amd64.tar.gz)" 'compact-digest' \
+printf '[{"filename":"go1.27.1.linux-amd64.tar.gz","sha256":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}]' > "$tmp/compact.json"
+t_is "$(tc_go_sha_from "$tmp/compact.json" go1.27.1.linux-amd64.tar.gz)" 'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc' \
     'go reads the digest out of a compact one-line document'
-printf '[{"filename":"a.tar.gz","sha256":"h1"},{"filename":"b.tar.gz","sha256":"h2"}]' > "$tmp/many.json"
-t_is "$(tc_go_sha_from "$tmp/many.json" a.tar.gz)" 'h1' 'go reads the first of two inline entries'
-t_is "$(tc_go_sha_from "$tmp/many.json" b.tar.gz)" 'h2' 'go reads the second of two inline entries'
+printf '[{"filename":"a.tar.gz","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},{"filename":"b.tar.gz","sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}]' > "$tmp/many.json"
+t_is "$(tc_go_sha_from "$tmp/many.json" a.tar.gz)" 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' 'go reads the first of two inline entries'
+t_is "$(tc_go_sha_from "$tmp/many.json" b.tar.gz)" 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' 'go reads the second of two inline entries'
 
 # NOTE: THE FILE READERS CARRY OUT A LAST LINE WITH NO NEWLINE. `while read` drops
 # it and exits before the body has seen it, so a one-line document came back as
@@ -604,6 +604,99 @@ else
     t_ok 0 'a curl without --doh-url refuses the DoH retry'
 fi
 sh_detect_all >/dev/null 2>&1 || true
+
+# -------------------------------------------- manifest shapes --
+# Issue #10: every manifest field shape-validated, records dropped on any
+# failure; length counted and class matched, no {64} quantifier. Issues #4
+# and #17: unverified bytes never occupy the final name; md5 refused.
+hex_good=63d339f0da5ab53635a56f2490a7984dfe12dfcff22ad749f63edaf590168445
+if sh_is_hex64 "$hex_good"; then
+    t_ok 0 'a 64-char hex digest validates'
+else
+    t_ok 1 'a 64-char hex digest validates'
+fi
+if sh_is_hex64 abc; then
+    t_ok 1 'a short digest does not validate'
+else
+    t_ok 0 'a short digest does not validate'
+fi
+if sh_is_hex64 ''; then
+    t_ok 1 'an empty digest does not validate'
+else
+    t_ok 0 'an empty digest does not validate'
+fi
+if sh_is_hex64 zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz; then
+    t_ok 1 'a non-hex 64-char string does not validate'
+else
+    t_ok 0 'a non-hex 64-char string does not validate'
+fi
+if sh_is_digits 12345; then
+    t_ok 0 'an all-digit size validates'
+else
+    t_ok 1 'an all-digit size validates'
+fi
+if sh_is_digits 12a45; then
+    t_ok 1 'a size with a letter does not validate'
+else
+    t_ok 0 'a size with a letter does not validate'
+fi
+if sh_digest_matches actual 'actual other'; then
+    t_ok 0 'a digest matching one of two accepted values verifies'
+else
+    t_ok 1 'a digest matching one of two accepted values verifies'
+fi
+if sh_digest_matches actual 'other values'; then
+    t_ok 1 'a digest matching none of the accepted values is refused'
+else
+    t_ok 0 'a digest matching none of the accepted values is refused'
+fi
+if sh_expected_wellformed d41d8cd98f00b204e9800998ecf8427e 2>/dev/null; then
+    t_ok 1 'a 32-char md5-length pin is refused'
+else
+    t_ok 0 'a 32-char md5-length pin is refused'
+fi
+md5_out=$(sh_expected_wellformed d41d8cd98f00b204e9800998ecf8427e 2>&1)
+case "$md5_out" in
+    *md5*) t_ok 0 'the md5 refusal names md5' ;;
+    *) t_ok 1 "the md5 refusal names md5 ($md5_out)" ;;
+esac
+# Atomicity: a mismatched digest leaves NO file at the destination and no
+# temp beside it; the failed bytes never occupied the final name.
+printf 'atomic-payload\n' > "$tmp/atomic-src"
+REALA=$(sha256sum "$tmp/atomic-src" 2>/dev/null | cut -d' ' -f1)
+if [ -n "$REALA" ]; then
+    rm -f "$tmp/atomic-dest"
+    rm -f "$tmp"/atomic-dest.tmp.*
+    if ( cd "$ROOT" && PATH="$tmp/stub:$PATH" sh_fetch_verified "file://$tmp/atomic-src" "$tmp/atomic-dest" 0000000000000000000000000000000000000000000000000000000000000000 ) 2>/dev/null; then
+        t_ok 1 'atomic: a mismatched digest is refused'
+    else
+        t_ok 0 'atomic: a mismatched digest is refused'
+    fi
+    if [ -e "$tmp/atomic-dest" ]; then
+        t_ok 1 'atomic: the destination is absent after a mismatch'
+    else
+        t_ok 0 'atomic: the destination is absent after a mismatch'
+    fi
+    if ls "$tmp"/atomic-dest.tmp.* >/dev/null 2>&1; then
+        t_ok 1 'atomic: no temp file is left beside the destination'
+    else
+        t_ok 0 'atomic: no temp file is left beside the destination'
+    fi
+    if ( cd "$ROOT" && PATH="$tmp/stub:$PATH" sh_fetch_verified "file://$tmp/atomic-src" "$tmp/atomic-dest2" "$REALA" ) 2>/dev/null; then
+        if [ -r "$tmp/atomic-dest2" ]; then
+            t_ok 0 'atomic: verified bytes are renamed into place'
+        else
+            t_ok 1 'atomic: verified bytes are renamed into place (absent)'
+        fi
+    else
+        t_ok 1 'atomic: verified bytes are renamed into place (non-zero)'
+    fi
+else
+    t_skip 'no sha256 tool for the atomicity clauses'
+fi
+# A publisher digest that is not hex64 is dropped at parse time.
+printf '[{"filename":"go1.27.1.linux-amd64.tar.gz","sha256":"not-a-digest"}]' > "$tmp/baddigest.json"
+t_is "$(tc_go_sha_from "$tmp/baddigest.json" go1.27.1.linux-amd64.tar.gz)" '' 'a non-hex publisher digest is dropped, not compared'
 # # STOP: os-release IS READ FROM BOTH PLACES, AND /usr/lib IS NOT A THOUGHT.
 # On a merged-/usr distribution /etc/os-release is a SYMLINK into /usr/lib, and
 # an image that ships the file without the symlink - a container that bind-mounts

@@ -222,6 +222,26 @@ for doc in $DOCS "$ROOT"/docs/decisions/*.md; do
 done
 t_is "$foreign" '' 'no document points a reader at another repository'
 
+# --- 7b: every toolchain module is recorded in NOTICE ----------------------
+# A third-party binary shipped with a download states its version, source
+# URL and digest where the machine can read (issue #10, TcpQuality #25
+# shape). A module added without a NOTICE row is the defect.
+notice_missing=''
+if [ -r "$ROOT/NOTICE" ]; then
+    for mod in "$ROOT"/tools/*.sh; do
+        [ -r "$mod" ] || continue
+        modname=${mod##*/}; modname=${modname%.sh}
+        if grep -q "| $modname |" "$ROOT/NOTICE" 2>/dev/null; then
+            :
+        else
+            notice_missing="$notice_missing $modname"
+        fi
+    done
+else
+    notice_missing='NOTICE missing'
+fi
+t_is "$notice_missing" '' 'every toolchain module has a NOTICE row naming its bytes, version and digest'
+
 # --- 8: the checks above must be able to fail -------------------------------
 # A guard nobody has seen refuse is a guard nobody knows works, and this file
 # was itself wrong once: the flag check added a `--` prefix to a token that

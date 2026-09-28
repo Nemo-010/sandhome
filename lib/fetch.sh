@@ -523,6 +523,78 @@ sh_pin_from() {
     printf ''
 }
 
+# ------------------------------------------------- manifest shapes --
+# Validate every field of a downloaded manifest by shape and drop the record
+# if any one fails (issue #10, TcpQuality runTcpQuality-rootfs.sh shape): a
+# non-empty name, a 64-char all-hex digest, an all-digit size. The length is
+# counted and the class is matched WITHOUT an interval quantifier: the
+# reference's own PR #13 is titled 'make rootfs manifest parsing portable'
+# because `{64}` is not portable across awks, and a validator written with
+# one implementation's regex is itself the portability bug.
+sh_is_nonempty() { [ -n "${1:-}" ]; }
+
+sh_is_digits() {
+    case "${1:-}" in
+        '') return 1 ;;
+        *[!0-9]*) return 1 ;;
+        *) return 0 ;;
+    esac
+}
+
+sh_is_hex64() {
+    sh_hx=${1:-}
+    [ "${#sh_hx}" = 64 ] || return 1
+    case "$sh_hx" in
+        *[!0-9a-fA-F]*) return 1 ;;
+        *) return 0 ;;
+    esac
+}
+
+# sh_digest_matches ACTUAL EXPECTED_LIST -> 0 when ACTUAL equals any entry of
+# EXPECTED_LIST. More than one accepted digest is legitimate (a re-release
+# must not brick the install, issue #17 kejilion shape), so the list is
+# space or comma separated and any entry may answer. md5 (32 hex) is refused
+# by name: sandhome standardises on sha256 (issue #4).
+sh_digest_matches() {
+    sh_dm_actual=$1
+    sh_dm_list=$(sh_split_on ',' "$2")
+    for sh_dm_e in $sh_dm_list; do
+        [ -n "$sh_dm_e" ] || continue
+        if [ "$sh_dm_actual" = "$sh_dm_e" ]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+# sh_expected_wellformed EXPECTED_LIST -> 0 when every non-empty entry is a
+# 64-char hex digest. A malformed pin is a caller bug and is refused loudly
+# rather than compared and reported as a mirror mismatch.
+sh_expected_wellformed() {
+    sh_ew_list=$(sh_split_on ',' "${1:-}")
+    sh_ew_any=0
+    for sh_ew_e in $sh_ew_list; do
+        [ -n "$sh_ew_e" ] || continue
+        sh_ew_any=1
+        if ! sh_is_hex64 "$sh_ew_e"; then
+            case "$sh_ew_e" in
+                *)
+                    sh_ew_len=${#sh_ew_e}
+                    if [ "$sh_ew_len" = 32 ]; then
+                        case "$sh_ew_e" in
+                            *[!0-9a-fA-F]*) : ;;
+                            *) sh_fail "an expected digest is 32 hex chars, which is md5; sandhome standardises on sha256 and does not accept md5"; return 1 ;;
+                        esac
+                    fi
+                    sh_fail "an expected digest is not a 64-char hex sha256 (got '$sh_ew_e'); refusing rather than fetching against it"
+                    return 1
+                    ;;
+            esac
+        fi
+    done
+    [ "$sh_ew_any" = 1 ]
+}
+
 # sh_fetch_verified URL DEST [EXPECTED_SHA256] -> fetch and, when a digest tool
 # is present, prove the bytes. A missing digest tool is reported, not ignored:
 # `SANDHOME_REQUIRE_DIGEST=1` turns that into a refusal.
@@ -542,17 +614,34 @@ sh_fetch_verified() {
     # Pinned in tests/unit.sh.
     sh_fv_expected=${3:-}
     [ -n "$sh_fv_expected" ] || sh_fv_expected=''
-    if ! sh_fetch "$sh_fv_url" "$sh_fv_dest"; then
+    # STOP: UNVERIFIED BYTES NEVER OCCUPY THE FINAL NAME (issues #4, #17).
+    # sh_fetch used to write straight to DEST and sh_fetch_verified checked
+    # afterwards, so a failed download sat at the real destination until a
+    # caller noticed, and a retry could overwrite a file that had failed its
+    # check (leitbogioro lib.sh order, inverted here). The download goes to a
+    # sibling temp path; only verified bytes are renamed into place, and a
+    # mismatch removes the temp file and returns non-zero.
+    sh_fv_tmp="$sh_fv_dest.tmp.$$"
+    rm -f "$sh_fv_tmp" 2>/dev/null
+    if ! sh_fetch "$sh_fv_url" "$sh_fv_tmp"; then
+        rm -f "$sh_fv_tmp" 2>/dev/null
+        return 1
+    fi
+    if [ ! -s "$sh_fv_tmp" ]; then
+        sh_fail "$sh_fv_url fetched nothing"
+        rm -f "$sh_fv_tmp" 2>/dev/null
         return 1
     fi
     sh_fv_tool=$(sh_sha256_which)
-    sh_fv_actual=$(sh_sha256 "$sh_fv_dest")
+    sh_fv_actual=$(sh_sha256 "$sh_fv_tmp")
     if [ -z "$sh_fv_actual" ]; then
         if [ "${SANDHOME_REQUIRE_DIGEST:-0}" = 1 ]; then
             sh_fail "no sha256 tool is present, and SANDHOME_REQUIRE_DIGEST is set; refusing $sh_fv_url"
+            rm -f "$sh_fv_tmp" 2>/dev/null
             return 1
         fi
         sh_warn "no sha256 tool is present, so $sh_fv_url could not be verified"
+        mv "$sh_fv_tmp" "$sh_fv_dest" 2>/dev/null || { rm -f "$sh_fv_tmp" 2>/dev/null; return 1; }
         return 0
     fi
     # # NOTE: THE REPORT NAMES THE TOOL THAT ANSWERED AND WHERE THE EXPECTED
@@ -575,13 +664,22 @@ sh_fetch_verified() {
     fi
     if [ -z "$sh_fv_expected" ]; then
         sh_step "sha256 $sh_fv_actual (taken with $sh_fv_tool; no digest to compare against)"
+        mv "$sh_fv_tmp" "$sh_fv_dest" 2>/dev/null || { rm -f "$sh_fv_tmp" 2>/dev/null; return 1; }
         return 0
     fi
-    if [ "$sh_fv_actual" != "$sh_fv_expected" ]; then
+    # A malformed pin is refused by name before any comparison, so a typo
+    # never reads as a mirror truncating a download.
+    if ! sh_expected_wellformed "$sh_fv_expected"; then
+        rm -f "$sh_fv_tmp" 2>/dev/null
+        return 1
+    fi
+    if ! sh_digest_matches "$sh_fv_actual" "$sh_fv_expected"; then
         sh_fail "$sh_fv_url does not match the expected sha256 (got $sh_fv_actual with $sh_fv_tool, wanted $sh_fv_expected)"
+        rm -f "$sh_fv_tmp" 2>/dev/null
         return 1
     fi
     sh_step "sha256 matches the value from $sh_fv_from (taken with $sh_fv_tool)"
+    mv "$sh_fv_tmp" "$sh_fv_dest" 2>/dev/null || { rm -f "$sh_fv_tmp" 2>/dev/null; return 1; }
     return 0
 }
 

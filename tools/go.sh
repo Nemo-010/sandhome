@@ -80,6 +80,10 @@ tc_go_sha_from() {
             sh_gs_s=${sh_gs_s#\"}
             sh_gs_d=${sh_gs_s%%\"*}
             [ -n "$sh_gs_d" ] || return 1
+            # Shape-validate the manifest field and drop the record if it
+            # fails (issue #10): a non-hex or short digest is not compared,
+            # it is refused as a record.
+            sh_is_hex64 "$sh_gs_d" || return 1
             printf '%s' "$sh_gs_d"
             return 0
         fi
