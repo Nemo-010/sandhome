@@ -47,6 +47,15 @@ Environment:
                       Set by env.sh; read it, do not set it.
   SANDHOME_MIN_EXEC_MB  free megabytes an exec candidate must have to be
                       preferred. Default 128
+  SANDHOME_LOW_EXEC_MB  free megabytes below which the exec root is called low
+                      and doctor fails. Default 100
+  SANDHOME_CRIT_MB   free megabytes below which the exec root is called
+                      critical. Default 32
+  SANDHOME_LOW_EXEC_PCT  percent FREE below which a large exec root is low.
+                      Default 10
+  SANDHOME_PCT_MEANINGFUL_MB  exec root size under which the megabyte rules
+                      decide and the percentage is ignored, because 10% of a
+                      40MB root is 4MB. Default 1024
   SANDHOME_REQUIRE_DIGEST  1 refuses a download when no sha256 tool exists
   SANDHOME_DOH_URL    DNS-over-HTTPS resolver, e.g. https://1.1.1.1/dns-query.
                       Unset, and the fallback is off until it is set. Used
@@ -125,6 +134,7 @@ usage: sh bootstrap.sh [options]
 | variable | read by | default |
 | --- | --- | --- |
 | `SANDHOME_BIN_DIR` | bootstrap.sh sandhome | `$SH_REPO_DIR/bin` |
+| `SANDHOME_CRIT_MB` | space.sh sandhome | `unset, and the feature is off until it is set` |
 | `SANDHOME_DOH_CANARY` | fetch.sh | `https://github.com` |
 | `SANDHOME_DOH_URL` | fetch.sh bootstrap.sh sandhome | `unset, and the feature is off until it is set` |
 | `SANDHOME_EXEC` | env.sh report.sh space.sh bootstrap.sh sandhome fd.sh go.sh jq.sh node.sh python.sh ripgrep.sh rust.sh zig.sh | `unset, and the feature is off until it is set` |
@@ -133,6 +143,8 @@ usage: sh bootstrap.sh [options]
 | `SANDHOME_GO_VERSION_URL` | sandhome go.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_HERE` | profile.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_HOME` | env.sh profile.sh space.sh bootstrap.sh sandhome go.sh node.sh python.sh rust.sh | `unset, and the feature is off until it is set` |
+| `SANDHOME_LOW_EXEC_MB` | space.sh sandhome | `unset, and the feature is off until it is set` |
+| `SANDHOME_LOW_EXEC_PCT` | space.sh sandhome | `unset, and the feature is off until it is set` |
 | `SANDHOME_MIN_EXEC_MB` | space.sh sandhome | `128` |
 | `SANDHOME_NODE_INDEX_URL` | sandhome node.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_NO_PROFILE` | profile.sh | `unset, and the feature is off until it is set` |
@@ -140,6 +152,7 @@ usage: sh bootstrap.sh [options]
 | `SANDHOME_NO_RUN` | bootstrap.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_PASSWD` | env.sh shim.sh sandhome | `unset, and the feature is off until it is set` |
 | `SANDHOME_PASSWD_USERS` | shim.sh sandhome | `unset, and the feature is off until it is set` |
+| `SANDHOME_PCT_MEANINGFUL_MB` | space.sh sandhome | `unset, and the feature is off until it is set` |
 | `SANDHOME_PROFILE` | profile.sh | `1` |
 | `SANDHOME_REF` | bootstrap.sh sandhome | `unset, and the feature is off until it is set` |
 | `SANDHOME_REPO` | env.sh bootstrap.sh sandhome | `unset, and the feature is off until it is set` |

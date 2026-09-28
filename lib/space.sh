@@ -367,6 +367,177 @@ sh_space_plan() {
 
 # sh_space_need MB [WHERE] -> refuse to proceed when there is plainly not enough
 # room for the named install. WHERE is `exec`, `home` or `both` (default both).
+# sh_total_mb DIR -> the total size of the filesystem holding DIR, in megabytes,
+# or nothing. sh_free_mb reads df's fourth column; this reads its second, and the
+# pair is what turns "37MB free" into "37MB of 245MB, 15%". Without the total a
+# low-space warning can only be absolute, and absolute alone is wrong in both
+# directions: 40MB is critical on a 256MB tmpfs and unremarkable on a 4TB disk.
+sh_total_mb() {
+    df -Pk "$1" 2>/dev/null | {
+        if read -r sh_tm_dev sh_tm_1 sh_tm_total sh_tm_free sh_tm_rest; then
+            if read -r sh_tm_dev sh_tm_1 sh_tm_total sh_tm_free sh_tm_rest; then
+                case "$sh_tm_total" in
+                    ''|*[!0-9]*) printf '' ;;
+                    *) printf '%s' $((sh_tm_total / 1024)) ;;
+                esac
+            fi
+        fi
+    }
+}
+
+# sh_space_status [DIR] -> one word naming how much room is left in DIR:
+# ok, low, critical, full, or unknown. `low` and `critical` are the two the
+# agent must hear about, and they are decided on BOTH absolute megabytes and
+# percentage, because either alone is wrong on some machine:
+#
+#   - 40MB free on a 256MB tmpfs is critical (16%) and would pass a
+#     "under 100MB is low" rule on percentage alone being the only test.
+#   - 40MB free on a 4TB disk is fine and would fail an absolute-only rule at
+#     100MB.
+#
+# So a root is low when it is under SANDHOME_LOW_EXEC_MB in absolute terms AND
+# under SANDHOME_LOW_EXEC_PCT of its total, or under either threshold when the
+# total is unknown. A root is critical when free space is under
+# SANDHOME_CRIT_MB, or the percentage is under 5, or nothing can be written at
+# all.
+#
+# # STOP: THIS EXISTS BECAUSE THE FAILURE IS SILENT UNTIL A BUILD DIES, AND
+# SOMETIMES NOT EVEN THEN. Measured on this host, exec root /dev/shm at 245MB:
+#
+#   df: /dev/shm  86% full, 37MB free
+#   sandhome doctor   -> doctor_failures=0
+#   sandhome report   -> exec_free_mb=36      (printed, not flagged)
+#   go build -o $SANDHOME_EXEC/x .
+#     go build: copying .../a.out to /dev/shm/x: no space left on device
+#     go exit=0                                   <- SUCCESS, no artifact
+#
+# Three failures in one. Nothing warned while the root drained. The build then
+# reported exit 0 having produced nothing, so a script or an agent that checks
+# the status code sees a success. And the only check that did fire, on a
+# completely full root, was `exec_runs=no` - a true statement about a mount
+# that cannot hold a file, but a sentence about exec, not about space, and it
+# fires at 0MB rather than at the point where the work stops.
+sh_space_status() {
+    sh_ss_dir=${1:-${SH_EXEC:-/tmp}}
+    sh_ss_free=$(sh_free_mb "$sh_ss_dir" 2>/dev/null)
+    case "$sh_ss_free" in
+        ''|*[!0-9]*) printf 'unknown'; return 0 ;;
+    esac
+    if [ "$sh_ss_free" -le 0 ]; then
+        printf 'full'
+        return 0
+    fi
+    sh_ss_low=${SANDHOME_LOW_EXEC_MB:-100}
+    sh_ss_crit=${SANDHOME_CRIT_MB:-32}
+    sh_ss_lowpct=${SANDHOME_LOW_EXEC_PCT:-10}
+    sh_ss_pct_mb=${SANDHOME_PCT_MEANINGFUL_MB:-1024}
+    # The total, when df will say it. sh_free_mb reads the fourth column only.
+    sh_ss_total=$(sh_total_mb "$sh_ss_dir" 2>/dev/null)
+    case "$sh_ss_total" in
+        ''|*[!0-9]*) sh_ss_total=0 ;;
+    esac
+    sh_ss_lowpct_hits=no
+    if [ "$sh_ss_total" -lt "$sh_ss_pct_mb" ]; then
+        # # STOP: A SMALL ROOT IS JUDGED ON MEGABYTES, NOT ON ITS SHARE.
+        # 10% of a 207MB tmpfs is 20MB, so a share rule calls a 207MB root with
+        # 36MB free "fine at 17%", and the next rust view or Go build is refused
+        # with "no space left on device". On a root this size the absolute floor
+        # is the only honest question: is there enough room for the next thing.
+        if [ "$sh_ss_free" -lt "$sh_ss_crit" ]; then
+            printf 'critical'
+            return 0
+        fi
+        if [ "$sh_ss_free" -lt "$sh_ss_low" ]; then
+            printf 'low'
+            return 0
+        fi
+        printf 'ok'
+        return 0
+    fi
+    # # STOP: A LARGE ROOT IS JUDGED ON ITS SHARE **AND** ITS ABSOLUTE SIZE, AND
+    # NEITHER ALONE WORKS. A pure share rule is nonsense at scale: this host's
+    # 419GB disk sitting at 6.6% free still has 393GB on it, and `low` fired on
+    # it, which is the warning nobody believes the second time they see one. A
+    # pure absolute rule is nonsense at the other end, which is why the small-root
+    # branch above exists.
+    #
+    # So a large root is low when the share is under SANDHOME_LOW_EXEC_PCT AND
+    # the free space is under SANDHOME_LOW_EXEC_MB. Both halves are needed for
+    # either failure to be real: a share under 10% of 419GB is 41GB, which is
+    # not low, and 40MB on a disk is under 10% of almost anything, which is
+    # exactly the case that must warn.
+    #
+    # The cross-multiplied comparison is a readability choice, not a correctness
+    # one: for a strict `<`, truncating division is equivalent, since (a/k) < c
+    # holds exactly when a < k*c. It is written this way so the threshold stays a
+    # readable number in the source instead of a divisor.
+    if [ $((sh_ss_free * 100)) -lt $((sh_ss_total * sh_ss_lowpct)) ] &&
+       [ "$sh_ss_free" -lt "$sh_ss_low" ]; then
+        sh_ss_lowpct_hits=yes
+    fi
+    if [ $((sh_ss_free * 100)) -lt $((sh_ss_total * 5)) ] &&
+       [ "$sh_ss_free" -lt "$sh_ss_crit" ]; then
+        printf 'critical'
+        return 0
+    fi
+    # Critical on a large root needs BOTH a tiny share and too little room for
+    # the next write. Share alone is not enough, and the reason is the same
+    # truncation: 40MB of 4TB is 0.001% of the disk, which is under 5%, and
+    # reporting a 4TB disk as critical for having 40MB on it is a warning nobody
+    # believes the second time they see one.
+    if [ $((sh_ss_free * 100)) -lt $((sh_ss_total * 5)) ] &&
+       [ "$sh_ss_free" -lt "$sh_ss_crit" ]; then
+        printf 'critical'
+        return 0
+    fi
+    if [ "$sh_ss_free" -lt "$sh_ss_crit" ]; then
+        printf 'critical'
+        return 0
+    fi
+    # # STOP: ON A LARGE ROOT THE SHARE ALONE DECIDES "low", WITH NO ABSOLUTE
+    # FLOOR BESIDE IT. The rule was `free < low AND share < lowpct`, and the
+    # absolute half made the percentage meaningless above 100MB: 390GB free of a
+    # 4TB disk is 9.75% used, which is under the 10% line, and the clause
+    # answered "ok" because 390000 is not less than 100. A root this size is
+    # reported on how full it is, which is the only question at this scale, and
+    # the megabytes are already covered by the critical test above.
+    if [ "$sh_ss_lowpct_hits" = yes ]; then
+        printf 'low'
+        return 0
+    fi
+    printf 'ok'
+}
+
+# sh_space_advise [DIR] -> say something on stderr when a root is low, critical
+# or full, and say what to DO about it. 0 always, so a caller can use it as a
+# statement and decide for itself whether being quiet is allowed.
+#
+# The advice is a command, not a description. "the exec root is full" leaves a
+# consumer with nothing to type; the whole point of hearing about it early is
+# that there is still time to act on it.
+sh_space_advise() {
+    sh_sa_dir=${1:-${SH_EXEC:-/tmp}}
+    sh_sa_status=$(sh_space_status "$sh_sa_dir")
+    case "$sh_sa_status" in
+        ok|unknown) return 0 ;;
+    esac
+    sh_sa_free=$(sh_free_mb "$sh_sa_dir" 2>/dev/null)
+    case "$sh_sa_free" in ''|*[!0-9]*) sh_sa_free='?' ;; esac
+    case "$sh_sa_status" in
+        full)
+            sh_warn "$sh_sa_dir is FULL (0MB free). Builds and installs that write there will fail with 'no space left on device'. 'sandhome gc' reclaims sandhome's own caches; if that is not enough, re-run the setup with '--exec DIR' on a roomy exec-capable path, or set SANDHOME_EXEC to one."
+            ;;
+        critical)
+            sh_warn "$sh_sa_dir has only ${sh_sa_free}MB free, which is not enough for a build. Set SANDHOME_EXEC to a roomy exec-capable path now (the exec root holds GOCACHE, GOBIN, CARGO_*, NPM_* and every build artifact), or run 'sandhome gc'. 'sandhome space --probe' lists candidates with their free space."
+            ;;
+        low)
+            sh_warn "$sh_sa_dir has ${sh_sa_free}MB free, which is low for builds. If the next thing is a cross-target or release build it will run out; 'sandhome space --probe' lists roomier candidates and 'sandhome gc' reclaims sandhome's own caches."
+            ;;
+    esac
+    return 0
+}
+
+# sh_space_need() -> refuse a write the root has no room for.
 sh_space_need() {
     sh_sn_mb=$1
     sh_sn_where=${2:-both}
@@ -726,6 +897,9 @@ sh_space_report() {
     printf 'exec_free_mb=%s\n' "$(sh_free_mb "$SH_EXEC")"
     printf 'exec_total_mb=%s\n' "$(sh_total_mb "$SH_EXEC")"
     printf 'exec_bin=%s\n' "$SH_EXEC_BIN"
+    printf 'exec_space=%s\n' "$(sh_space_status "$SH_EXEC")"
+    printf 'exec_space_low_mb=%s\n' "${SANDHOME_LOW_EXEC_MB:-100}"
+    printf 'exec_space_critical_mb=%s\n' "${SANDHOME_CRIT_MB:-32}"
     printf 'min_exec_mb=%s\n' "$SANDHOME_MIN_EXEC_MB"
 }
 

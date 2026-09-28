@@ -42,6 +42,10 @@ sh_report_text() {
     printf 'home_exec=%s\n'   "${SH_HOME_EXEC:-unknown}"
     printf 'exec=%s\n'        "${SH_EXEC:-unknown}"
     printf 'exec_free_mb=%s\n' "$(sh_free_mb "${SH_EXEC:-/tmp}" 2>/dev/null)"
+    # The judgement, not just the number. `exec_free_mb=36` is a fact an agent
+    # has to interpret; `exec_space=low` is the conclusion, and a report whose
+    # whole job is to be read at a glance should carry it.
+    printf 'exec_space=%s\n' "$(sh_space_status "${SH_EXEC:-/tmp}" 2>/dev/null)"
     printf 'installed=%s\n'   "$(sh_lead "${SH_INSTALLED:-}")"
     printf 'adopted=%s\n'     "$(sh_lead "${SH_ADOPTED:-}")"
     # # STOP: THIS LINE PROBES THE DISK. It printed $SH_SHIMS_BUILT, which is
@@ -86,9 +90,10 @@ sh_report_json() {
     printf ',"privilege":"%s","provider":"%s","pty":"%s","passwd":"%s"' \
         "$(sh_json_escape "${SH_PRIVILEGE:-none}")" "$(sh_json_escape "${SH_PROVIDER:-none}")" \
         "$(sh_json_escape "${SH_PTY:-unknown}")" "$(sh_json_escape "${SH_PASSWD:-unknown}")"
-    printf ',"home":"%s","home_exec":"%s","exec":"%s","exec_free_mb":"%s"' \
+    printf ',"home":"%s","home_exec":"%s","exec":"%s","exec_free_mb":"%s","exec_space":"%s"' \
         "$(sh_json_escape "${SH_HOME:-unknown}")" "$(sh_json_escape "${SH_HOME_EXEC:-unknown}")" \
-        "$(sh_json_escape "${SH_EXEC:-unknown}")" "$(sh_json_escape "$(sh_free_mb "${SH_EXEC:-/tmp}" 2>/dev/null)")"
+        "$(sh_json_escape "${SH_EXEC:-unknown}")" "$(sh_json_escape "$(sh_free_mb "${SH_EXEC:-/tmp}" 2>/dev/null)")" \
+        "$(sh_json_escape "$(sh_space_status "${SH_EXEC:-/tmp}" 2>/dev/null)")"
     printf ',"installed":"%s","adopted":"%s","shims":"%s"' \
         "$(sh_json_escape "$(sh_lead "${SH_INSTALLED:-}")")" \
         "$(sh_json_escape "$(sh_lead "${SH_ADOPTED:-}")")" \
@@ -224,6 +229,30 @@ sh_doctor() {
                 sh_doc_fail=$((sh_doc_fail + 1)) ;;
         esac
     done
+    # # STOP: A ROOT THAT IS DRAINING IS A FAILURE, AND IT IS NAMED IN WORDS.
+    # `doctor` is the command ROUTE.md step 2 makes a session run to decide
+    # whether the sandbox is ready, so it is the only place an agent is
+    # guaranteed to look. It printed exec_free_mb and said nothing about it, and
+    # on this host at 86% full it printed `doctor_failures=0`:
+    #   df: /dev/shm 245MB total, 36MB free
+    #   go build -o $SANDHOME_EXEC/x .  ->  no space left on device, exit 0
+    # The failure is not hypothetical and it is not rare: the exec root holds
+    # GOCACHE, GOBIN, CARGO_*, NPM_* and every build artifact, so it is the
+    # first thing a real project fills.
+    #
+    # low is a FAILURE too, not a note. A low root still works, and the point of
+    # hearing about it is that it works NOW and does not after the next install.
+    # A note is read and dismissed; a non-zero exit is read.
+    sh_doc_space=$(sh_space_status "${SH_EXEC:-/tmp}" 2>/dev/null)
+    case "$sh_doc_space" in
+        ok|unknown) ;;
+        *)
+            sh_doc_free=$(sh_free_mb "${SH_EXEC:-/tmp}" 2>/dev/null)
+            case "$sh_doc_free" in ''|*[!0-9]*) sh_doc_free='?' ;; esac
+            printf 'FAIL exec_space=%s (%sMB free; builds and installs will fail. Run "sandhome space --probe" for candidates, "sandhome gc" to reclaim, or re-run setup with --exec DIR)\n' \
+                "$sh_doc_space" "$sh_doc_free"
+            sh_doc_fail=$((sh_doc_fail + 1)) ;;
+    esac
     printf 'doctor_failures=%s\n' "$sh_doc_fail"
     unset -f sh_doctor_check
     [ "$sh_doc_fail" -gt 0 ] && return 1

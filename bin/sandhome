@@ -112,6 +112,15 @@ Environment:
                       Set by env.sh; read it, do not set it.
   SANDHOME_MIN_EXEC_MB  free megabytes an exec candidate must have to be
                       preferred. Default 128
+  SANDHOME_LOW_EXEC_MB  free megabytes below which the exec root is called low
+                      and doctor fails. Default 100
+  SANDHOME_CRIT_MB   free megabytes below which the exec root is called
+                      critical. Default 32
+  SANDHOME_LOW_EXEC_PCT  percent FREE below which a large exec root is low.
+                      Default 10
+  SANDHOME_PCT_MEANINGFUL_MB  exec root size under which the megabyte rules
+                      decide and the percentage is ignored, because 10% of a
+                      40MB root is 4MB. Default 1024
   SANDHOME_REQUIRE_DIGEST  1 refuses a download when no sha256 tool exists
   SANDHOME_DOH_URL    DNS-over-HTTPS resolver, e.g. https://1.1.1.1/dns-query.
                       Unset, and the fallback is off until it is set. Used

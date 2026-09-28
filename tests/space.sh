@@ -467,4 +467,207 @@ sh "$tmp/where3.sh" "$ROOT" "$tmp/pw3" 2>/dev/null)
 t_is "$(sh "$tmp/where3.sh" "$ROOT" "$tmp/pw3" 2>/dev/null)" 'absent' \
     'sh_path_where reports a tool that is nowhere as absent (#43)'
 
+# --- class I: a draining exec root is announced, not discovered --------------
+# # STOP: THE THREE STATES ARE STUBBED, AND EVERY ONE OF THEM IS A CLAIM ABOUT
+# THE RULE. A clause that filled a real filesystem to test a threshold would be
+# a clause about this machine's free space and about whether the test host can
+# write 200MB, which is not the thing under test. sh_free_mb and sh_total_mb are
+# the only two inputs sh_space_status reads, so stubbing them measures the
+# decision and nothing else.
+#
+# The states come from a measurement, not from taste. On this host with the exec
+# root on /dev/shm (245MB total), filling it left 36MB free and:
+#   sandhome doctor        -> doctor_failures=0
+#   go build -o $SANDEXEC/x -> "no space left on device", exit 0
+# So `low` at 36MB of 207MB, and the exit code was the worse half.
+cat > "$tmp/status.sh" <<'STATUS'
+set -u
+. "$1/lib/common.sh"
+. "$1/lib/space.sh"
+# The stubs are defined AFTER the library so they are not overwritten by the
+# definitions in it, and they take no positional arguments because
+# sh_space_status calls them with none.
+sh_free_mb()  { printf '%s' "$SH_TEST_FREE"; }
+sh_total_mb() { printf '%s' "$SH_TEST_TOTAL"; }
+sh_space_status /anywhere
+STATUS
+sp() {
+    SH_TEST_FREE=$1 SH_TEST_TOTAL=$2 sh "$tmp/status.sh" "$ROOT" 2>/dev/null
+}
+t_is "$(sp 0 207)"      'full'     'a root with no space at all is full'
+t_is "$(sp 12 207)"     'critical' 'a root with 12MB of 207MB is critical'
+t_is "$(sp 36 207)"     'low'      'the measured 36MB-of-207MB case is low'
+t_is "$(sp 150 207)"    'ok'       'a root with room to spare is ok'
+# A large root is judged on its share, so a genuinely draining 4TB disk is
+# caught and a nearly-empty 4TB disk is not.
+# # STOP: ON A LARGE ROOT, `low` MEANS UNDER 100MB FREE, NOT "UNDER 10%".
+# Both conditions are required, and the absolute one is the one that decides in
+# practice. The share alone is nonsense at this size, and the bootstrap suite
+# proved it: this host's 419GB disk at 6.6% free still has 393GB on it, a pure
+# share rule called it low, and `doctor` failed a freshly built home that had
+# 27GB free. A warning that fires on a healthy machine is worse than no warning,
+# because it teaches the reader to skip the line that matters.
+t_is "$(sp 300 4000000)"   'ok'  'a 4TB disk with 300MB free is ok (0.075% free but 300MB)'
+t_is "$(sp 2000 4000000)"  'ok'  'a 4TB disk with 2GB free is ok'
+t_is "$(sp 900000 4000000)" 'ok'  'a 4TB disk with 900GB free is ok'
+# The case the share IS for, and the control that proves the pair works: a disk
+# under 10% free that is also under 100MB free. 40MB of 4TB is 0.001% free and
+# cannot build anything, and that is the shape a draining root actually has.
+t_is "$(sp 40 4000000)"    'low'  'a 4TB disk down to 40MB is low'
+t_is "$(sp 80 4000000)"    'low'  'a 4TB disk down to 80MB is low'
+t_is "$(sp 100 4000000)"   'ok'   'a 4TB disk at exactly 100MB free is not low'
+# The regression that made this rule necessary, as its own clause: the host disk
+# and its real numbers.
+t_is "$(sp 27641 419340)"  'ok'   'the 419GB host disk at 6.6% free is ok (27GB free)'
+# # STOP: THE SHARE IS CROSS-MULTIPLIED, NOT DIVIDED, AND THIS IS THE CLAIM
+# THAT PROVES IT. `free*100/total` truncates: 40MB of 4TB is 0.001%, which
+# /100 becomes 0, and 0 is under every threshold, so the biggest disk on the
+# machine read as the emptiest. Measured, before the cross-multiply:
+# free=40 total=4000000 answered "low" by way of a 0% share.
+# # STOP: THE BOUNDARY IS THE CLAIM THAT SEPARATES DIVIDING FROM
+# CROSS-MULTIPLYING, AND IT IS HERE BECAUSE NOTHING ELSE DOES.
+# SANDHOME_LOW_EXEC_PCT is the share of FREE space below which a root is low, so
+# on a 4000000MB disk the line is 400000MB free. Exactly on the line is not low;
+# just under it is. Dividing truncates, so 9.9% free reads as 9 and fires on the
+# wrong side of a boundary it cannot actually see - and dividing cannot
+# represent any share below 1% at all, which is where 40MB-of-4TB lives.
+# Cross-multiplying is exact: free*100 vs total*pct, compared strictly.
+t_is "$(sp 400000 4000000)" 'ok'   'a disk at exactly the 10% free line is not low'
+# And the two directions of the same mistake, which a percentage rule gets
+# backwards if it is not written down: a big disk with a small absolute number is
+# nearly EMPTY (ok) and a small disk with a big absolute number is nearly FULL
+# (low). Both were written the other way round first.
+t_is "$(sp 900000 4000000)" 'ok' 'a big absolute number on a big disk is ok'
+t_is "$(sp 45 50)"        'low'  'a 50MB disk with 45MB free is nearly full'
+# And the inverse: a large root needs the absolute floor too, because a share
+# alone would call a disk with 900GB free and 3GB of headroom fine.
+t_is "$(sp 5 4000000)"   'critical' 'a 4TB disk with 5MB free is critical'
+# A tiny root cannot be judged by its share: 10% of 40MB is 4MB, which would
+# call every state critical.
+t_is "$(sp 5 50)"        'critical' 'a 50MB root with 5MB free is critical'
+# 30MB of a 50MB root is 60% gone, which is critical and not merely low. This
+# was written expecting "low" and the code was right: an expectation that the
+# measured behaviour contradicts is the expectation that gets corrected.
+t_is "$(sp 30 50)"       'critical' 'a 50MB root with 30MB free is critical, not low'
+t_is "$(sp 45 50)"       'low'      'a 50MB root with 45MB free is low'
+t_is "$(sp 40 40)"       'low'      'a 40MB root with nothing free is not ok'
+# A root whose total cannot be read is judged on megabytes alone, and says so
+# rather than guessing a share.
+t_is "$(SH_TEST_FREE=36 SH_TEST_TOTAL=x sh "$tmp/status.sh" "$ROOT" 2>/dev/null)" \
+    'low'  'a root with an unreadable total is judged on megabytes alone'
+t_is "$(SH_TEST_FREE=x SH_TEST_TOTAL=207 sh "$tmp/status.sh" "$ROOT" 2>/dev/null)" \
+    'unknown' 'a root with an unreadable free count is unknown, not ok'
+
+# --- class I: the advice is a command, and it names one ----------------------
+# # STOP: A WARNING WITH NO ACTION IS A NOTE. Each of the three messages has to
+# contain the thing a reader types next, because the whole value of hearing about
+# a draining root early is that there is still time to act on it.
+adv=$(SH_TEST_FREE=0 SH_TEST_TOTAL=207 sh -c '
+    . "$0/lib/common.sh"; . "$0/lib/space.sh"
+    sh_free_mb() { printf "%s" "$SH_TEST_FREE"; }
+    sh_total_mb() { printf "%s" "$SH_TEST_TOTAL"; }
+    sh_space_advise /anywhere' "$ROOT" 2>&1)
+t_contains "$adv" 'FULL' 'the full message says the root is full'
+t_contains "$adv" 'gc'  'the full message names gc'
+t_contains "$adv" '--exec' 'the full message names the --exec override'
+adv_low=$(SH_TEST_FREE=36 SH_TEST_TOTAL=207 sh -c '
+    . "$0/lib/common.sh"; . "$0/lib/space.sh"
+    sh_free_mb() { printf "%s" "$SH_TEST_FREE"; }
+    sh_total_mb() { printf "%s" "$SH_TEST_TOTAL"; }
+    sh_space_advise /anywhere' "$ROOT" 2>&1)
+t_contains "$adv_low" '36MB' 'the low message carries the number it judged'
+t_contains "$adv_low" 'space --probe' 'the low message names the candidate listing'
+# And a healthy root says nothing at all, because a warning on every command
+# trains a reader to skip warnings.
+adv_ok=$(SH_TEST_FREE=200 SH_TEST_TOTAL=207 sh -c '
+    . "$0/lib/common.sh"; . "$0/lib/space.sh"
+    sh_free_mb() { printf "%s" "$SH_TEST_FREE"; }
+    sh_total_mb() { printf "%s" "$SH_TEST_TOTAL"; }
+    sh_space_advise /anywhere' "$ROOT" 2>&1)
+t_is "$adv_ok" '' 'a healthy root produces no space advice at all'
+
+# --- class I: doctor fails on a draining root -------------------------------
+# # STOP: `low` IS A FAILURE AND NOT A NOTE, BECAUSE doctor IS THE GATE. ROUTE.md
+# step 2 makes a session run doctor to decide whether the sandbox is ready, so
+# it is the one place an agent is guaranteed to look. A low root still works, and
+# the value of hearing about it is that it works NOW; a note is read and
+# dismissed, a non-zero exit is read. The clause drives the real sh_doctor with
+# the two space inputs stubbed, because the check has to be inside the gate and
+# not merely printed somewhere nearby.
+# # STOP: THE HEREDOC IS QUOTED, OR THE FIXTURE IS WRITTEN WITH THE CALLER'S
+# DOLLARS ALREADY SUBSTITUTED. Written as `<<DOC`, bash expanded $1 and $3 while
+# writing the file, so the script on disk read `. "/lib/common.sh"` - the test
+# env's own root - and failed with "cannot open /lib/common.sh". The clause
+# appeared to be about the space check and was measuring the wrong program
+# entirely. `<<'DOC'` writes the dollars.
+cat > "$tmp/doc.sh" <<'DOC'
+set -u
+for m in common detect space fetch env toolchain report; do
+    # shellcheck source=/dev/null
+    . "$1/lib/$m.sh"
+done
+SH_HOME=$3/home
+SH_EXEC=$3/exec
+SH_EXEC_BIN=$3/exec/bin
+SH_EXEC_VIEWS=$3/exec/views
+SH_HOME_EXEC=no
+export SH_HOME SH_EXEC SH_EXEC_BIN SH_EXEC_VIEWS SH_HOME_EXEC
+mkdir -p "$SH_EXEC_BIN" "$SH_EXEC_VIEWS" "$SH_HOME" 2>/dev/null
+# Only the space inputs are stubbed; the root checks the doctor already had are
+# real, so the clause is about the new check and not about a doctor that cannot
+# run at all.
+sh_free_mb()  { printf '%s' "$SH_TEST_FREE"; }
+sh_total_mb() { printf '%s' "$SH_TEST_TOTAL"; }
+sh_doctor 2>&1
+DOC
+# `tmp` was reassigned to the roomy fixture directory partway through this file,
+# so the doctor fixture is created under it and NOT under the original tmp; the
+# script mkdir -p's its own roots, and a path that cannot be made would leave
+# doctor with nothing to check and the clause would pass for the wrong reason.
+doc_home=$tmp/dh
+rm -rf "$doc_home"
+mkdir -p "$doc_home" 2>/dev/null
+doc=$(SH_TEST_FREE=36 SH_TEST_TOTAL=207 sh "$tmp/doc.sh" "$ROOT" x "$doc_home" 2>&1)
+case "$doc" in
+    *'FAIL exec_space=low'*) t_ok 0 'doctor fails when the exec root is low (#60)' ;;
+    *) t_ok 1 "doctor fails when the exec root is low (#60) (got: $(printf '%s' "$doc" | tail -2))" ;;
+esac
+# The control that matters: a healthy root does not fail doctor. A guard that
+# only ever refuses is indistinguishable from a good one until it is shown
+# accepting a correct input. doc_ok is COMPUTED HERE, before anything reads it:
+# a first draft read doc_ok_fail_n three clauses above the assignment, so it
+# was always empty and the comparison silently tested "" against a number.
+doc_ok=$(SH_TEST_FREE=150 SH_TEST_TOTAL=207 sh "$tmp/doc.sh" "$ROOT" x "$doc_home" 2>&1)
+case "$doc_ok" in
+    *'exec_space'*) t_ok 1 'doctor says nothing about space on a healthy root (#60)' ;;
+    *) t_ok 0 'doctor says nothing about space on a healthy root (#60)' ;;
+esac
+# The count is not asserted as exactly 1: this harness has no pty and no
+# passwd, so the shim checks fail too. What is asserted is that the space
+# failure is IN the count, and that a healthy root fails FEWER times, which is
+# the claim that a non-zero exit means "not ready". awk rather than sed, and
+# the LAST doctor_failures= line, so a stray earlier match cannot decide it.
+doc_fail_n=$(printf '%s\n' "$doc" | awk '/^doctor_failures=/{v=$0} END{sub(/^doctor_failures=/,"",v); print v}')
+doc_ok_fail_n=$(printf '%s\n' "$doc_ok" | awk '/^doctor_failures=/{v=$0} END{sub(/^doctor_failures=/,"",v); print v}')
+case "$doc_fail_n" in
+    ''|0) t_ok 1 "doctor_failures counts the space failure (#60) (got $doc_fail_n)" ;;
+    *)    t_ok 0 "doctor_failures counts the space failure (#60) (got $doc_fail_n)" ;;
+esac
+case "$doc_ok_fail_n" in
+    ''|*[!0-9]*)
+        t_ok 1 "a healthy root fails doctor fewer times than a low one (#60) (got '$doc_ok_fail_n' for a healthy root and '$doc_fail_n' for a low one)" ;;
+    *)
+        if [ "$doc_ok_fail_n" -lt "$doc_fail_n" ]; then
+            t_ok 0 "a healthy root fails doctor fewer times than a low one (#60) ($doc_ok_fail_n < $doc_fail_n)"
+        else
+            t_ok 1 "a healthy root fails doctor fewer times than a low one (#60) ($doc_ok_fail_n vs $doc_fail_n)"
+        fi ;;
+esac
+# A full root is worse than low and is named as such.
+doc_full=$(SH_TEST_FREE=0 SH_TEST_TOTAL=207 sh "$tmp/doc.sh" "$ROOT" x "$doc_home" 2>&1)
+case "$doc_full" in
+    *'FAIL exec_space=full'*) t_ok 0 'doctor names a full exec root as full (#60)' ;;
+    *) t_ok 1 "doctor names a full exec root as full (#60) (got: $(printf '%s' "$doc_full" | tail -2))" ;;
+esac
+
 t_end

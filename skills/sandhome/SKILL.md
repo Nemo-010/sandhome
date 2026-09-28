@@ -89,6 +89,7 @@ installed without an error and does not answer is reported as a failure.
 | ANSI codes inside `jq` or `git` output | `fakepty` is on; `SANDHOME_SHIMS=0` |
 | a tool is absent from a fresh shell | `$SANDHOME_HOME/env.sh` was not read |
 | a tool is absent even after `env.sh` was read | it was adopted and could not be linked into the exec view; `sandhome install --force <name>` |
+| `doctor` says `FAIL exec_space=low` or `=critical` | the exec root is draining and a build will fail with `no space left on device`. `sandhome space` names the state, `sandhome space --probe` lists roomier candidates, `sandhome gc` reclaims sandhome's own caches, and re-running setup with `--exec DIR` moves everything to a roomy path |
 
 ## Add a toolchain
 

@@ -25,6 +25,47 @@ the page to read before adding a toolchain to it.
   fails for want of room. `SANDHOME_MIN_EXEC_MB` raises the bar; when no
   candidate clears it the first that works is used and a warning says so.
 
+  **A root that is draining is announced, not discovered.** The exec root holds
+  `GOCACHE`, `GOBIN`, `CARGO_TARGET_DIR`, `NPM_CONFIG_PREFIX` and every build
+  artifact, so it is the first thing a real project fills, and the failure is
+  quiet. Measured here, with a 245MB exec root at 36MB free:
+
+  ```
+  $ sandhome doctor ; echo $?
+  ok   exec_runs=yes
+  doctor_failures=0                 # before
+  $ go build -o "$SANDHOME_EXEC/x" .
+  go build: copying .../a.out to ...: no space left on device
+  $ echo $?
+  0                                 # and the exit code was 0
+  ```
+
+  Three failures in one: nothing warned while the root drained, the build
+  reported success having produced nothing, and the only check that fired on a
+  completely full root said `exec_runs=no`, which is true and is a sentence
+  about `execve` rather than about space. So the root now carries a state and
+  the gate fails on it:
+
+  | state | when | what you see |
+  | --- | --- | --- |
+  | `ok` | room to spare | nothing |
+  | `low` | under `SANDHOME_LOW_EXEC_MB` (100) on a small root, or under `SANDHOME_LOW_EXEC_PCT` (10) free on a large one | a `low` line from `sandhome space`, `exec_space=low` in the report, a `[!]` on the next install, and `doctor` exits non-zero |
+  | `critical` | under `SANDHOME_CRIT_MB` (32), or under 5% free of a large root | the same, naming the number and the remedy |
+  | `full` | nothing left | the same, plus `gc` and `--exec` by name |
+
+  A small root is judged on megabytes and a large one needs **both** a share and
+  an absolute floor, because either alone is wrong. A pure share rule is nonsense
+  at scale: the 419GB disk this was written on sat at 6.6% free with 393GB still
+  on it, a share-only rule called that `low`, and `doctor` failed a freshly built
+  home with 27GB free. A pure absolute rule is nonsense at the small end, which is
+  why a root under `SANDHOME_PCT_MEANINGFUL_MB` (1GB) is judged on megabytes
+  alone. So on a large root `low` means *both* under 10% free and under
+  `SANDHOME_LOW_EXEC_MB`, which is the shape a genuinely draining root has: 40MB
+  of 4TB is 0.001% free and cannot build anything.
+
+  Every message names a command rather than only describing the state, because
+  the value of hearing about it early is that there is still time to act.
+
 When the home runs binaries the two collapse and nothing is copied. When it does
 not, a toolchain installs into the home and an **exec view** is mirrored onto the
 exec root. The rule for each entry:
@@ -213,6 +254,7 @@ pipes under every shell the host has.
 | no echo / no line editing over ssh | the shims are not loaded; `SANDHOME_SHIMS=1` and restart the shell |
 | an ssh login is refused with `publickey` | the login name is absent from the synthetic passwd; set `SANDHOME_PASSWD_USERS` |
 | a full-screen program fails | there is no pty; this is the one thing `errandsh` cannot fix |
+| `doctor` says `FAIL exec_space=low` or `=critical` | the exec root is draining. `sandhome space` names the state and the numbers, `sandhome space --probe` lists roomier candidates, `sandhome gc` reclaims sandhome's own caches, and re-running the setup with `--exec DIR` moves everything to a roomy path. See section 1 for the thresholds |
 | the exec root filled | `sandhome gc`; staging, exec caches (`cache/`, `tmp/`, `go-bin/` entries older than DAYS), and home tmp older than DAYS are removed, toolchain data stays. `GOCACHE`, `GOBIN`, `NPM_CONFIG_PREFIX`, `CARGO_INSTALL_ROOT`, `CARGO_TARGET_DIR`, and `target/` all land on the exec root: heavy and multi-target builds need a roomy `--exec DIR`. If no candidate fits, the install names the constraint before writing anything |
 | the exec root was cleared by a restart | the tmpfs exec view is gone while `env.sh` persists; re-run the setup, then `sandhome install <name>` to rebuild the view |
 

@@ -33,6 +33,16 @@ sh_env_write_fragment() {
     sh_ewf_tmp="$sh_ewf_file.tmp.$$"
     cat > "$sh_ewf_tmp" || return 1
     mv "$sh_ewf_tmp" "$sh_ewf_file" || return 1
+    # # STOP: WRITING A FRAGMENT SAYS WHETHER THE ROOT IT POINTS AT HAS ROOM.
+    # Every toolchain fragment names an exec-root path - GOCACHE, GOBIN,
+    # CARGO_TARGET_DIR, NPM_CONFIG_PREFIX - and the next build fills that root.
+    # The install is the last moment the operator is still choosing roots, so the
+    # space is measured here and said out loud, while a choice can still be
+    # made. Without it the only warning about a 36MB root arrives from a build
+    # that has already failed, and sometimes with exit 0.
+    if command -v sh_space_status >/dev/null 2>&1; then
+        sh_space_advise "${SH_EXEC:-/tmp}"
+    fi
     return 0
 }
 

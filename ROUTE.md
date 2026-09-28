@@ -194,6 +194,7 @@ More than one row can apply and then both are read.
 | an ssh login is refused, a program needs a passwd entry or a terminal, bind is denied, there is no pty | `skills/sealed-sandbox/SKILL.md` |
 | a local dev server, `npm run dev`, or any process that listens | nothing can listen here; see `skills/sealed-sandbox/SKILL.md` no-listen row: dial out to a relay or emit static output |
 | the exec root is full | `docs/guide.md` section 7, which carries the `gc` row |
+| `doctor` reports `FAIL exec_space=low` or `=critical` | the exec root is draining and the next build will fail with `no space left on device`. `sandhome space` names the state and the numbers, `sandhome space --probe` lists roomier candidates, `sandhome gc` reclaims sandhome's own caches, and re-running the first command with `--exec DIR` moves everything |
 | `doctor` reports `FAIL exec_link_<tool>=broken` | a link in the exec view is not executable, or points at itself; `sandhome install <tool>` rebuilds it. A tool that was adopted rather than installed is the usual cause |
 | a tool is on PATH but a shell that inherited nothing cannot find it | it was adopted and could not be linked into the exec view; `sandhome install --force <tool>` puts a copy there |
 | `doctor` reports a `FAIL <VAR>=unset` for `GOBIN`, `GOCACHE`, `CARGO_INSTALL_ROOT` or `NPM_CONFIG_PREFIX` | that toolchain was adopted, so its fragment did not carry the exec-root paths; `sandhome install --force <tool>` writes a fragment that does |
