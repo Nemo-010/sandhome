@@ -716,6 +716,15 @@ cmd_test() {
     sh "$SH_REPO_DIR/tests/run.sh"
 }
 
+case "${2:-}" in
+    -h|--help)
+        case "${1:-}" in
+            doctor|env|path|space|toolchains|install|ensure|repair|shims|shell|pty|exec|report|gc|test|selftest|version|help)
+                cmd_help "${1:-help}"
+                exit 0 ;;
+        esac ;;
+esac
+
 case "${1:-help}" in
     doctor)      sh_env_load; sh_doctor || exit 1 ;;
     env)         cmd_env ;;

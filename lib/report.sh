@@ -46,6 +46,8 @@ sh_report_text() {
     # has to interpret; `exec_space=low` is the conclusion, and a report whose
     # whole job is to be read at a glance should carry it.
     printf 'exec_space=%s\n' "$(sh_space_status "${SH_EXEC:-/tmp}" 2>/dev/null)"
+    printf 'max_exec_free_mb=%s\n' "$(sh_space_max_exec_free 2>/dev/null)"
+    printf 'exec_ceiling=%s\n' "$(sh_space_ceiling 2>/dev/null)"
     printf 'installed=%s\n'   "$(sh_lead "${SH_INSTALLED:-}")"
     printf 'adopted=%s\n'     "$(sh_lead "${SH_ADOPTED:-}")"
     # # STOP: THIS LINE PROBES THE DISK. It printed $SH_SHIMS_BUILT, which is
@@ -90,10 +92,12 @@ sh_report_json() {
     printf ',"privilege":"%s","provider":"%s","pty":"%s","passwd":"%s"' \
         "$(sh_json_escape "${SH_PRIVILEGE:-none}")" "$(sh_json_escape "${SH_PROVIDER:-none}")" \
         "$(sh_json_escape "${SH_PTY:-unknown}")" "$(sh_json_escape "${SH_PASSWD:-unknown}")"
-    printf ',"home":"%s","home_exec":"%s","exec":"%s","exec_free_mb":"%s","exec_space":"%s"' \
+    printf ',"home":"%s","home_exec":"%s","exec":"%s","exec_free_mb":"%s","exec_space":"%s","max_exec_free_mb":"%s","exec_ceiling":"%s"' \
         "$(sh_json_escape "${SH_HOME:-unknown}")" "$(sh_json_escape "${SH_HOME_EXEC:-unknown}")" \
         "$(sh_json_escape "${SH_EXEC:-unknown}")" "$(sh_json_escape "$(sh_free_mb "${SH_EXEC:-/tmp}" 2>/dev/null)")" \
-        "$(sh_json_escape "$(sh_space_status "${SH_EXEC:-/tmp}" 2>/dev/null)")"
+        "$(sh_json_escape "$(sh_space_status "${SH_EXEC:-/tmp}" 2>/dev/null)")" \
+        "$(sh_json_escape "$(sh_space_max_exec_free 2>/dev/null)")" \
+        "$(sh_json_escape "$(sh_space_ceiling 2>/dev/null)")"
     printf ',"installed":"%s","adopted":"%s","shims":"%s"' \
         "$(sh_json_escape "$(sh_lead "${SH_INSTALLED:-}")")" \
         "$(sh_json_escape "$(sh_lead "${SH_ADOPTED:-}")")" \
