@@ -5,21 +5,19 @@ environment, POSIX `sh` throughout.
 
 ## Paste this to any agent, then give it your task
 
-> Set up my sandbox: fetch
-> https://raw.githubusercontent.com/talaria0101/sandhome/main/bootstrap.sh ,
-> run `sh bootstrap.sh --toolset developer`, then
-> `. "$HOME/.local/share/sandhome/env.sh"`, then `sandhome doctor` - when it
-> exits 0, the sandbox is ready; get on with my task and only come back to me
-> if doctor fails.
+> Setup your env as per
+> https://raw.githubusercontent.com/talaria0101/sandhome/main/ROUTE.md
+> and then <the task>.
 
-That one instruction is the whole contract: the bootstrap detects the machine
-and installs or adopts every tool, `env.sh` puts them on PATH, and
-`sandhome doctor` exits 0 only when every invariant actually holds - so the
-agent stops setting up and starts working without asking you anything.
+That one instruction is the whole contract: [`ROUTE.md`](ROUTE.md) sets up
+the sandbox, confirms `sandhome doctor` exits 0, and routes any failure to
+the one page that answers it. So the agent stops setting up and starts
+working without asking you anything.
 
-**An agent setting up a sandbox should read
-[`skills/sandhome/SKILL.md`](skills/sandhome/SKILL.md) and nothing else.**
-An agent working on this repository should read
+**An agent setting up a sandbox should read [`ROUTE.md`](ROUTE.md) and
+nothing else.** Harnesses that discover skills from a `skills/` directory
+use [`skills/sandhome/SKILL.md`](skills/sandhome/SKILL.md) instead, which
+carries the same fast path. An agent working on this repository should read
 [`AGENTS.md`](AGENTS.md), which routes to the rest.
 
 ## Start working
@@ -70,6 +68,7 @@ the four cases the mirror has to get right, are in
 
 | path | what it is |
 | --- | --- |
+| [`ROUTE.md`](ROUTE.md) | **the consumer entry point**: one paste that sets up, checks, and routes. A human pastes its raw URL and the task, and nothing else. |
 | [`AGENTS.md`](AGENTS.md) | orientation for an agent working on this repository |
 | [`skills/sandhome/SKILL.md`](skills/sandhome/SKILL.md) | **the entry point for an agent setting up a sandbox** |
 | [`skills/errandsh/SKILL.md`](skills/errandsh/SKILL.md) | a line discipline for a session with no pty |
