@@ -463,4 +463,55 @@ else
     t_skip 'no .profile to check the exec-root move against'
 fi
 
+# # STOP: A SHELL WITH NO HOME GETS A MESSAGE, NOT A SHELL ERROR. This file runs
+# under `set -u`, and the candidate list for the library used a bare `$HOME`, so
+# the preamble ended the process before it could say anything:
+#
+#   $ env -i PATH=/exec/bin:/usr/bin:/bin sandhome doctor
+#   /exec/bin/sandhome: 44: HOME: parameter not set      (exit 126)
+#
+# Every command failed that way - version, doctor, space, path, env, report,
+# toolchains - because the preamble runs before anything else. It is the worst
+# failure for the case #40 exists to serve: a tool harness that sets no HOME,
+# running the command the router names, getting an error that mentions neither
+# sandhome, nor the library, nor what to set.
+#
+# The clauses run the real binary in a real `env -i` with no HOME. A control
+# matters as much: the same shell with SANDHOME_HOME set must still WORK, or
+# the fix is "refuse everything", and a refusal is not the same as a repair.
+nh_bin=$work/nohome-bin
+mkdir -p "$nh_bin"
+cp "$ROOT/bin/sandhome" "$nh_bin/sandhome"
+nh_out=$(env -i PATH="$nh_bin:$ROOT/bin:/usr/bin:/bin" sh "$nh_bin/sandhome" version 2>&1)
+nh_rc=$?
+case "$nh_out" in
+    # The shell's own wording is "parameter not set", and a backtick-prefixed
+    # path is how dash and bash both report it. A message of OURS is allowed to
+    # contain the word HOME - it has to, to name the lever - so matching on that
+    # word proves nothing and the first version of this clause failed against
+    # correct output.
+    *"parameter not set"*|*': not found'*) t_ok 1 "no HOME produces a shell error, not a message (got $nh_out)" ;;
+    *"sandhome"*) t_ok 0 'a shell with no HOME gets a message naming sandhome' ;;
+    *) t_ok 1 "a shell with no HOME gets a message naming sandhome (got $nh_out)" ;;
+esac
+if [ "$nh_rc" -eq 126 ]; then
+    t_ok 1 'a shell with no HOME does not die with 126'
+else
+    t_ok 0 'a shell with no HOME does not die with 126'
+fi
+# The message must say what to do, and this is the case where a harness has
+# nothing to go on: the shell is bare, so the only lever is an exported
+# variable.
+case "$nh_out" in
+    *SANDHOME_REPO_DIR*|*HOME*) t_ok 0 'the no-HOME message names the lever' ;;
+    *) t_ok 1 "the no-HOME message names the lever (got $nh_out)" ;;
+esac
+# The control: with SANDHOME_HOME and no HOME, the command must work.
+nh_ok=$(env -i SANDHOME_HOME="$work" SANDHOME_REPO_DIR="$ROOT" \
+        PATH="$nh_bin:/usr/bin:/bin" sh "$nh_bin/sandhome" version 2>&1)
+case "$nh_ok" in
+    *sandhome/1*) t_ok 0 'the command still works with SANDHOME_HOME and no HOME' ;;
+    *) t_ok 1 "the command still works with SANDHOME_HOME and no HOME (got $nh_ok)" ;;
+esac
+
 t_end

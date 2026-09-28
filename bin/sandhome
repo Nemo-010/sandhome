@@ -40,14 +40,29 @@ else
     # SANDHOME_REPO_DIR. So the same three roots the bootstrap and env.sh
     # resolve are searched for that file, and the single value it records is
     # read the way the shell's own read reads it - the library may not use grep.
+    # # STOP: NO HOME IS NOT AN ABORT. `set -u` is on for this whole file, so a
+    # bare `$HOME` in this candidate list ends the process with the shell's own
+    # message and nothing else:
+    #   $ env -i PATH=/exec/bin:/usr/bin:/bin sandhome doctor
+    #   /exec/bin/sandhome: 44: HOME: parameter not set        (exit 126)
+    # That is the worst possible failure for the case this block exists to
+    # serve: a tool harness that sets no HOME, running the command the router
+    # names, getting a raw shell error that mentions neither sandhome, nor the
+    # library, nor what to set. Every command failed this way - version, doctor,
+    # space, path, env, report, toolchains - because this preamble runs before
+    # anything else. `${HOME:-}` is used throughout, and the roots that need a
+    # home now say so in words rather than aborting.
     if [ ! -n "$sh_repo" ] || [ ! -r "$sh_repo/lib/common.sh" ]; then
         for sh_repo_home in \
             "${SANDHOME_HOME:-}" \
             "${XDG_DATA_HOME:-}/sandhome" \
-            "$HOME/.local/share/sandhome" \
-            "$HOME/.sandhome"
+            "${HOME:-}/.local/share/sandhome" \
+            "${HOME:-}/.sandhome"
         do
-            [ -n "$sh_repo_home" ] || continue
+            [ -n "${sh_repo_home:-}" ] || continue
+            case "$sh_repo_home" in
+                /.local/share/sandhome|/.sandhome) continue ;;
+            esac
             [ -r "$sh_repo_home/env.sh" ] || continue
             while IFS= read -r sh_repo_l; do
                 # The line is `export SANDHOME_REPO_DIR=${SANDHOME_REPO_DIR:-'PATH'}`
@@ -81,7 +96,12 @@ else
         done
     fi
     if [ -z "$sh_repo" ] || [ ! -r "$sh_repo/lib/common.sh" ]; then
-        printf 'sandhome: cannot find the sandhome library; set SANDHOME_REPO_DIR to the checkout, or run the copy in the checkout\n' >&2
+        if [ -z "${HOME:-}" ] && [ -z "${SANDHOME_HOME:-}" ] && [ -z "${XDG_DATA_HOME:-}" ]; then
+            printf 'sandhome: cannot find the sandhome library, and this shell has no HOME to look in\n' >&2
+            printf 'sandhome: set SANDHOME_REPO_DIR to the checkout, or set HOME and run this again\n' >&2
+        else
+            printf 'sandhome: cannot find the sandhome library; set SANDHOME_REPO_DIR to the checkout, or run the copy in the checkout\n' >&2
+        fi
         exit 2
     fi
 fi
