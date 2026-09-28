@@ -14,6 +14,23 @@ environment variable, with the output each one produces - and it is GENERATED
 from the code, so it cannot name a flag that does not exist. `docs/guide.md`
 carries every failure mode. What follows is the fast path, and it is enough.
 
+## The one-line instruction a human can paste
+
+Everything in this skill compresses to one instruction, which is what a human
+will actually type before giving you a task:
+
+> Set up my sandbox: fetch
+> https://raw.githubusercontent.com/talaria0101/sandhome/main/bootstrap.sh ,
+> run `sh bootstrap.sh --toolset developer`, then
+> `. "$HOME/.local/share/sandhome/env.sh"`, then `sandhome doctor` - when it
+> exits 0, the sandbox is ready; get on with my task and only come back to me
+> if doctor fails.
+
+When you receive that instruction, it means: do the four setup commands,
+confirm doctor exits 0, and then proceed with the task without reporting back
+on setup at all. The rest of this skill exists for the case where doctor does
+not exit 0.
+
 ## Set up, in four commands
 
 ```sh

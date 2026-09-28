@@ -3,6 +3,20 @@
 A portable home for agents that run inside a sealed sandbox: one bootstrap, one
 environment, POSIX `sh` throughout.
 
+## Paste this to any agent, then give it your task
+
+> Set up my sandbox: fetch
+> https://raw.githubusercontent.com/talaria0101/sandhome/main/bootstrap.sh ,
+> run `sh bootstrap.sh --toolset developer`, then
+> `. "$HOME/.local/share/sandhome/env.sh"`, then `sandhome doctor` - when it
+> exits 0, the sandbox is ready; get on with my task and only come back to me
+> if doctor fails.
+
+That one instruction is the whole contract: the bootstrap detects the machine
+and installs or adopts every tool, `env.sh` puts them on PATH, and
+`sandhome doctor` exits 0 only when every invariant actually holds - so the
+agent stops setting up and starts working without asking you anything.
+
 **An agent setting up a sandbox should read
 [`skills/sandhome/SKILL.md`](skills/sandhome/SKILL.md) and nothing else.**
 An agent working on this repository should read
