@@ -20,6 +20,29 @@ export SH_REPO_DIR SH_LIB_DIR
 
 t_begin unit
 
+# sh_ref_default VAR FILE -> the default the reference's table records for VAR,
+# or the empty string. It reads the committed FILE and never runs the generator,
+# which is the whole point: tests/docs.sh already compares the two, so a clause
+# that used the generator too would agree with it by construction. The value is
+# taken with parameter expansion rather than with cut or awk, because this file
+# runs on a userland that may carry neither.
+sh_ref_default() {
+    sh_rd_var=$1
+    sh_rd_file=$2
+    sh_rd_want="| \`$sh_rd_var\` |"
+    sh_rd_got=''
+    while IFS= read -r sh_rd_line || [ -n "$sh_rd_line" ]; do
+        case "$sh_rd_line" in
+            "$sh_rd_want"*)
+                sh_rd_got=${sh_rd_line##*| \`}
+                sh_rd_got=${sh_rd_got%\` |*}
+                break
+                ;;
+        esac
+    done < "$sh_rd_file"
+    printf '%s' "$sh_rd_got"
+}
+
 t_is "$(sh_split_on ',' 'a,b,c')" 'a b c' 'split_on replaces commas'
 t_is "$(sh_split_on '/@' '@scope/pkg')" ' scope pkg' 'split_on takes several separators'
 t_is "$(sh_split_on ',' '')" '' 'split_on of an empty string is empty'
@@ -257,7 +280,25 @@ t_is "$(SANDHOME_SHA256_JQ_LINUX_AMD64=pinasset sh_pin_for "$JQ_URL" jq)" 'pinas
 t_is "$(SANDHOME_SHA256_JQ_LINUX_AMD64=pinasset sh_pin_for "$JQ_URL" jq '')" 'pinasset' \
     'the asset pin answers even when the module passes no name'
 t_is "$(SANDHOME_SHA256_JQ=bytool sh_pin_for "$JQ_URL" jq)" 'bytool' \
-    'the toolchain-named pin still answers for the same url' 
+    'the toolchain-named pin still answers for the same url'
+# # STOP: A PIN FOR ONE ASSET NEVER ANSWERS FOR ANOTHER, INCLUDING A DIFFERENT
+# ARCHITECTURE OF THE SAME TOOL. The arms used to be `JQ-LINUX-*` reading
+# SANDHOME_SHA256_JQ_LINUX_AMD64, so a caller who pinned the amd64 jq binary had
+# that digest applied to the arm64 download on an arm64 machine. It is a check
+# that passes for the wrong bytes, which is worse than no check because it looks
+# like a check. Measured before the fix:
+#   SANDHOME_SHA256_JQ_LINUX_AMD64=amd64digest
+#   sh_pin_for https://x/jq-linux-arm64   ->  amd64digest
+t_is "$(SANDHOME_SHA256_JQ_LINUX_AMD64=amd64d sh_pin_for 'https://x/jq-linux-arm64' jq)" '' \
+    'an amd64 asset pin does not answer for the arm64 download'
+t_is "$(SANDHOME_SHA256_JQ_LINUX_AMD64=amd64d sh_pin_for 'https://x/jq-macos-amd64' jq)" '' \
+    'a linux asset pin does not answer for the macos download'
+t_is "$(SANDHOME_SHA256_JQ_LINUX_ARM64=arm64d sh_pin_for 'https://x/jq-linux-arm64' jq)" 'arm64d' \
+    'the arm64 asset pin answers for the arm64 download'
+# And the wildcard arms that were doing the bleeding are gone entirely: a
+# version with them reads the wrong variable for a differently-named asset.
+t_is "$(SANDHOME_SHA256_JQ_LINUX_AMD64=amd64d sh_pin_for 'https://x/jq-linux-i386' jq)" '' \
+    'an amd64 asset pin does not answer for the i386 download' 
 t_is "$(sh_pin_names | tr -s ' \n' ' ')" ' fd go jq node python ripgrep rust ' \
     'the pin-name list is the shape the clause above assumes'
 
@@ -362,13 +403,76 @@ fi
 t_ok "$( [ -n "$(sh_do_read_id /usr/lib/os-release 2>/dev/null)" ] && echo 0 || echo 1 )" \
     'the ID in /usr/lib/os-release is readable when /etc/os-release is absent'
 t_is "$(sh_do_read_id "$tmp/no-such-release")" '' 'a missing os-release reads as nothing'
-printf 'ID=quoted-value\nPATH=/tmp/evil\n' > "$tmp/rel"
+printf 'ID=quoted-value\nPATH=/tmp/evil\nLD_PRELOAD=/tmp/evil.so\nIFS=:\n' > "$tmp/rel"
 t_is "$(sh_do_read_id "$tmp/rel")" 'quoted-value' 'ID is read with its quotes removed'
 # The file is DATA and is not sourced, so a distribution whose os-release
-# carries a PATH= cannot rewrite the process that read it.
-os_before=$PATH
-( . ./lib/common.sh; . ./lib/detect.sh; sh_do_read_id "$tmp/rel" >/dev/null )
-t_is "$PATH" "$os_before" 'reading an os-release does not rewrite PATH'
+# carries a PATH= cannot rewrite the process that read it. IFS and LD_PRELOAD
+# are checked alongside it because the old code sourced the file, and a single
+# `PATH=` clause would still have passed against a reader that let the rest
+# through - which is the half of the claim nobody writes the test for.
+#
+# # STOP: THE READER RUNS IN THE CURRENT SHELL AND NOT IN A SUBSHELL, BECAUSE A
+# SUBSHELL CANNOT SEE THE DAMAGE AND THE CLAUSE WAS THEREFORE VACUOUS. The
+# first version wrapped the call in `( ... )` and compared PATH afterwards; a
+# sourcing reader changed PATH inside that subshell, the subshell exited, and
+# the parent saw nothing. Planted and measured:
+#   . "$sh_do_file"; sh_do_id=$(...)   ->  unit: 90 run, 0 failed   (plant seen)
+# The three values are saved and RESTORED around the call, so a defect is
+# observed rather than absorbed, and the file is one whose assignments are
+# visible only to a process that sourced it.
+os_path_before=$PATH
+os_ifs_before=${IFS:-}
+os_preload_before=${LD_PRELOAD:-}
+sh_do_read_id "$tmp/rel" >/dev/null
+t_is "$PATH" "$os_path_before" 'reading an os-release does not rewrite PATH'
+t_is "${IFS:-}" "$os_ifs_before" 'reading an os-release does not rewrite IFS'
+t_is "${LD_PRELOAD:-}" "$os_preload_before" 'reading an os-release does not set LD_PRELOAD'
+# And the damage is restored so the rest of this file runs on a sane PATH.
+PATH=$os_path_before
+IFS=$os_ifs_before
+LD_PRELOAD=$os_preload_before
+export PATH
+
+# ------------------------------------------- the reference, read independently --
+# # STOP: THIS IS THE SECOND READER, AND IT EXISTS BECAUSE tests/docs.sh CANNOT
+# SEE AN EXTRACTION BUG. That check compares docs/reference.md against what
+# docs/generate-reference.sh produces, so the generator is the authority: if the
+# generator is wrong, the file is wrong and the two agree, and the suite is
+# green. SANDHOME_MIN_EXEC_MB was exactly that - the code read
+# `: "${SANDHOME_MIN_EXEC_MB:=${SH_MIN_EXEC_MB:-128}}"`, the reference said
+# "unset, and the feature is off until it is set", and the two halves of the
+# same generated file contradicted each other while every clause passed.
+#
+# The check below does NOT go through the generator. It reads the default off the
+# LIVE process - space.sh is already sourced, so this is the value a caller
+# actually gets - and compares that against the committed table. It is a second
+# measurement of the same fact by a different route, and it is the only kind of
+# check that can fail when the file and its producer are wrong together.
+ref="$ROOT/docs/reference.md"
+t_ok "$([ -r "$ref" ]; echo $?)" 'the reference is readable'
+if [ -r "$ref" ]; then
+    t_is "$SANDHOME_MIN_EXEC_MB" '128' 'the code default for SANDHOME_MIN_EXEC_MB is 128'
+    ref_min=$(sh_ref_default SANDHOME_MIN_EXEC_MB "$ref")
+    t_is "$ref_min" "$SANDHOME_MIN_EXEC_MB" \
+        'the reference agrees with the running code on SANDHOME_MIN_EXEC_MB'
+    t_is "$(sh_ref_default SANDHOME_NO_REFETCH "$ref")" '1' \
+        'the reference agrees with the code on SANDHOME_NO_REFETCH'
+    t_is "$(sh_ref_default SANDHOME_PROFILE "$ref")" '1' \
+        'the reference agrees with the code on SANDHOME_PROFILE'
+    # The contradiction that was live is inside ONE file, so a reader sees both
+    # halves at once: the usage block states a default and the table said unset.
+    # The two are compared against each other as well as against the code.
+    if grep -q 'SANDHOME_MIN_EXEC_MB  free megabytes' "$ref" 2>/dev/null; then
+        case "$ref_min" in
+            *'unset, and the feature is off'*)
+                t_ok 1 'the usage block and the table agree about SANDHOME_MIN_EXEC_MB' ;;
+            *)
+                t_ok 0 'the usage block and the table agree about SANDHOME_MIN_EXEC_MB' ;;
+        esac
+    else
+        t_ok 0 'the usage block states a default for SANDHOME_MIN_EXEC_MB'
+    fi
+fi
 
 rm -rf "$tmp"
 t_end

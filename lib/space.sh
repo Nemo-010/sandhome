@@ -208,17 +208,33 @@ sh_space_plan() {
     for sh_sp_candidate in $(sh_exec_candidates); do
         [ -n "$sh_sp_candidate" ] || continue
         sh_sp_tried="$sh_sp_tried$sh_sp_candidate "
+        # # STOP: THE FLAG IS INITIALISED BEFORE THE BRANCH THAT MAY `continue`
+        # PAST IT, BECAUSE `set -u` IS A RUNTIME ABORT AND NOT A LINT WARNING.
+        # The read-only branch below does `continue` when the candidate is not a
+        # directory, and the room check that reads this flag is outside it, so a
+        # read-only plan that saw a missing candidate first died with
+        # "sh_sp_fake: parameter not set" and the command exited 0 on the way
+        # out, having printed nothing. Every variable a loop reads after a
+        # conditional `continue` is assigned before the branch, not in it.
         sh_sp_fake=''
         if [ "$sh_sp_create" = 1 ]; then
             if ! mkdir -p "$sh_sp_candidate" 2>/dev/null; then
                 continue
             fi
-            # # NOTE: A CANDIDATE THIS CALL JUST CREATED IS NOT EVIDENCE OF
-            # ROOM. It did not exist a moment ago, so its free space was measured
-            # on a filesystem that had not been given any, and preferring it on
-            # that number would rank an empty directory we made above a real
-            # tmpfs with gigabytes on it. The flag is set only when the directory
-            # was already there.
+            # # STOP: A CANDIDATE THIS CALL JUST CREATED IS NOT EVIDENCE OF ROOM,
+            # AND THE GATE BELOW IS THE OTHER HALF OF THAT. The directory did not
+            # exist a moment ago, so its free space was measured on a filesystem
+            # that had just been given an empty directory, and preferring it on
+            # that number would rank what we made above a real tmpfs with
+            # gigabytes on it. The flag marks the created ones and the room check
+            # SKIPS them.
+            #
+            # The first version of this got the sense backwards: it set the flag
+            # on the created candidates and then ran the room check only for
+            # those, so it preferred exactly the directories it had just made and
+            # ignored every real one. The original code measured all of them and
+            # was right to; what changed is only that the ones we created are
+            # excluded. tests/space.sh drives the two shapes.
             [ -d "$sh_sp_candidate" ] || sh_sp_fake=yes
         else
             # Read-only: a directory that is not there is not a candidate, and
@@ -237,7 +253,7 @@ sh_space_plan() {
         if [ -z "$sh_sp_first_working" ]; then
             sh_sp_first_working=$sh_sp_candidate
         fi
-        if [ -n "$sh_sp_fake" ]; then
+        if [ -z "$sh_sp_fake" ]; then
             sh_sp_free=$(sh_free_mb "$sh_sp_candidate")
             case "$sh_sp_free" in
                 ''|*[!0-9]*) sh_sp_free=0 ;;

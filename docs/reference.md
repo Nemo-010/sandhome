@@ -130,6 +130,7 @@ usage: sh bootstrap.sh [options]
 | `SANDHOME_SHA256_JQ` | fetch.sh bootstrap.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_SHA256_JQ_LINUX_AMD64` | fetch.sh bootstrap.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_SHA256_JQ_LINUX_ARM64` | fetch.sh | `unset, and the feature is off until it is set` |
+| `SANDHOME_SHA256_JQ_LINUX_I386` | fetch.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_SHA256_JQ_MACOS_AMD64` | fetch.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_SHA256_NODE` | fetch.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_SHA256_PYTHON` | fetch.sh | `unset, and the feature is off until it is set` |

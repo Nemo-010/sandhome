@@ -50,6 +50,24 @@ printf '\n'
 printf '## Environment variables\n\n'
 printf '| variable | read by | default |\n| --- | --- | --- |\n'
 
+# gen_trunc STRING -> the first 40 characters, with the shell and not with cut.
+# `cut -c1-40` was the only external program this function needed once the sed
+# came out, and a helper that reaches for a program the userlands this tree
+# targets may not carry dies on exactly those machines. The truncation exists to
+# keep a long expression from filling a table cell, and the parameter expansion
+# is a character, not a byte, which is the right unit for a table.
+gen_trunc() {
+    gt_rest=$1
+    gt_out=''
+    gt_n=0
+    while [ -n "$gt_rest" ] && [ "$gt_n" -lt 40 ]; do
+        gt_out="$gt_out${gt_rest%"${gt_rest#?}"}"
+        gt_rest=${gt_rest#?}
+        gt_n=$((gt_n + 1))
+    done
+    printf '%s' "$gt_out"
+}
+
 # gen_default_of VAR -> the default the CODE gives VAR, or nothing.
 #
 # # STOP: THE EXTRACTOR IS A NAMED FUNCTION AND NOT A NESTED `sed` PIPE, AND THE
@@ -128,13 +146,13 @@ gen_default_of() {
                 esac
             done
             gd_rest=${gd_rest#\"}
-            printf '%s' "$gd_rest" | cut -c1-40
+            printf '%s' "$(gen_trunc "$gd_rest")"
             ;;
         *)
             gd_rest=${gd_line#*=}
             gd_rest=${gd_rest#\"}
             gd_rest=${gd_rest%\"}
-            printf '%s' "$gd_rest" | cut -c1-40
+            printf '%s' "$(gen_trunc "$gd_rest")"
             ;;
     esac
 }

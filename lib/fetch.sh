@@ -123,9 +123,6 @@ sh_sha256() {
 # digest for another, which was the worst part of the old behaviour: a stronger
 # check quietly turned off by a weaker one. See docs/decisions/pinning.md.
 
-# sh_pin_name NAME -> the environment variable that pins NAME, upper-cased.
-sh_pin_name() { printf 'SANDHOME_SHA256_%s' "$(sh_upper "$1")"; }
-
 # sh_pin_key URL -> the upper-cased basename of URL with its extension removed.
 # `jq-linux-amd64` and `uv-x86_64-unknown-linux-gnu.tar.gz` both answer as
 # themselves, so a caller can pin a URL-only asset with no toolchain name.
@@ -203,33 +200,26 @@ sh_pin_for() {
         GO1)     [ -n "${SANDHOME_SHA256_GO:-}" ] && { printf '%s' "$SANDHOME_SHA256_GO"; return 0; } ;;
         GO-*)    [ -n "${SANDHOME_SHA256_GO:-}" ] && { printf '%s' "$SANDHOME_SHA256_GO"; return 0; } ;;
         JQ)      [ -n "${SANDHOME_SHA256_JQ:-}" ] && { printf '%s' "$SANDHOME_SHA256_JQ"; return 0; } ;;
-        # # STOP: THE ASSET-NAMED ARMS COME BEFORE THE WILDCARD, BECAUSE `case`
-        # TAKES THE FIRST MATCH AND `JQ-LINUX-*` SWALLOWS `JQ-LINUX-AMD64`. An
-        # asset-specific pin placed after its own wildcard never runs, which is
-        # what made the first version of this arm silently answer the
-        # toolchain-named pin instead and the clause below pass for the wrong
-        # reason on a machine that had both set.
+        # # STOP: THE ASSET ARMS ARE EXACT, AND A WILDCARD HERE PINS THE WRONG
+        # ARCHITECTURE. A first version matched `JQ-LINUX-*` and read
+        # SANDHOME_SHA256_JQ_LINUX_AMD64 out of it, so a caller who pinned the
+        # amd64 jq binary had that same digest applied to the arm64 download on
+        # an arm64 machine - a check that passes for the wrong bytes, which is
+        # worse than no check because it looks like a check. Measured:
+        #   SANDHOME_SHA256_JQ_LINUX_AMD64=amd64digest
+        #   sh_pin_for https://x/jq-linux-arm64   ->  amd64digest   (wrong)
+        # Each asset is named outright. A new platform asset adds one line here.
         #
-        # AN ASSET-NAMED PIN HAS ITS OWN LITERAL ARM, AND ITS NAME USES
-        # UNDERSCORES. jq ships a different binary per platform from the same
-        # module, so `SANDHOME_SHA256_JQ` is ambiguous between `jq-linux-amd64`
-        # and `jq-linux-arm64`, and a caller pinning one for a given machine has
-        # no way to name the other. The arm reads the variable spelled after the
-        # asset - and that spelling is underscored, because a POSIX sh
-        # ASSIGNMENT CANNOT HOLD A HYPHEN IN ITS NAME AT ALL:
-        #   SANDHOME_SHA256_JQ-LINUX-AMD64=bbb   ->  dash: not found
-        # The hyphen form was the first design here and it was unusable: the
-        # caller could not set it, and the `case` arm that read it could never
-        # see a value. The key still has hyphens because it is DERIVED from a
-        # file name; only the VARIABLE is spelled with underscores.
-        JQ_LINUX_AMD64) [ -n "${SANDHOME_SHA256_JQ_LINUX_AMD64:-}" ] && { printf '%s' "${SANDHOME_SHA256_JQ_LINUX_AMD64}"; return 0; } ;;
-        JQ_LINUX_ARM64) [ -n "${SANDHOME_SHA256_JQ_LINUX_ARM64:-}" ] && { printf '%s' "${SANDHOME_SHA256_JQ_LINUX_ARM64}"; return 0; } ;;
-        JQ_MACOS_AMD64) [ -n "${SANDHOME_SHA256_JQ_MACOS_AMD64:-}" ] && { printf '%s' "${SANDHOME_SHA256_JQ_MACOS_AMD64}"; return 0; } ;;
-        # The HYPHENATED key, matched by translating it, so a file called
-        # `jq-linux-amd64` and a variable called JQ_LINUX_AMD64 are the same
-        # question asked two ways.
-        JQ-LINUX-*) [ -n "${SANDHOME_SHA256_JQ_LINUX_AMD64:-}" ] && { printf '%s' "${SANDHOME_SHA256_JQ_LINUX_AMD64}"; return 0; } ;;
-        JQ-MACOS-*) [ -n "${SANDHOME_SHA256_JQ_MACOS_AMD64:-}" ] && { printf '%s' "${SANDHOME_SHA256_JQ_MACOS_AMD64}"; return 0; } ;;
+        # The variable is UNDERSCORED because a POSIX sh assignment cannot hold
+        # a hyphen in its name at all - `SANDHOME_SHA256_JQ-LINUX-AMD64=bbb`
+        # answers "not found" - while the KEY keeps the file's own hyphens,
+        # because it is derived from a file name. The two are joined by these
+        # arms, and tests/unit.sh requires both spellings to answer for the
+        # same URL, so the join cannot rot.
+        JQ-LINUX-AMD64) [ -n "${SANDHOME_SHA256_JQ_LINUX_AMD64:-}" ] && { printf '%s' "${SANDHOME_SHA256_JQ_LINUX_AMD64}"; return 0; } ;;
+        JQ-LINUX-ARM64) [ -n "${SANDHOME_SHA256_JQ_LINUX_ARM64:-}" ] && { printf '%s' "${SANDHOME_SHA256_JQ_LINUX_ARM64}"; return 0; } ;;
+        JQ-LINUX-I386)  [ -n "${SANDHOME_SHA256_JQ_LINUX_I386:-}" ] && { printf '%s' "${SANDHOME_SHA256_JQ_LINUX_I386}"; return 0; } ;;
+        JQ-MACOS-AMD64) [ -n "${SANDHOME_SHA256_JQ_MACOS_AMD64:-}" ] && { printf '%s' "${SANDHOME_SHA256_JQ_MACOS_AMD64}"; return 0; } ;;
         NODE)    [ -n "${SANDHOME_SHA256_NODE:-}" ] && { printf '%s' "$SANDHOME_SHA256_NODE"; return 0; } ;;
         NODE-V*) [ -n "${SANDHOME_SHA256_NODE:-}" ] && { printf '%s' "$SANDHOME_SHA256_NODE"; return 0; } ;;
         PYTHON)  [ -n "${SANDHOME_SHA256_PYTHON:-}" ] && { printf '%s' "$SANDHOME_SHA256_PYTHON"; return 0; } ;;
