@@ -56,4 +56,43 @@ if printf 'x=$(dirname -- "$y")\n' | grep -qE '(^|[^a-zA-Z0-9_.])dirname([^a-zA-
 else
     t_ok 1 'the dirname guard catches a planted dirname invocation'
 fi
+
+# Dead-guard detector (issue #6 anti-pattern): a flag that is READ in four
+# places and SET in none is a constant, not a switch. ecs shipped
+# `noninteractive` guards that always ran; the twin here was a stale
+# SH_EXEC_UNUSABLE reset. Two clauses: the literal name never appears, and
+# every SH_ flag tested anywhere is assigned somewhere in the tree.
+if grep -rin 'noninteractive' "$ROOT"/lib "$ROOT"/bootstrap.sh "$ROOT"/bin/sandhome \
+        "$ROOT"/tools "$ROOT"/shell 2>/dev/null | grep -qv '^.*:.*#'; then
+    if grep -rin 'noninteractive' "$ROOT"/lib "$ROOT"/bootstrap.sh "$ROOT"/bin/sandhome \
+            "$ROOT"/tools "$ROOT"/shell 2>/dev/null | grep -v '#' >/dev/null; then
+        t_ok 1 'no noninteractive dead guard in the tree'
+    else
+        t_ok 0 'no noninteractive dead guard in the tree'
+    fi
+else
+    t_ok 0 'no noninteractive dead guard in the tree'
+fi
+sh_dg_dead=''
+for sh_dg_v in $(cat "$ROOT"/lib/*.sh "$ROOT"/bootstrap.sh "$ROOT"/bin/sandhome \
+        "$ROOT"/tools/*.sh "$ROOT"/shell/errandsh 2>/dev/null | \
+        grep -o '\<SH_[A-Z][A-Z0-9_]*\>' | sort -u); do
+    if grep -rq "$sh_dg_v[:=]" "$ROOT"/lib "$ROOT"/bootstrap.sh \
+            "$ROOT"/bin/sandhome "$ROOT"/tools "$ROOT"/shell 2>/dev/null; then
+        :
+    else
+        sh_dg_dead="$sh_dg_dead $sh_dg_v"
+    fi
+done
+t_is "$sh_dg_dead" '' 'every SH_ flag read anywhere is assigned somewhere'
+# The detector must be able to fail: a read-without-assign is reported.
+sh_dg_probe=$(printf 'if [ "$SH_SHOULD_NOT_EXIST" = 1 ]; then :; fi\n' | \
+    grep -o '\<SH_[A-Z][A-Z0-9_]*\>' | sort -u)
+if [ "$sh_dg_probe" = SH_SHOULD_NOT_EXIST ] && \
+   ! grep -rq 'SH_SHOULD_NOT_EXIST[:=]' "$ROOT"/lib "$ROOT"/bootstrap.sh \
+        "$ROOT"/bin/sandhome "$ROOT"/tools "$ROOT"/shell 2>/dev/null; then
+    t_ok 0 'the dead-guard detector catches a read-without-assign'
+else
+    t_ok 1 'the dead-guard detector catches a read-without-assign'
+fi
 t_end

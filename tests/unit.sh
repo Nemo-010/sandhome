@@ -541,7 +541,69 @@ case "$pf_out" in
 esac
 sh_detect_all >/dev/null 2>&1 || true
 
-# ------------------------------------------------------------------ os id --
+# ------------------------------------------------------- DoH gate --
+# Issue #6: off unless asked; only curl exit 6 twice counts; the retry pins
+# the resolver by IP literal. All clauses below run offline with stubs.
+t_is "$(sh_doh_host_of 'https://1.1.1.1/dns-query')" '1.1.1.1' 'the DoH host of an IP literal is the address'
+t_is "$(sh_doh_host_of 'https://dns.example.com/dns-query')" 'dns.example.com' 'the DoH host of a named URL is the name'
+if sh_doh_pinned 'https://1.1.1.1/dns-query'; then
+    t_ok 0 'an IP-literal DoH URL counts as pinned'
+else
+    t_ok 1 'an IP-literal DoH URL counts as pinned'
+fi
+if sh_doh_pinned 'https://dns.example.com/dns-query'; then
+    t_ok 1 'a hostname DoH URL does not count as pinned'
+else
+    t_ok 0 'a hostname DoH URL does not count as pinned'
+fi
+# Off unless asked: with no URL the retry refuses without touching the net.
+if SANDHOME_DOH_URL= sh_fetch_via_doh "file://$tmp/dl/src.txt" "$tmp/dl/doh-off.txt" 2>/dev/null; then
+    t_ok 1 'the DoH retry is off when SANDHOME_DOH_URL is unset'
+else
+    t_ok 0 'the DoH retry is off when SANDHOME_DOH_URL is unset'
+fi
+# The resolver gate: exit 6 twice passes, anything else refuses. Stub curl
+# answers --version/--help and exits with a canned code for fetches.
+mkdir -p "$tmp/doh6" "$tmp/doh7"
+cat > "$tmp/doh6/curl" <<'STUB'
+#!/bin/sh
+if [ "${1:-}" = "--version" ]; then echo "curl stub"; exit 0; fi
+if [ "${1:-}" = "--help" ]; then echo "--doh-url"; exit 0; fi
+exit 6
+STUB
+chmod +x "$tmp/doh6/curl"
+cat > "$tmp/doh7/curl" <<'STUB'
+#!/bin/sh
+if [ "${1:-}" = "--version" ]; then echo "curl stub"; exit 0; fi
+if [ "${1:-}" = "--help" ]; then echo "--doh-url"; exit 0; fi
+exit 7
+STUB
+chmod +x "$tmp/doh7/curl"
+if PATH="$tmp/doh6:$PATH" SANDHOME_DOH_CANARY='https://canary.invalid' sh_resolver_failed_twice 2>/dev/null; then
+    t_ok 0 'two curl exit-6 probes confirm a resolver failure'
+else
+    t_ok 1 'two curl exit-6 probes confirm a resolver failure'
+fi
+if PATH="$tmp/doh7:$PATH" SANDHOME_DOH_CANARY='https://canary.invalid' sh_resolver_failed_twice 2>/dev/null; then
+    t_ok 1 'a non-6 exit refuses the resolver-failure gate'
+else
+    t_ok 0 'a non-6 exit refuses the resolver-failure gate'
+fi
+# A curl without --doh-url support refuses even with the gate passing.
+mkdir -p "$tmp/dohnodoh"
+cat > "$tmp/dohnodoh/curl" <<'STUB'
+#!/bin/sh
+if [ "${1:-}" = "--version" ]; then echo "curl stub"; exit 0; fi
+if [ "${1:-}" = "--help" ]; then echo "no doh here"; exit 0; fi
+exit 6
+STUB
+chmod +x "$tmp/dohnodoh/curl"
+if PATH="$tmp/dohnodoh:$PATH" SANDHOME_DOH_URL='https://1.1.1.1/dns-query' SANDHOME_DOH_CANARY='https://canary.invalid' sh_fetch_via_doh "file://$tmp/dl/src.txt" "$tmp/dl/doh-nodoh.txt" 2>/dev/null; then
+    t_ok 1 'a curl without --doh-url refuses the DoH retry'
+else
+    t_ok 0 'a curl without --doh-url refuses the DoH retry'
+fi
+sh_detect_all >/dev/null 2>&1 || true
 # # STOP: os-release IS READ FROM BOTH PLACES, AND /usr/lib IS NOT A THOUGHT.
 # On a merged-/usr distribution /etc/os-release is a SYMLINK into /usr/lib, and
 # an image that ships the file without the symlink - a container that bind-mounts

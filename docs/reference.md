@@ -46,6 +46,9 @@ Environment:
   SANDHOME_MIN_EXEC_MB  free megabytes an exec candidate must have to be
                       preferred. Default 128
   SANDHOME_REQUIRE_DIGEST  1 refuses a download when no sha256 tool exists
+  SANDHOME_DOH_URL    DNS-over-HTTPS resolver, e.g. https://1.1.1.1/dns-query.
+                      Unset, and the fallback is off until it is set. Used
+                      only after curl answers exit 6 twice.
   SANDHOME_GO_VERSION_URL, SANDHOME_GO_DL_JSON_URL, SANDHOME_NODE_INDEX_URL
                       point a version or digest parser at a mirror, so the
                       parsers can be tested offline
@@ -72,6 +75,10 @@ usage: sh bootstrap.sh [options]
   --no-path-line      do not add the exec bin directory to the login files
   --dry-run           print what would be done and change nothing
   --json              print the report as one JSON object
+  --doh-url URL       DNS-over-HTTPS resolver for a confirmed no-resolver
+                      cage, e.g. https://1.1.1.1/dns-query. Off unless set;
+                      used only after curl answers exit 6 twice (see
+                      SANDHOME_DOH_URL below).
   --version           print the schema version (sandhome/1) and exit
   -h, --help          this text
 
@@ -90,6 +97,11 @@ usage: sh bootstrap.sh [options]
                       Resolution order per download: <NAME>, then <ASSET>, then
                       a digest the publisher published, then SANDHOME_SHA256.
                       See docs/decisions/pinning.md.
+  SANDHOME_DOH_URL    DNS-over-HTTPS resolver, e.g. https://1.1.1.1/dns-query.
+                      Unset, and the fallback is off until it is set. Used
+                      only after the system resolver fails twice with curl
+                      exit 6; the retry pins the resolver by IP literal so it
+                      cannot itself need DNS.
 ```
 
 ## Toolsets
@@ -107,6 +119,8 @@ usage: sh bootstrap.sh [options]
 | variable | read by | default |
 | --- | --- | --- |
 | `SANDHOME_BIN_DIR` | bootstrap.sh sandhome | `$SH_REPO_DIR/bin` |
+| `SANDHOME_DOH_CANARY` | fetch.sh | `unset, and the feature is off until it is set` |
+| `SANDHOME_DOH_URL` | fetch.sh bootstrap.sh sandhome | `unset, and the feature is off until it is set` |
 | `SANDHOME_EXEC` | env.sh space.sh bootstrap.sh sandhome fd.sh go.sh jq.sh ripgrep.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_GO_DL_JSON_URL` | sandhome go.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_GO_VERSION_URL` | sandhome go.sh | `unset, and the feature is off until it is set` |

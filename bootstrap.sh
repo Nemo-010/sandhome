@@ -201,6 +201,10 @@ usage: sh bootstrap.sh [options]
   --no-path-line      do not add the exec bin directory to the login files
   --dry-run           print what would be done and change nothing
   --json              print the report as one JSON object
+  --doh-url URL       DNS-over-HTTPS resolver for a confirmed no-resolver
+                      cage, e.g. https://1.1.1.1/dns-query. Off unless set;
+                      used only after curl answers exit 6 twice (see
+                      SANDHOME_DOH_URL below).
   --version           print the schema version (sandhome/1) and exit
   -h, --help          this text
 
@@ -219,6 +223,11 @@ usage: sh bootstrap.sh [options]
                       Resolution order per download: <NAME>, then <ASSET>, then
                       a digest the publisher published, then SANDHOME_SHA256.
                       See docs/decisions/pinning.md.
+  SANDHOME_DOH_URL    DNS-over-HTTPS resolver, e.g. https://1.1.1.1/dns-query.
+                      Unset, and the fallback is off until it is set. Used
+                      only after the system resolver fails twice with curl
+                      exit 6; the retry pins the resolver by IP literal so it
+                      cannot itself need DNS.
 USAGE
 }
 
@@ -287,6 +296,7 @@ sh_bootstrap_args() {
             --no-path-line)    SH_PATH_LINE=none; shift ;;
             --dry-run)         SH_DRY_RUN=1; shift ;;
             --json)            SH_JSON=1; shift ;;
+            --doh-url)         sh_need_value "$@"; SANDHOME_DOH_URL=$2; export SANDHOME_DOH_URL; shift 2 ;;
             # # NOTE: THE VERSION LINE IS THE TREE'S SCHEMA AND NOT THIS FILE'S
             # NAME. It printed `bootstrap/1` where `sandhome version` printed
             # `sandhome/1`, so a caller checking whether this checkout is schema 1

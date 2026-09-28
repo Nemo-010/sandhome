@@ -105,6 +105,9 @@ Environment:
   SANDHOME_MIN_EXEC_MB  free megabytes an exec candidate must have to be
                       preferred. Default 128
   SANDHOME_REQUIRE_DIGEST  1 refuses a download when no sha256 tool exists
+  SANDHOME_DOH_URL    DNS-over-HTTPS resolver, e.g. https://1.1.1.1/dns-query.
+                      Unset, and the fallback is off until it is set. Used
+                      only after curl answers exit 6 twice.
   SANDHOME_GO_VERSION_URL, SANDHOME_GO_DL_JSON_URL, SANDHOME_NODE_INDEX_URL
                       point a version or digest parser at a mirror, so the
                       parsers can be tested offline

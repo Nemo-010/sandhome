@@ -75,6 +75,88 @@ sh_downloader_hint() {
     esac
 }
 
+# ------------------------------------------------------- DoH fallback --
+# A DoH bootstrap gated on a CONFIRMED resolver failure (issue #6, goecs.sh
+# DOH_URL/DOH_RESOLVE/curl_supports_doh/system_dns_stably_unavailable shape).
+#
+# The endpoint is a variable and the fallback stays OFF unless asked for:
+# SANDHOME_DOH_URL empty (the default) means this whole section refuses
+# without touching the network. Set it to an IP-literal resolver such as
+# https://1.1.1.1/dns-query so the retry itself cannot need DNS.
+: "${SANDHOME_DOH_URL:-}"
+
+# sh_doh_host_of URL -> the host part of an https URL, or nothing.
+sh_doh_host_of() {
+    sh_dh_u=${1#https://}
+    sh_dh_u=${sh_dh_u#http://}
+    sh_dh_u=${sh_dh_u%%/*}
+    printf '%s' "$sh_dh_u"
+}
+
+# sh_doh_pinned URL -> 0 when URL pins its resolver by IP literal, so the
+# retry cannot itself need DNS. A hostname here reintroduces the failure it
+# is meant to route around and is warned about, not silently used.
+sh_doh_pinned() {
+    sh_dp_host=$(sh_doh_host_of "$1")
+    [ -n "$sh_dp_host" ] || return 1
+    case "$sh_dp_host" in
+        *[a-zA-Z]*) return 1 ;;
+        *) return 0 ;;
+    esac
+}
+
+# sh_curl_dns_exit URL -> curl's exit code for a cheap header fetch, or 99
+# when curl is absent. Only exit 6 (could not resolve host) counts as a DNS
+# failure; every other code means the resolver answered and the failure is
+# elsewhere. The body goes to /dev/null; what is read is the status.
+sh_curl_dns_exit() {
+    sh_have curl || { printf '99'; return 0; }
+    curl -fsS -o /dev/null --max-time 8 --connect-timeout 5 "$1" 2>/dev/null
+    printf '%s' "$?"
+    return 0
+}
+
+# sh_resolver_failed_twice -> 0 only when curl answers exit 6 twice in a row
+# against a known host. One exit 6 is a coincidence not yet noticed; a
+# resolver answering for any known host means 'not our problem' and refuses.
+sh_resolver_failed_twice() {
+    sh_rf_canary=${SANDHOME_DOH_CANARY:-https://github.com}
+    sh_rf_first=$(sh_curl_dns_exit "$sh_rf_canary")
+    [ "$sh_rf_first" = 6 ] || return 1
+    sh_rf_second=$(sh_curl_dns_exit "$sh_rf_canary")
+    [ "$sh_rf_second" = 6 ] || return 1
+    return 0
+}
+
+# sh_fetch_via_doh URL DEST -> 0 when the DoH retry fetched the URL. Refuses
+# (return 1, no network beyond two confirmatory probes) unless ALL hold:
+# curl exists and supports --doh-url, SANDHOME_DOH_URL is set, the resolver
+# failure is confirmed twice, and the retry verifies. Nothing here changes
+# the plain path: callers reach this only after every downloader failed.
+sh_fetch_via_doh() {
+    sh_fd_url=$1
+    sh_fd_dest=$2
+    [ -n "${SANDHOME_DOH_URL:-}" ] || return 1
+    sh_have curl || return 1
+    if ! curl --help 2>&1 | grep -q -- '--doh-url' 2>/dev/null; then
+        sh_warn "curl does not support --doh-url here, so SANDHOME_DOH_URL is ignored"
+        return 1
+    fi
+    if ! sh_doh_pinned "$SANDHOME_DOH_URL"; then
+        sh_warn "SANDHOME_DOH_URL names a host ($(sh_doh_host_of "$SANDHOME_DOH_URL")), which still needs DNS; prefer an IP literal such as https://1.1.1.1/dns-query"
+    fi
+    if ! sh_resolver_failed_twice; then
+        return 1
+    fi
+    if curl -fSL --retry 2 --retry-delay 2 --doh-url "$SANDHOME_DOH_URL" \
+            -o "$sh_fd_dest" "$sh_fd_url" 2>/dev/null && [ -s "$sh_fd_dest" ]; then
+        sh_step "Downloaded from: $sh_fd_url with curl via DoH ($SANDHOME_DOH_URL)"
+        return 0
+    fi
+    sh_warn "DoH retry via $SANDHOME_DOH_URL could not fetch $sh_fd_url"
+    return 1
+}
+
 # sh_fetch URL DEST -> 0 on a complete download. curl, then wget, then BSD fetch.
 #
 # STOP: EVERY FALLBACK IS TRIED, AND A FAILED ATTEMPT FALLS THROUGH LOUDLY.
@@ -114,6 +196,12 @@ sh_fetch() {
             return 0
         fi
         sh_warn "fetch could not fetch $sh_f_url"
+    fi
+    # Gated DoH retry (issue #6): the plain downloaders are exhausted, so a
+    # confirmed resolver failure may still be recoverable through DNS over
+    # HTTPS. Off unless SANDHOME_DOH_URL is set; see sh_fetch_via_doh.
+    if sh_fetch_via_doh "$sh_f_url" "$sh_f_dest"; then
+        return 0
     fi
     sh_f_hint=$(sh_downloader_hint)
     if [ -n "$sh_f_hint" ]; then
