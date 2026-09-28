@@ -65,6 +65,11 @@ tc_node_install() {
     sh_ni_stage=${SH_HOME_TMP:-${TMPDIR:-/tmp}}
     mkdir -p "$sh_ni_stage" 2>/dev/null || return 1
     sh_space_need 300 home || return 1
+    # The exec view holds the node runtime plus npm/npx and their tree (about
+    # 163MB measured, up to ~244MB with the bundled npm). Gate it the same way
+    # as go (issue #66): a home-only check let the install succeed into a root
+    # the view did not fit.
+    sh_space_need 200 exec || return 1
 
     sh_ni_sha=''
     if sh_have curl || sh_have wget; then

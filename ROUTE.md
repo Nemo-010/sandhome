@@ -90,14 +90,17 @@ file. The probe above runs a real file for exactly this reason.
 
 The first command runs whatever is on `main` at the moment it is fetched, and
 it fetches a second copy of `main` to use as the library. Nothing is pinned by
-default. To pin a ref, put `SANDHOME_REF=<tag-or-sha>` in the environment. To
+default. To pin a ref, export `SANDHOME_REF=<tag-or-sha>` before the pipe, or set
+it on the `sh` side of the pipe as above: a `VAR=value curl` assignment applies
+to `curl` only and the piped `sh` never sees it, so nothing is pinned (issue
+#64). To
 pin the bytes, set `SANDHOME_SHA256` (or `SANDHOME_SHA256_<NAME>` per toolchain,
 `SANDHOME_SHA256_<ASSET>` per URL asset); see `bootstrap.sh --help` and
 docs/decisions/pinning.md (pinning semantics). Neither is set by default, and this is the default.
 
 ```sh
-SANDHOME_REF=<tag-or-sha> SANDHOME_SHA256=<digest> \
-  curl -fsSL https://raw.githubusercontent.com/talaria0101/sandhome/<ref>/bootstrap.sh | sh -s -- --toolset developer
+curl -fsSL https://raw.githubusercontent.com/talaria0101/sandhome/<ref>/bootstrap.sh \
+  | SANDHOME_REF=<tag-or-sha> SANDHOME_SHA256=<digest> sh -s -- --toolset developer
 ```
 
 From nothing but a network (unpinned default):
@@ -200,13 +203,15 @@ More than one row can apply and then both are read.
 | a remote shell has no echo, no line editing, no signals | `skills/errandsh/SKILL.md` |
 | an ssh login is refused, a program needs a passwd entry or a terminal, bind is denied, there is no pty | `skills/sealed-sandbox/SKILL.md` |
 | a local dev server, `npm run dev`, or any process that listens | nothing can listen here; see `skills/sealed-sandbox/SKILL.md` no-listen row: dial out to a relay or emit static output |
-| the exec root is full | `docs/guide.md` section 7, which carries the `gc` row |
+| the exec root is full | `docs/guide.md` section 7, which carries the `gc` row. `gc 0` (or `gc --now`) reclaims same-day caches; views are never reclaimed, `repair` rebuilds them |
 | `doctor` reports `FAIL exec_space=low` or `=critical` | the exec root is draining and the next build will fail with `no space left on device`. `sandhome space` names the state and the numbers, `sandhome space --probe` lists roomier candidates, `sandhome gc` reclaims sandhome's own caches, and re-running the first command with `--exec DIR` moves everything |
 | `doctor` reports `FAIL exec_link_<tool>=broken` | a link in the exec view is not executable, or points at itself; `sandhome repair <tool>` rebuilds it and downloads nothing. A tool that was adopted rather than installed is the usual cause, and `install` is the command that adopts, so it is not the one to reach for first |
 | a tool is on PATH but a shell that inherited nothing cannot find it | it was adopted and could not be linked into the exec view; `sandhome repair <tool>` retries the link and `sandhome install --force <tool>` puts a copy there |
 | `doctor` reports a `FAIL <VAR>=unset` for `GOBIN`, `GOCACHE`, `CARGO_INSTALL_ROOT` or `NPM_CONFIG_PREFIX` | that toolchain was adopted, so its fragment did not carry the exec-root paths; `sandhome install --force <tool>` writes a fragment that does |
-| the exec root was cleared by a restart (tmpfs) and `sandhome` is gone | re-run step 2, then `sandhome repair` to rebuild the exec view and the launchers |
-| the exact spelling of a flag, a variable or a command | `docs/reference.md` and nothing else; without a clone use `sandhome help` and `sandhome <cmd> --help` |
+| the exec root was cleared by a restart (tmpfs) and `sandhome` is gone | re-run step 2, then run `sandhome repair` only if `doctor` still fails. Re-running the setup rebuilds the view on its own; never run `install <name>` here, it re-runs the adopt path that broke 8 views in 8 rounds |
+| the detected exec root is too small to hold the toolset, or the setup names `--exec` with no roomier candidate to point at | `sandhome space --probe` lists every candidate with free space; `sandhome space` names the ceiling (`max_exec_free_mb`, `exec_ceiling`). The plan picks the roomiest working candidate, and the choice is then stable; `--exec DIR` moves it deliberately. When `exec_ceiling=small`, rust and clang cannot be installed here: no flag changes that, and `gc` reclaims caches only, not views (`docs/guide.md` sections 1 and 7) |
+| the session died with a scratch-quota kill (tmpSize, shmSize, fileMax, diskTmp) while `doctor` was green | quota kills bypass the df-based space gate: `doctor`, `space` and `report` read `df`, and no quota signal is readable from inside, so nothing warns first. `docs/guide.md` section 7 names what counts against scratch and what `gc` reclaims |
+| the exact spelling of a flag, a variable or a command | `docs/reference.md` and nothing else; without a clone use `sandhome help` and `sandhome <cmd> --help` (per-command help, and `sandhome help <cmd>`) |
 | change this repository: a lib file, a toolchain, a shim, the line discipline | `AGENTS.md`, which is the maintainer router |
 
 A row you cannot match is not a row that does not exist. Say what the

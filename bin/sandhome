@@ -177,9 +177,12 @@ usage: sandhome COMMAND [args]
   pty CMD...             run CMD with a userspace pty (no /dev/ptmx needed)
   exec CMD...            run CMD with the sandhome environment loaded
   report [--json]        the full report
-  gc [DAYS] [--dry-run]   remove staging older than DAYS (default 7)
+  gc [DAYS] [--dry-run]   remove staging older than DAYS (default 7).
+                         DAYS=0 (or --now) removes everything sandhome owns
+                         in its caches, however fresh. Views are never
+                         removed; `repair` rebuilds them
   version                print the schema version
-  help                   this text
+  help [CMD]             this text, or the help for CMD
 
 Environment:
   SANDHOME_HOME   the persistent data root (default $XDG_DATA_HOME/sandhome)
@@ -223,9 +226,80 @@ Environment:
 USAGE
 }
 
+# cmd_help [CMD] -> general usage or one command's help. `sandhome <cmd>
+# --help` and `sandhome help <cmd>` both land here (issue #68), so a consumer
+# without a clone has a help path for every command ROUTE.md step 3 names.
+cmd_help() {
+    case "${1:-}" in
+        ''|help) usage; return 0 ;;
+        doctor)
+            cat <<'HELP'
+usage: sandhome doctor
+Probe the environment and report what is missing. One line per invariant,
+ending in doctor_failures=N. Exits non-zero when N is not zero. Repairs
+nothing; the bootstrap and install do that.
+HELP
+            return 0 ;;
+        install|ensure)
+            cat <<'HELP'
+usage: sandhome install [--force] [--target T] NAME...
+Adopt each toolchain already on PATH, or install it into the home root when
+absent, then rebuild its exec view and write the env. --force installs even
+when a working copy is on PATH. --target T (rust only, repeatable,
+comma-separated) adds cross targets. --dry-run is a bootstrap.sh flag and is
+refused here: an unknown flag aborts before anything is installed.
+HELP
+            return 0 ;;
+        repair)
+            cat <<'HELP'
+usage: sandhome repair [NAME...]
+Rebuild the exec view and launchers for toolchains already on the machine,
+downloading nothing. No names means every toolchain sandhome knows. This is
+the fix for Permission denied on a tool that is already installed or adopted.
+HELP
+            return 0 ;;
+        space)
+            cat <<'HELP'
+usage: sandhome space [--probe]
+Print the chosen roots with free and total megabytes, the exec-space state,
+and the ceiling across exec-capable candidates (max_exec_free_mb and
+exec_ceiling). --probe lists every candidate with writable/exec/free.
+HELP
+            return 0 ;;
+        gc)
+            cat <<'HELP'
+usage: sandhome gc [DAYS] [--dry-run] [--now]
+Remove staging older than DAYS (default 7). DAYS=0, or --now, removes
+everything sandhome owns in its caches however fresh. --dry-run names what
+would be removed and removes nothing. Toolchain views are never removed;
+`sandhome repair` rebuilds them.
+HELP
+            return 0 ;;
+        report)
+            cat <<'HELP'
+usage: sandhome report [--json]
+The full report read from the machine. --json prints one object.
+HELP
+            return 0 ;;
+        toolchains)
+            cat <<'HELP'
+usage: sandhome toolchains [--json]
+Name, status, version, description and PATH reach for every known toolchain.
+HELP
+            return 0 ;;
+        env|path|exec|shims|shell|pty|test|selftest|version)
+            usage; return 0 ;;
+        *)
+            sh_die "no help for '$1'; run 'sandhome help' for the command list"
+            ;;
+    esac
+}
 cmd_env()    { sh_env_print; }
 cmd_path()   { printf '%s\n' "$SH_EXEC_BIN"; }
 cmd_space() {
+    case "${1:-}" in
+        -h|--help) cmd_help space; return 0 ;;
+    esac
     if [ "${1:-}" = --probe ]; then
         sh_space_probe_report
         return 0
@@ -236,6 +310,9 @@ cmd_space() {
 # status read from a probe, and the version. Everything here is read from the
 # machine, not from what the module declares it should be.
 cmd_toolchains() {
+    case "${1:-}" in
+        -h|--help) cmd_help toolchains; return 0 ;;
+    esac
     if [ "${1:-}" = --json ]; then
         printf '['
         sh_c_n=0
@@ -310,6 +387,10 @@ cmd_install() {
                     SH_RUST_TARGETS=$sh_c_v
                 fi
                 shift ;;
+            -h|--help) cmd_help install; return 0 ;;
+            -*)
+                sh_die "install does not take '$1'; run 'sandhome help install' for the flags it takes"
+                ;;
             *) sh_c_args="$sh_c_args $1"; shift ;;
         esac
     done
@@ -332,6 +413,11 @@ cmd_install() {
     for sh_c_n in $sh_c_args; do
         sh_toolchain_ensure "$sh_c_n" || true
     done
+    # Record what was asked for even when an ensure failed, so doctor can name
+    # the unfulfilled request later (issue #57). sh_env_write merges with the
+    # list already in the file when this process holds none.
+    # shellcheck disable=SC2086
+    sh_wanted_merge $sh_c_args
     sh_env_write
     SH_INSTALLED=$INSTALLED
     SH_ADOPTED=$ADOPTED
@@ -354,9 +440,15 @@ cmd_install() {
 # one. With no arguments it covers every known toolchain; with names it covers
 # only those, which is what a consumer who knows which tool is broken wants.
 cmd_repair() {
+    case "${1:-}" in
+        -h|--help) cmd_help repair; return 0 ;;
+    esac
     sh_env_load
     sh_rp_names=''
     for sh_rp_arg in "$@"; do
+        case "$sh_rp_arg" in
+            -*) sh_die "repair does not take '$sh_rp_arg'; run 'sandhome help repair' for the form it takes" ;;
+        esac
         if ! sh_toolchain_known "$sh_rp_arg"; then
             sh_fail "unknown toolchain $sh_rp_arg; run 'sandhome toolchains' for the list"
         fi
@@ -393,6 +485,9 @@ cmd_repair() {
     return 0
 }
 cmd_shims() {
+    case "${1:-}" in
+        -h|--help) cmd_help shims; return 0 ;;
+    esac
     if [ "${1:-build}" = build ]; then
         sh_shim_build_all "$SH_REPO_DIR/shims"
         sh_shim_write_passwd
@@ -430,6 +525,9 @@ cmd_exec() {
     exec "$@"
 }
 cmd_report() {
+    case "${1:-}" in
+        -h|--help) cmd_help report; return 0 ;;
+    esac
     sh_env_load
     if [ "${1:-}" = --json ]; then
         sh_report_json
@@ -453,8 +551,10 @@ cmd_gc() {
     for sh_cg_arg in "$@"; do
         case "$sh_cg_arg" in
             --dry-run) sh_cg_dry=1 ;;
+            --now) sh_cg_days=0 ;;
+            -h|--help) cmd_help gc; return 0 ;;
             -*)
-                sh_die "gc does not take '$sh_cg_arg'; it takes DAYS, or --dry-run"
+                sh_die "gc does not take '$sh_cg_arg'; it takes DAYS, --now, or --dry-run"
                 ;;
             *)
                 sh_cg_days=$sh_cg_arg
@@ -622,18 +722,18 @@ case "${1:-help}" in
     path)        cmd_path ;;
     space)       shift; cmd_space "$@" ;;
     toolchains)  shift; cmd_toolchains "$@" ;;
-    install|ensure) sh_cmd_needs_roots install; shift; cmd_install "$@" ;;
-    repair)         sh_cmd_needs_roots repair; shift; cmd_repair "$@" ;;
+    install|ensure) case "${2:-}" in -h|--help) shift; cmd_install "$@" ;; *) sh_cmd_needs_roots install; shift; cmd_install "$@" ;; esac ;;
+    repair) case "${2:-}" in -h|--help) shift; cmd_repair "$@" ;; *) sh_cmd_needs_roots repair; shift; cmd_repair "$@" ;; esac ;;
     shims)       sh_cmd_needs_roots shims; shift; cmd_shims "$@" ;;
     shell)       shift; cmd_shell "$@" ;;
     pty)         shift; cmd_pty "$@" ;;
     exec)        shift; cmd_exec "$@" ;;
     report)      shift; cmd_report "$@" ;;
-    gc)          sh_cmd_needs_roots gc; shift; cmd_gc "$@" ;;
+    gc) case "${2:-}" in -h|--help) shift; cmd_gc "$@" ;; *) sh_cmd_needs_roots gc; shift; cmd_gc "$@" ;; esac ;;
     test)        cmd_test ;;
     selftest)    shift; cmd_selftest "${1:-}" ;;
     version|--version) cmd_version ;;
-    help|-h|--help) usage ;;
+    help|-h|--help) shift; cmd_help "${1:-}" ;;
     *)           usage >&2; sh_die "unknown command $1" ;;
 esac
 

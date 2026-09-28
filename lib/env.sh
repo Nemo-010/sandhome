@@ -84,6 +84,15 @@ sh_env_body() {
     # (issue #38). A readiness gate that cannot see what was asked for is not a
     # readiness gate. The list is written once, as a space-separated value, and
     # doctor reads it the same way it reads every other fact in this file.
+    # STOP: THE WANTED LIST IS MERGED, NOT REPLACED (issue #57). It was written
+    # by the bootstrap and erased by any later write, because install and repair
+    # wrote env.sh without holding the value: one routine command silently
+    # disarmed the doctor readiness gate. When this process holds no list, the
+    # one already in the file wins, so a repair or a failed install preserves
+    # it; install merges the names it was asked for (see cmd_install).
+    if [ -z "${SH_WANTED_TOOLCHAINS:-}" ]; then
+        SH_WANTED_TOOLCHAINS=$(sh_wanted_from_file)
+    fi
     if [ -n "${SH_WANTED_TOOLCHAINS:-}" ]; then
         printf 'SANDHOME_WANTED_TOOLCHAINS=%s\n' "$(sh_sq_quote "$(sh_trim "$SH_WANTED_TOOLCHAINS")")"
         printf 'export SANDHOME_WANTED_TOOLCHAINS\n'
@@ -152,6 +161,57 @@ sh_env_body() {
     printf 'fi\n'
 }
 
+# sh_wanted_from_file -> the SANDHOME_WANTED_TOOLCHAINS already in env.sh, or
+# nothing. Read with the shell's own read, because the library may not use grep,
+# the same way sh_space_recorded_exec reads the exec root and doctor reads the
+# wanted list.
+sh_wanted_from_file() {
+    sh_wff_out=''
+    [ -r "$SH_HOME/env.sh" ] || {
+        printf ''
+        return 0
+    }
+    sh_wff_cr=$(printf '\r')
+    while IFS= read -r sh_wff_l || [ -n "$sh_wff_l" ]; do
+        sh_wff_l=${sh_wff_l%"$sh_wff_cr"}
+        case "$sh_wff_l" in
+            SANDHOME_WANTED_TOOLCHAINS=*)
+                sh_wff_out=${sh_wff_l#SANDHOME_WANTED_TOOLCHAINS=}
+                sh_wff_out=${sh_wff_out#\'}
+                sh_wff_out=${sh_wff_out%\'}
+                sh_wff_out=${sh_wff_out#\"}
+                sh_wff_out=${sh_wff_out%\"}
+                ;;
+        esac
+    done < "$SH_HOME/env.sh"
+    printf '%s' "$sh_wff_out"
+}
+
+# sh_wanted_merge NAMES... -> fold NAMES into SH_WANTED_TOOLCHAINS, each once.
+# install records what it was asked for so the gate can see an unfulfilled
+# request later; a failed install still records the name, because a toolchain
+# that could not be installed is exactly the one doctor must name.
+sh_wanted_merge() {
+    if [ -z "${SH_WANTED_TOOLCHAINS:-}" ]; then
+        SH_WANTED_TOOLCHAINS=$(sh_wanted_from_file)
+    fi
+    for sh_wm_n in "$@"; do
+        [ -n "$sh_wm_n" ] || continue
+        case " $SH_WANTED_TOOLCHAINS " in
+            *" $sh_wm_n "*) ;;
+            *)
+                if [ -n "$SH_WANTED_TOOLCHAINS" ]; then
+                    SH_WANTED_TOOLCHAINS="$SH_WANTED_TOOLCHAINS $sh_wm_n"
+                else
+                    SH_WANTED_TOOLCHAINS=$sh_wm_n
+                fi
+                ;;
+        esac
+    done
+    SH_WANTED_TOOLCHAINS=$(sh_trim "$SH_WANTED_TOOLCHAINS")
+    export SH_WANTED_TOOLCHAINS
+}
+
 # sh_env_write -> write $SH_HOME/env.sh.
 sh_env_write() {
     if [ "$SH_DRY_RUN" = 1 ]; then
@@ -177,7 +237,7 @@ sh_repo_persist() {
         "${TMPDIR:-/tmp}"/*|/tmp/sandhome-bootstrap.*)
             sh_rp_durable="$SH_HOME/repo"
             mkdir -p "$sh_rp_durable" 2>/dev/null || return 0
-            for sh_rp_d in lib tools shell bin docs; do
+            for sh_rp_d in lib tools shell bin docs shims; do
                 if [ -e "$SH_REPO_DIR/$sh_rp_d" ]; then
                     rm -rf "$sh_rp_durable/$sh_rp_d" 2>/dev/null
                     cp -r "$SH_REPO_DIR/$sh_rp_d" "$sh_rp_durable/$sh_rp_d" 2>/dev/null || \

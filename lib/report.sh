@@ -157,11 +157,17 @@ sh_doctor() {
         printf 'note     console script has a shebang into this tree and exits "bad\n'
         printf 'note     interpreter: Permission denied". Put the venv on the exec root:\n'
         printf 'note     uv venv %s/venvs/NAME && uv pip install --python %s/venvs/NAME/bin/python PKG\n' "${SH_EXEC:-.}" "${SH_EXEC:-.}"
+        printf 'note   same for JS: npm run, npx and .bin/ fail here. Put the project on\n'
+        printf 'note     the exec root and symlink it back: mkdir -p %s/jsproj && ln -s %s/jsproj ./jsproj (issue #58; tmpfs does not survive a restart)\n' "${SH_EXEC:-.}" "${SH_EXEC:-.}"
     fi
     # A cleared tmpfs exec root (container restart) leaves a valid env.sh with
     # no sandhome on it. Name the state rather than failing silently.
+    # STOP: THE SECOND COMMAND IS REPAIR-IF-STILL-BROKEN, NEVER INSTALL (issue
+    # #62). Re-running the setup rebuilds the view on its own (measured: 5s,
+    # doctor 0, no follow-up), and `install <name>` re-runs the adopt path that
+    # broke 8 views in 8 rounds (#49, #43).
     if [ ! -x "$SH_EXEC_BIN/sandhome" ] && [ -r "$SH_HOME/repo/bin/sandhome" ]; then
-        printf 'note   exec root was cleared (tmpfs restart); run sandhome install <name> to rebuild the exec view\n'
+        printf 'note   exec root was cleared (tmpfs restart); re-run the setup, then run sandhome repair only if doctor still fails\n'
     fi
     # A needed shim that is not there is a failure even when the machine looks
     # like it does not need it, because a shim built by an earlier run and a

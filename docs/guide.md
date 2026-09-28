@@ -11,11 +11,14 @@ the page to read before adding a toolchain to it.
   `$XDG_DATA_HOME/sandhome`, else `$HOME/.local/share/sandhome`. It may be a
   mount that refuses `execve`; every read and write still works there.
 - **`SANDHOME_EXEC`**  -  the root that runs binaries. Default: the home root when
-  it runs binaries, otherwise the first candidate that both is writable and
-  *actually runs a file*, preferring one with at least `SANDHOME_MIN_EXEC_MB`
-  (128) megabytes free. Candidates are tried in the order
+  it runs binaries, otherwise the roomiest candidate that both is writable and
+  *actually runs a file* and clears `SANDHOME_MIN_EXEC_MB` (128) megabytes free.
+  Candidates are tried in the order
   `$SANDHOME_EXEC`, the home, `/dev/shm`, `/tmp`, `/run/user/<uid>`,
-  `$HOME/.cache/sandhome/exec`. There is no `/var/tmp`: it was in an older list
+  `$HOME/.cache/sandhome/exec`, and order is only a tie-break: preferring the
+  first candidate that merely cleared the floor put `/dev/shm` (184MB) ahead of
+  `/tmp` (488MB) and the default toolset failed for want of room (issue #37).
+  There is no `/var/tmp`: it was in an older list
   only because the probe report created it, and `/var` is precisely the
   directory a sealed cage tends not to have.
 
@@ -24,6 +27,25 @@ the page to read before adding a toolchain to it.
   and has 52GB; the first plan picks `/tmp`, and installing `go` onto the other
   one fails for want of room. `SANDHOME_MIN_EXEC_MB` raises the bar; when no
   candidate clears it the first that works is used and a warning says so.
+
+  **When no roomy exec-capable root exists, nothing points at one (issue #59).**
+  `sandhome space` names the ceiling once: `max_exec_free_mb` is the most free
+  megabytes on any exec-capable candidate, and `exec_ceiling=small` means no
+  candidate clears 900MB (the rust view; clang wants more). `--exec DIR` then
+  has no target, and `sandhome gc` reclaims caches only, never views. A re-run
+  of the setup on such a host names the constraint before writing anything
+  rather than failing mid-view.
+
+  **Harness scratch-quota kills bypass the df-based space gate (issue #63).**
+  `doctor`, `space` and `report` read `df`, and no quota knob (`tmpSize`,
+  `shmSize`, `fileMax`, `diskTmp`) is readable from inside: `/sys/fs/cgroup`
+  limits do not exist here and the knobs have no signal. A quota kill arrives
+  with gigabytes free on `df` and `doctor_failures=0`. What counts against
+  scratch is everything a run writes: fetch shards, `SH_HOME_TMP`, caches,
+  `go-bin`, `npm-global`, and every build artifact under the exec root (which
+  is usually the scratch filesystem). `sandhome gc` reclaims sandhome's own
+  caches; build output you own (`target/`, `GOCACHE`, staged tarballs) is
+  removed by hand, found with `du -sh $SANDHOME_EXEC/* | sort -h | tail`.
 
   **The choice is then stable.** The root recorded in `$SANDHOME_HOME/env.sh`
   is reused while it still runs a file, so a later install does not migrate the
@@ -370,15 +392,15 @@ SANDHOME_FAKEPTY_SIZE=120x40 sandhome pty less big.log
 | `collect2: posix_spawnp: Permission denied` linking rust | the sysroot linker is on the noexec home, so it cannot be exec'd at all. A `-fuse-ld=` flag does not fix it: rustc appends its own `-fuse-ld=lld` and `-B<sysroot>` after any `-C link-arg`, so the last one wins. `sandhome install --force rust` puts the toolchain on the exec root, where a plain `rustc -O hello.rs -o out` links and runs with no `RUSTFLAGS` |
 | the working tree itself is noexec | `sandhome doctor` prints a note naming `$SANDHOME_EXEC`; build and run output there, not in the checkout |
 | a per-project `.venv` half-works: `python -m` runs, every console script says `bad interpreter: Permission denied` | the venv is on a noexec checkout, and each console script's shebang is an absolute path into it. `uv venv` has already made the symlink, which is why python itself works. Put the venv on the exec root: `uv venv "$SANDHOME_EXEC/venvs/NAME" && uv pip install --python "$SANDHOME_EXEC/venvs/NAME/bin/python" PKG` (#42) |
-| `npm install` exits 0 and `./node_modules/.bin/CLI` says `bad interpreter: Permission denied` | same cause: the shebang is `/usr/bin/env node` resolved through a noexec tree. `node node_modules/CLI/index.js` always works, because node reads the file rather than exec'ing it (#42) |
+| `npm install` exits 0 and `./node_modules/.bin/CLI` says `bad interpreter: Permission denied` | same cause: the shebang is `/usr/bin/env node` resolved through a noexec tree. `node node_modules/CLI/index.js` always works, because node reads the file rather than exec'ing it (#42). For the normal project commands (`npm run`, `npx`, `.bin/CLI`), put the project itself on the exec root and symlink it back: `mkdir -p "$SANDHOME_EXEC/jsproj" && ln -s "$SANDHOME_EXEC/jsproj" ./jsproj`, then work in `./jsproj` (#58). Symlinking only `node_modules` does not survive `npm install`, which replaces the symlink with a real directory. A tmpfs exec root does not survive a restart |
 | no echo / no line editing over ssh | the shims are not loaded; `SANDHOME_SHIMS=1` and restart the shell |
 | an ssh login is refused with `publickey` | the login name is absent from the synthetic passwd; set `SANDHOME_PASSWD_USERS` |
 | a full-screen program runs in batch mode | it is statically linked (nothing to interpose into), or `faketty` is not built. `sandhome pty CMD` forces the userspace pty; `sandhome shims build` builds it |
 | `File size limit exceeded` on a download | `ulimit -f` pins a per-file cap; sandhome shards any download whose `Content-Length` exceeds it and unpacks a `.tar.*` from the stream. `SANDHOME_FETCH_CHUNK_MB` tunes the range size. A `.zip` above the cap is refused by name |
 | `mold` is on PATH but `-fuse-ld=mold` cannot find it | the mold archive ships both `mold` and `ld.mold`; both land on the exec bin. Check `command -v ld.mold`. Clang accepts `--ld-path=$(command -v mold)` as well |
 | `doctor` says `FAIL exec_space=low` or `=critical` | the exec root is draining. `sandhome space` names the state and the numbers, `sandhome space --probe` lists roomier candidates, `sandhome gc` reclaims sandhome's own caches, and re-running the setup with `--exec DIR` moves everything to a roomy path. See section 1 for the thresholds |
-| the exec root filled | `sandhome gc`; staging, exec caches (`cache/`, `tmp/`, `go-bin/` entries older than DAYS), and home tmp older than DAYS are removed, toolchain data stays. `GOCACHE`, `GOBIN`, `NPM_CONFIG_PREFIX`, `CARGO_INSTALL_ROOT`, `CARGO_TARGET_DIR`, and `target/` all land on the exec root: heavy and multi-target builds need a roomy `--exec DIR`. If no candidate fits, the install names the constraint before writing anything |
-| the exec root was cleared by a restart | the tmpfs exec view is gone while `env.sh` persists; re-run the setup, then `sandhome install <name>` to rebuild the view |
+| the exec root filled | `sandhome gc`; staging (any age), exec caches (`cache/`, `tmp/`, `go-bin/` entries older than DAYS; `gc 0` or `gc --now` removes them however fresh), and home tmp older than DAYS are removed, toolchain data stays. Views are never reclaimed: they are rebuilt by `sandhome repair`, not by `gc` (#67). `gc` returning 0 bytes on a full root means the space is in build output you own or in views, so `du -sh $SANDHOME_EXEC/* | sort -h | tail` names it first. `GOCACHE`, `GOBIN`, `NPM_CONFIG_PREFIX`, `CARGO_INSTALL_ROOT`, `CARGO_TARGET_DIR`, and `target/` all land on the exec root: heavy and multi-target builds need a roomy `--exec DIR`. If no candidate fits, the install names the constraint before writing anything |
+| the exec root was cleared by a restart | the tmpfs exec view is gone while `env.sh` persists; re-run the setup, then run `sandhome repair` only if `doctor` still fails. Re-running the setup rebuilds the view on its own (measured); never run `install <name>` here, it re-runs the adopt path that broke 8 views in 8 rounds (#49, #43) |
 
 ## 8. The report
 

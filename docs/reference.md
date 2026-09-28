@@ -31,9 +31,12 @@ usage: sandhome COMMAND [args]
   pty CMD...             run CMD with a userspace pty (no /dev/ptmx needed)
   exec CMD...            run CMD with the sandhome environment loaded
   report [--json]        the full report
-  gc [DAYS] [--dry-run]   remove staging older than DAYS (default 7)
+  gc [DAYS] [--dry-run]   remove staging older than DAYS (default 7).
+                         DAYS=0 (or --now) removes everything sandhome owns
+                         in its caches, however fresh. Views are never
+                         removed; `repair` rebuilds them
   version                print the schema version
-  help                   this text
+  help [CMD]             this text, or the help for CMD
 
 Environment:
   SANDHOME_HOME   the persistent data root (default $XDG_DATA_HOME/sandhome)
@@ -106,9 +109,13 @@ usage: sh bootstrap.sh [options]
 
   SANDHOME_REPO       owner/name to fetch when run from a pipe.
                       Default talaria0101/sandhome.
-  SANDHOME_REF        branch or tag to fetch. Default main
+  SANDHOME_REF        branch or tag to fetch. Default main. Export it before
+                      the pipe, or set it on the sh side
+                      (curl ... | SANDHOME_REF=X sh -s -- ...): a VAR=value
+                      prefix on curl never reaches the piped sh.
   SANDHOME_SHA256     a default digest for any download that has no pin of its
-                      own. Prefer the per-download forms below, which do not
+                      own. Same placement rule as SANDHOME_REF: export it or
+                      set it on the sh side. Prefer the per-download forms below, which do not
                       apply to a download the caller did not name.
   SANDHOME_SHA256_<NAME>    pin one toolchain, e.g. SANDHOME_SHA256_RIPGREP.
                       <NAME> is the toolchain name, upper-cased.

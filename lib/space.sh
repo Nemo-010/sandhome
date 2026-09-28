@@ -216,15 +216,27 @@ sh_space_plan() {
         fi
     fi
     # Probing the home for exec WRITES to it (sh_exec_probe creates and runs a
-    # file), so it is a create-only answer too. A read-only plan reports
-    # home_exec=unknown rather than guessing, because the honest answer is that
-    # it was not measured and the honest cost of measuring it is a write.
+    # file), so it is a create-only measurement. A read-only plan reports the
+    # RECORDED answer rather than guessing: the create plan persists what it
+    # measured to $SH_HOME/.home_exec, and the read-only plan reads that file
+    # back. Without it `sandhome report` and `sandhome space` printed
+    # home_exec=unknown for a machine the bootstrap had already called
+    # home_exec=no (issue #60), which reads as "not measured yet" when it is a
+    # settled fact. A missing or unreadable record still answers unknown.
     if [ "$sh_sp_create" = 1 ]; then
         if sh_exec_probe "$SH_HOME"; then
             SH_HOME_EXEC=yes
         fi
+        printf '%s\n' "$SH_HOME_EXEC" > "$SH_HOME/.home_exec" 2>/dev/null || true
     else
         SH_HOME_EXEC=unknown
+        if [ -r "$SH_HOME/.home_exec" ]; then
+            sh_sp_he=''
+            IFS= read -r sh_sp_he < "$SH_HOME/.home_exec" 2>/dev/null || sh_sp_he=''
+            case "$sh_sp_he" in
+                yes|no) SH_HOME_EXEC=$sh_sp_he ;;
+            esac
+        fi
     fi
 
     # # STOP: A RECORDED EXEC ROOT IS REUSED, BECAUSE FREE SPACE IS NOT STABLE.
@@ -367,6 +379,17 @@ sh_space_plan() {
         else
             sh_die "SANDHOME_EXEC=$SANDHOME_EXEC is not writable or does not allow exec"
         fi
+    elif [ "$sh_sp_create" = 0 ] && [ -n "$sh_sp_sticky" ]; then
+        # STOP: A READ-ONLY PLAN REPORTS THE RECORDED ROOT BEFORE RE-DECIDING.
+        # The create plan collapses the roots when the home runs binaries, but
+        # a read-only answer must describe the machine as configured, not pick
+        # a new root: the bootstrap may have split deliberately (an explicit
+        # --exec on an exec-capable home), and collapsing here orphaned the
+        # views, caches and launchers on the recorded root. Measured: a bare
+        # `eval "$(sandhome env)"` shell reported SANDHOME_EXEC as the home
+        # while env.sh named the exec root the setup had used, because the
+        # recorded home_exec=yes outranked the sticky recorded root.
+        SH_EXEC=$sh_sp_sticky
     elif [ "$SH_HOME_EXEC" = yes ]; then
         SH_EXEC=$SH_HOME
     elif [ -n "$sh_sp_sticky" ]; then
@@ -423,14 +446,22 @@ sh_space_plan() {
 # sh_space_need MB [WHERE] -> refuse to proceed when there is plainly not enough
 # room for the named install. WHERE is `exec`, `home` or `both` (default both).
 # sh_total_mb DIR -> the total size of the filesystem holding DIR, in megabytes,
-# or nothing. sh_free_mb reads df's fourth column; this reads its second, and the
-# pair is what turns "37MB free" into "37MB of 245MB, 15%". Without the total a
-# low-space warning can only be absolute, and absolute alone is wrong in both
-# directions: 40MB is critical on a 256MB tmpfs and unremarkable on a 4TB disk.
+# or nothing. sh_free_mb reads df's Available column; this reads its 1024-blocks
+# column, and the pair is what turns "37MB free" into "37MB of 245MB, 15%".
+# Without the total a low-space warning can only be absolute, and absolute alone
+# is wrong in both directions: 40MB is critical on a 256MB tmpfs and unremarkable
+# on a 4TB disk.
+# STOP: THIS READS THE SIZE COLUMN AND NOT THE USED COLUMN. df -Pk prints
+# Filesystem 1024-blocks Used Available Capacity Mounted, so the second field is
+# the total and the third is what is used. The old form named the third field
+# "total" and returned it, so `sandhome space` printed exec_total_mb=435 on a
+# 489MB tmpfs with 434MB used, and home_total_mb smaller than home_free_mb
+# (issue #69). The duplicate in lib/common.sh always read the right column;
+# this one shadowed it because bin/sandhome sources space.sh after common.sh.
 sh_total_mb() {
     df -Pk "$1" 2>/dev/null | {
-        if read -r sh_tm_dev sh_tm_1 sh_tm_total sh_tm_free sh_tm_rest; then
-            if read -r sh_tm_dev sh_tm_1 sh_tm_total sh_tm_free sh_tm_rest; then
+        if read -r sh_tm_dev sh_tm_total sh_tm_used sh_tm_free sh_tm_rest; then
+            if read -r sh_tm_dev sh_tm_total sh_tm_used sh_tm_free sh_tm_rest; then
                 case "$sh_tm_total" in
                     ''|*[!0-9]*) printf '' ;;
                     *) printf '%s' $((sh_tm_total / 1024)) ;;
@@ -1005,6 +1036,41 @@ sh_promote_toolchain() {
     return 0
 }
 
+# sh_space_max_exec_free -> the most free megabytes on any exec-capable
+# candidate, or 0. This is the ceiling `sandhome space` names when no roomy
+# exec-capable root exists (issue #59): `--exec DIR` has no target then, and a
+# report that lists candidates without naming the ceiling leaves the consumer
+# to add the column themselves.
+sh_space_max_exec_free() {
+    sh_sme_max=0
+    for sh_sme_c in $(sh_exec_candidates); do
+        [ -n "$sh_sme_c" ] || continue
+        [ -d "$sh_sme_c" ] || continue
+        sh_dir_writable "$sh_sme_c" || continue
+        sh_exec_probe "$sh_sme_c" || continue
+        sh_sme_free=$(sh_free_mb "$sh_sme_c" 2>/dev/null)
+        case "$sh_sme_free" in ''|*[!0-9]*) continue ;; esac
+        if [ "$sh_sme_free" -gt "$sh_sme_max" ]; then
+            sh_sme_max=$sh_sme_free
+        fi
+    done
+    printf '%s' "$sh_sme_max"
+}
+
+# sh_space_ceiling -> small when no exec-capable candidate clears 900MB (the
+# rust view), roomy otherwise. 900MB is the heaviest first-party view; clang
+# wants more and node/go want less, so a small ceiling means rust and clang
+# cannot be installed here however they are asked for.
+sh_space_ceiling() {
+    sh_sc_max=$(sh_space_max_exec_free)
+    case "$sh_sc_max" in ''|*[!0-9]*) sh_sc_max=0 ;; esac
+    if [ "$sh_sc_max" -ge 900 ]; then
+        printf 'roomy'
+    else
+        printf 'small'
+    fi
+}
+
 # sh_space_report -> one line per root, and the mounts that were tried. This is
 # what `sandhome space` prints and what the bootstrap says when it had to split.
 sh_space_report() {
@@ -1023,6 +1089,8 @@ sh_space_report() {
     printf 'exec_space_low_mb=%s\n' "${SANDHOME_LOW_EXEC_MB:-100}"
     printf 'exec_space_critical_mb=%s\n' "${SANDHOME_CRIT_MB:-32}"
     printf 'min_exec_mb=%s\n' "$SANDHOME_MIN_EXEC_MB"
+    printf 'max_exec_free_mb=%s\n' "$(sh_space_max_exec_free)"
+    printf 'exec_ceiling=%s\n' "$(sh_space_ceiling)"
 }
 
 # sh_space_probe_report -> every candidate tried, with the real answer for each.
@@ -1095,13 +1163,26 @@ sh_space_gc() {
     # Build caches and targets on the exec root (issue #33): GOCACHE, the exec
     # tmp, uv/npm caches on exec, and cargo target dirs under the home views.
     # Only entries older than DAYS are removed, so an active build is kept.
+    # STOP: DAYS=0 MEANS EVERYTHING SANDHOME OWNS, WITH NO AGE CHECK (issue
+    # #67). `-mtime +0` means more than 0 whole days old, so an entry written
+    # earlier in the session never matches and `gc 0` reclaimed 0 bytes exactly
+    # when the doctor line named it. Views are never scanned here: they are
+    # toolchain data rebuilt by `repair`, not caches, and deleting them would
+    # break every toolchain to reclaim the root they run from.
     if sh_have find; then
         for sh_gc_dir in "$SH_EXEC/cache" "$SH_EXEC/tmp" "$SH_EXEC/go-bin"; do
             [ -n "$sh_gc_dir" ] || continue
             [ -d "$sh_gc_dir" ] || continue
             for sh_gc_e in "$sh_gc_dir"/* "$sh_gc_dir"/.[!.]*; do
                 [ -e "$sh_gc_e" ] || continue
-                if [ -n "$(find "$sh_gc_e" -maxdepth 0 -mtime +"$sh_gc_days" 2>/dev/null)" ]; then
+                sh_gc_old=1
+                if [ "$sh_gc_days" != 0 ]; then
+                    sh_gc_old=0
+                    if [ -n "$(find "$sh_gc_e" -maxdepth 0 -mtime +"$sh_gc_days" 2>/dev/null)" ]; then
+                        sh_gc_old=1
+                    fi
+                fi
+                if [ "$sh_gc_old" = 1 ]; then
                     if [ "${SH_GC_DRY_RUN:-0}" = 1 ]; then
                         sh_step "would remove $sh_gc_e ($(sh_dir_size "$sh_gc_e"))"
                     else
@@ -1120,7 +1201,14 @@ sh_space_gc() {
         if sh_have find; then
             for sh_gc_e in "$SH_HOME_TMP"/* "$SH_HOME_TMP"/.[!.]*; do
                 [ -e "$sh_gc_e" ] || continue
-                if [ -n "$(find "$sh_gc_e" -maxdepth 0 -mtime +"$sh_gc_days" 2>/dev/null)" ]; then
+                sh_gc_old=1
+                if [ "$sh_gc_days" != 0 ]; then
+                    sh_gc_old=0
+                    if [ -n "$(find "$sh_gc_e" -maxdepth 0 -mtime +"$sh_gc_days" 2>/dev/null)" ]; then
+                        sh_gc_old=1
+                    fi
+                fi
+                if [ "$sh_gc_old" = 1 ]; then
                     if [ "${SH_GC_DRY_RUN:-0}" = 1 ]; then
                         sh_step "would remove $sh_gc_e ($(sh_dir_size "$sh_gc_e"))"
                     else

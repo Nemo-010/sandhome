@@ -114,7 +114,11 @@ tc_go_install() {
     esac
     # A Go tarball is about 70MB compressed and 250MB unpacked; the exec view
     # needs room for pkg/tool, which are real executables the go command runs.
+    # The view lands on the exec root (about 90MB measured), so both roots are
+    # gated: without the exec line an install succeeded into a root too small
+    # to build in, and the first build died with ENOSPC (issue #66).
     sh_space_need 400 home || return 1
+    sh_space_need 150 exec || return 1
     sh_gi_url="https://go.dev/dl/${sh_gi_ver}.${sh_gi_os}-${sh_gi_arch}.tar.gz"
     if [ "$SH_DRY_RUN" = 1 ]; then
         sh_step "would install $sh_gi_url into $sh_gi_root"

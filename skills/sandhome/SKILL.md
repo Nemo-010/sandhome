@@ -52,7 +52,8 @@ the default), `languages` and `agent` (both + rust, go). Add one with
 comma list.
 
 Exit codes: `0` done, `1` something could not be done, `2` could not run. Use
-`--dry-run` first when unsure.
+`--dry-run` first when unsure: it is a `bootstrap.sh` flag. `sandhome install`
+refuses it (and any unknown flag) before doing any work.
 
 ## What a run does, in order
 
