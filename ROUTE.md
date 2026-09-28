@@ -63,23 +63,21 @@ session. If the task is to change this repository itself, stop here and read
 
 ```sh
 command -v sandhome
+[ -r "$HOME/.local/share/sandhome/env.sh" ] && echo env.sh present || echo env.sh absent
 ```
 
 ```sh
-sandhome doctor
+if command -v sandhome >/dev/null 2>&1; then sandhome doctor; sandhome space --probe; fi
 ```
 
-```sh
-sandhome space --probe
-```
-
-That answers most of it:
+That answers most of it. The second block runs only when `sandhome` exists;
+on a fresh sandbox it prints nothing and that is the answer: go to step 2.
 
 | what you see | the state is |
 | --- | --- |
 | no `sandhome` on PATH and no `env.sh` under the data root | fresh sandbox, go to step 2 |
 | the checkout is here (`bootstrap.sh` and `bin/sandhome` beside you) and the task changes this repository | maintainer session, read `AGENTS.md` and put this file away |
-| the check at the end of step 2 exits 0 | ready, do the task |
+| `env.sh` exists and the exec bin is gone (tmpfs restart cleared it) | stale exec root, go to step 2 and re-run the setup; then find the symptom in step 3 |
 | the check fails | find the symptom in step 3 and follow that row |
 
 Do not infer a capability from a package list or a mount option. A mount
@@ -90,7 +88,19 @@ file. The probe above runs a real file for exactly this reason.
 
 ## Step 2. Set up, in four commands.
 
-From nothing but a network:
+The first command runs whatever is on `main` at the moment it is fetched, and
+it fetches a second copy of `main` to use as the library. Nothing is pinned by
+default. To pin a ref, put `SANDHOME_REF=<tag-or-sha>` in the environment. To
+pin the bytes, set `SANDHOME_SHA256` (or `SANDHOME_SHA256_<NAME>` per toolchain,
+`SANDHOME_SHA256_<ASSET>` per URL asset); see `bootstrap.sh --help` and
+docs/decisions/pinning.md (pinning semantics). Neither is set by default, and this is the default.
+
+```sh
+SANDHOME_REF=<tag-or-sha> SANDHOME_SHA256=<digest> \
+  curl -fsSL https://raw.githubusercontent.com/talaria0101/sandhome/<ref>/bootstrap.sh | sh -s -- --toolset developer
+```
+
+From nothing but a network (unpinned default):
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/talaria0101/sandhome/main/bootstrap.sh | sh -s -- --toolset developer
@@ -113,6 +123,9 @@ From a clone, the first command is instead:
 ```sh
 sh bootstrap.sh --toolset developer
 ```
+
+When the check at the end of this step exits 0, the sandbox is ready: do the
+task.
 
 The run detects the machine, plans the two roots, adopts each toolchain
 that already answers and installs the ones that do not, builds the shims
@@ -140,14 +153,17 @@ curl -fsSL https://raw.githubusercontent.com/talaria0101/sandhome/main/skills/er
 curl -fsSL https://raw.githubusercontent.com/talaria0101/sandhome/main/skills/sealed-sandbox/SKILL.md -o "$HOME/.agents/skills/sealed-sandbox/SKILL.md"
 ```
 
-From a clone, link instead of copying, so later pulls update them:
+From a clone, link each skill by name instead of copying, so later pulls update them:
 
 ```sh
-ln -s "$PWD/skills" "$HOME/.agents/skills/sandhome"
+for s in sandhome errandsh sealed-sandbox; do ln -s "$PWD/skills/$s" "$HOME/.agents/skills/$s"; done
 ```
 
-Confirm all three landed, then read them in this session. A new session
-picks them up on start. There is no reload command.
+Confirm all three landed, then read them in this session. A new session picks
+them up on start, and a harness with a resource reload (Pi: `/reload`) picks up
+new or changed skills without one. A harness that scans skills at startup picks
+them up in the next session; if yours supports a resource reload, use it rather
+than restarting.
 
 ```sh
 ls "$HOME/.agents/skills/sandhome/SKILL.md" "$HOME/.agents/skills/errandsh/SKILL.md" "$HOME/.agents/skills/sealed-sandbox/SKILL.md"
@@ -164,10 +180,13 @@ More than one row can apply and then both are read.
 | install or adopt another toolchain later, or list what is here and how it reaches PATH | `skills/sandhome/SKILL.md` |
 | a tool installed and is not found, or a binary answers Permission denied | `skills/sandhome/SKILL.md` diagnose part, then `docs/guide.md` section 7 |
 | a Go program compiles and then fails to run with a permission error | `docs/guide.md` section 4 |
+| the current directory is on a noexec mount and build output will not run there | build under `$SANDHOME_EXEC` (see step 4); `sandhome doctor` names this state |
 | a remote shell has no echo, no line editing, no signals | `skills/errandsh/SKILL.md` |
 | an ssh login is refused, a program needs a passwd entry or a terminal, bind is denied, there is no pty | `skills/sealed-sandbox/SKILL.md` |
+| a local dev server, `npm run dev`, or any process that listens | nothing can listen here; see `skills/sealed-sandbox/SKILL.md` no-listen row: dial out to a relay or emit static output |
 | the exec root is full | `docs/guide.md` section 7, which carries the `gc` row |
-| the exact spelling of a flag, a variable or a command | `docs/reference.md` and nothing else |
+| the exec root was cleared by a restart (tmpfs) and `sandhome` is gone | re-run step 2, then `sandhome install <name>` to rebuild the exec view |
+| the exact spelling of a flag, a variable or a command | `docs/reference.md` and nothing else; without a clone use `sandhome help` and `sandhome <cmd> --help` |
 | change this repository: a lib file, a toolchain, a shim, the line discipline | `AGENTS.md`, which is the maintainer router |
 
 A row you cannot match is not a row that does not exist. Say what the
@@ -181,11 +200,19 @@ procedure because the table did not name one.
 A toolchain already on PATH is adopted, not downloaded. The report says
 which. Adoption is the common case on a long lived base.
 
-The shims are opt in and stay opt in. Build them with the `shims`
-subcommand and load them for one shell with `SANDHOME_SHIMS` set to 1.
-The default is off for a measured reason: the terminal interposer makes
-every terminal aware program colourise a pipe, which breaks clean output
-from tools like jq and git.
+The shims are built by default and loaded only when asked. The bootstrap builds
+what this machine needs; nothing is active until `SANDHOME_SHIMS` is set to 1
+for one shell. The default stays off for a measured reason: the terminal
+interposer makes every terminal aware program colourise a pipe, which breaks
+clean output from tools like jq and git.
+
+Build output must land where it can run. The working tree is often the noexec
+home itself, so `go build -o hello`, `cargo build`, `cc -o`, `make`, downloaded
+runtimes, and `npm i -g` output placed on the home fail with Permission denied
+or bad interpreter. Tool output that must execute lives on `$SANDHOME_EXEC`:
+`GOBIN`, `NPM_CONFIG_PREFIX`, `GOCACHE`, and `CARGO_INSTALL_ROOT` already point
+there; for anything else build under `$SANDHOME_EXEC` or copy the artifact
+there before running it. No wrapper or launcher lives in the work tree.
 
 The environment file is the single source of truth, and sourcing it is a per-session cost, not a setup step. Every new shell, including every non-login tool shell, must load it again before `sandhome` or any toolchain is on PATH. In a shell that sources files, source it. Where sourcing is not possible, load it through eval, which survives `sh -c`:
 
@@ -207,10 +234,12 @@ path as well as the install path.
 ## Step 5. Before acting on required reading, print the receipt
 
 Whichever row you took names files to read in full. For each one report
-its line count and the heading of its last section:
+its line count and the heading of its last section. Without a clone the docs
+live under the durable repo (`$SANDHOME_HOME/repo/docs/`) after setup, and the
+same content is available from `sandhome help`:
 
 ```sh
-wc -l FILE && grep '^#' FILE | tail -1
+wc -l "$SANDHOME_HOME/repo/docs/guide.md" && grep '^#' "$SANDHOME_HOME/repo/docs/guide.md" | tail -1
 ```
 
 A line count alone is available from a listing. The last heading is not.

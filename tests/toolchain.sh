@@ -163,4 +163,59 @@ t_contains "$adopt_out" 'STATUS=0' 'adopting a toolchain with no home tree succe
 t_ok "$([ -e "$work/exec/bin/tool" ]; echo $?)" \
     'the adopted toolchain is linked into the exec bin'
 
+# CLASS B+E: behavioural probes run the tool, not its version, on this machine.
+# Each loads the real module against the real library with a scratch home.
+for m in common detect space fetch env toolchain; do
+    # shellcheck source=/dev/null
+    . "$ROOT/lib/$m.sh"
+done
+SH_HOME="$work/bhome"
+SH_EXEC="$work/bexec"
+SH_EXEC_BIN="$work/bexec/bin"
+SH_EXEC_VIEWS="$work/bexec/views"
+SH_HOME_TOOLCHAINS="$work/bhome/toolchains"
+SH_HOME_TMP="$work/bhome/tmp"
+SH_HOME_EXEC=no
+SH_REPO_DIR="$ROOT"
+SH_LIB_DIR="$ROOT/lib"
+export SH_HOME SH_EXEC SH_EXEC_BIN SH_EXEC_VIEWS SH_HOME_TOOLCHAINS SH_HOME_TMP SH_HOME_EXEC SH_REPO_DIR SH_LIB_DIR
+mkdir -p "$SH_EXEC_BIN" "$SH_EXEC_VIEWS" "$SH_HOME_TOOLCHAINS" "$SH_HOME_TMP" 2>/dev/null
+if command -v node >/dev/null 2>&1; then
+    sh_toolchain_load node >/dev/null 2>&1
+    if tc_node_behavioural >/dev/null 2>&1; then
+        t_ok 0 'node behavioural probe runs a script (#19)'
+    else
+        t_ok 1 'node behavioural probe runs a script (#19)'
+    fi
+else
+    t_skip 'node behavioural probe: no node on this host'
+fi
+if command -v go >/dev/null 2>&1; then
+    sh_toolchain_load go >/dev/null 2>&1
+    if tc_go_behavioural >/dev/null 2>&1; then
+        t_ok 0 'go behavioural probe builds and runs (#19)'
+    else
+        t_ok 1 'go behavioural probe builds and runs (#19)'
+    fi
+else
+    t_skip 'go behavioural probe: no go on this host'
+fi
+if command -v rustc >/dev/null 2>&1; then
+    sh_toolchain_load rust >/dev/null 2>&1
+    if tc_rust_behavioural >/dev/null 2>&1; then
+        t_ok 0 'rust behavioural probe links and runs native (#19)'
+    else
+        t_ok 1 'rust behavioural probe links and runs native (#19)'
+    fi
+else
+    t_skip 'rust behavioural probe: no rustc on this host'
+fi
+# install rust --target parses without downloading (unknown target refused by
+# rustup later, but the flag itself must be accepted and exported).
+inst_t=$(SANDHOME_HOME="$work/ih" SANDHOME_EXEC="$work/ie" SANDHOME_REPO_DIR="$ROOT" \
+    sh "$ROOT/bin/sandhome" help 2>&1)
+case "$inst_t" in
+    *'--target'*) t_ok 0 'install usage names --target (#29)' ;;
+    *) t_ok 1 'install usage names --target (#29)' ;;
+esac
 t_end

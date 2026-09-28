@@ -11,7 +11,9 @@ different roots.
 
 `docs/reference.md` is the complete reference - every command, every flag, every
 environment variable, with the output each one produces - and it is GENERATED
-from the code, so it cannot name a flag that does not exist. `docs/guide.md`
+from the code, so it cannot name a flag that does not exist. After a network-only
+setup the docs also live under `$SANDHOME_HOME/repo/docs/`; without any docs on
+disk use `sandhome help`, which prints the same contract. `docs/guide.md`
 carries every failure mode. What follows is the fast path, and it is enough.
 
 ## The one-line instruction a human can paste
@@ -81,7 +83,9 @@ installed without an error and does not answer is reported as a failure.
 | symptom | fix |
 | --- | --- |
 | `Permission denied` on a binary | the exec view was not built; `sandhome install <name>` |
-| `fork/exec ...: permission denied` after a successful `go build` | the build cache was on a noexec root; `sandhome install go` puts it on the exec root |
+| `collect2: posix_spawnp: Permission denied` linking rust | split-root sysroot; `RUSTFLAGS` forces bfd, or `sandhome install zig` plus `sandhome install rust --target <triple>` |
+| `fork/exec ...: permission denied` after a successful `go build` | the build cache was on a noexec root; `sandhome install go` puts `GOCACHE` and `GOBIN` on the exec root |
+| `npm i -g` CLI missing or `bad interpreter` | prefix was on the noexec home; `sandhome install node` moves it to the exec root |
 | ANSI codes inside `jq` or `git` output | `fakepty` is on; `SANDHOME_SHIMS=0` |
 | a tool is absent from a fresh shell | `$SANDHOME_HOME/env.sh` was not read |
 

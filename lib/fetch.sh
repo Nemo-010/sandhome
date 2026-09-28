@@ -412,6 +412,7 @@ sh_pin_for() {
             python)  [ -n "${SANDHOME_SHA256_PYTHON:-}" ] && { printf '%s' "$SANDHOME_SHA256_PYTHON"; return 0; } ;;
             ripgrep) [ -n "${SANDHOME_SHA256_RIPGREP:-}" ] && { printf '%s' "$SANDHOME_SHA256_RIPGREP"; return 0; } ;;
             rust)    [ -n "${SANDHOME_SHA256_RUST:-}" ] && { printf '%s' "$SANDHOME_SHA256_RUST"; return 0; } ;;
+            zig)     [ -n "${SANDHOME_SHA256_ZIG:-}" ] && { printf '%s' "$SANDHOME_SHA256_ZIG"; return 0; } ;;
         esac
     fi
     case "$(sh_pin_key "$sh_pf_url")" in
@@ -447,6 +448,8 @@ sh_pin_for() {
         RIPGREP) [ -n "${SANDHOME_SHA256_RIPGREP:-}" ] && { printf '%s' "$SANDHOME_SHA256_RIPGREP"; return 0; } ;;
         RIPGREP-*) [ -n "${SANDHOME_SHA256_RIPGREP:-}" ] && { printf '%s' "$SANDHOME_SHA256_RIPGREP"; return 0; } ;;
         RUSTUP-*) [ -n "${SANDHOME_SHA256_RUST:-}" ] && { printf '%s' "$SANDHOME_SHA256_RUST"; return 0; } ;;
+        ZIG)     [ -n "${SANDHOME_SHA256_ZIG:-}" ] && { printf '%s' "$SANDHOME_SHA256_ZIG"; return 0; } ;;
+        ZIG-*)   [ -n "${SANDHOME_SHA256_ZIG:-}" ] && { printf '%s' "$SANDHOME_SHA256_ZIG"; return 0; } ;;
         UV)      [ -n "${SANDHOME_SHA256_PYTHON:-}" ] && { printf '%s' "$SANDHOME_SHA256_PYTHON"; return 0; } ;;
         UV-*)    [ -n "${SANDHOME_SHA256_PYTHON:-}" ] && { printf '%s' "$SANDHOME_SHA256_PYTHON"; return 0; } ;;
     esac
@@ -471,7 +474,7 @@ sh_pin_for() {
 # sh_pin_names -> every toolchain name a `SANDHOME_SHA256_<NAME>` pin answers to.
 # Printed so tests/unit.sh can require one entry per module in tools/, which is
 # what keeps the closed `case` above from going stale when a module is added.
-sh_pin_names() { printf ' fd go jq node python ripgrep rust\n'; }
+sh_pin_names() { printf ' fd go jq node python ripgrep rust zig\n'; }
 
 # sh_pin_from URL [NAME] [PUBLISHED] -> the NAME of the pin that answered for
 # this URL, or nothing. The provenance line in the report names it, because a

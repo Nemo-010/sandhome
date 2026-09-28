@@ -339,7 +339,7 @@ t_is "$(SANDHOME_SHA256_JQ_LINUX_ARM64=arm64d sh_pin_for 'https://x/jq-linux-arm
 # version with them reads the wrong variable for a differently-named asset.
 t_is "$(SANDHOME_SHA256_JQ_LINUX_AMD64=amd64d sh_pin_for 'https://x/jq-linux-i386' jq)" '' \
     'an amd64 asset pin does not answer for the i386 download' 
-t_is "$(sh_pin_names | tr -s ' \n' ' ')" ' fd go jq node python ripgrep rust ' \
+t_is "$(sh_pin_names | tr -s ' \n' ' ')" ' fd go jq node python ripgrep rust zig ' \
     'the pin-name list is the shape the clause above assumes'
 
 # EVERY MODULE HAS A PIN NAME, so a new toolchain cannot be added without one.
@@ -1135,6 +1135,30 @@ if [ -r "$ref" ]; then
         t_ok 0 'the usage block states a default for SANDHOME_MIN_EXEC_MB'
     fi
 fi
+
+# CLASS D: sh_repo_persist copies a scratch tree under the home and repoints
+# SH_REPO_DIR there; a clone is left alone (#20).
+rp_tmp=$(mktemp -d "${TMPDIR:-/tmp}/sandhome-persist.XXXXXX")
+rp_fake="$rp_tmp/sandhome-bootstrap.999/lib"
+mkdir -p "$rp_fake" "$rp_tmp/home" 2>/dev/null
+printf '# stub\n' > "$rp_fake/common.sh" 2>/dev/null
+mkdir -p "$rp_tmp/sandhome-bootstrap.999/tools" "$rp_tmp/sandhome-bootstrap.999/shell" 2>/dev/null
+SH_REPO_DIR="$rp_tmp/sandhome-bootstrap.999"
+SH_HOME="$rp_tmp/home"
+TMPDIR="$rp_tmp"
+export SH_REPO_DIR SH_HOME TMPDIR
+sh_repo_persist >/dev/null 2>&1
+t_is "$SH_REPO_DIR" "$rp_tmp/home/repo" 'a scratch tree is repointed under the home (#20)'
+t_ok "$([ -r "$rp_tmp/home/repo/lib/common.sh" ]; echo $?)" 'the durable library holds lib/common.sh (#20)'
+# A clone is not copied.
+SH_REPO_DIR="$ROOT"
+SH_HOME="$rp_tmp/home2"
+mkdir -p "$SH_HOME" 2>/dev/null
+export SH_REPO_DIR SH_HOME
+sh_repo_persist >/dev/null 2>&1
+t_is "$SH_REPO_DIR" "$ROOT" 'a clone keeps pointing at the clone (#20)'
+t_ok "$([ ! -d "$rp_tmp/home2/repo" ]; echo $?)" 'a clone writes no durable copy (#20)'
+rm -rf "$rp_tmp" 2>/dev/null
 
 rm -rf "$tmp"
 t_end

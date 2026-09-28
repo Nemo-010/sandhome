@@ -70,5 +70,6 @@ SANDHOME_SHIMS=1 . "$SANDHOME_HOME/env.sh"  # load them, for this shell
 
 **It is off by default and must stay off**, because it makes every
 terminal-aware program colourise a pipe, and that breaks `jq -r`, `git` and
-`ls --color=auto`. Neither shim can reach a static binary. See
-`docs/architecture.md` section 6 and `skills/sealed-sandbox/SKILL.md`.
+`ls --color=auto`. Neither shim can reach a static binary. The same contract is
+in `sandhome help`; the long form is `docs/architecture.md` section 6 with
+`skills/sealed-sandbox/SKILL.md`.

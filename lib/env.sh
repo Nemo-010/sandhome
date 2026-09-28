@@ -121,6 +121,32 @@ sh_env_write() {
 # sh_env_print -> the same bytes on stdout.
 sh_env_print() { sh_env_body; }
 
+# sh_repo_persist -> copy the sourced tree under the home when it runs from a
+# scratch fetch dir, and repoint SH_REPO_DIR there. Returns 0 whether or not
+# it copied: a clone already survives, so only a TMPDIR scratch tree triggers.
+# (issue #20: the pipe bootstrap pinned SANDHOME_REPO_DIR to /tmp.)
+sh_repo_persist() {
+    case "${SH_REPO_DIR:-}" in
+        "${TMPDIR:-/tmp}"/*|/tmp/sandhome-bootstrap.*)
+            sh_rp_durable="$SH_HOME/repo"
+            mkdir -p "$sh_rp_durable" 2>/dev/null || return 0
+            for sh_rp_d in lib tools shell bin docs; do
+                if [ -e "$SH_REPO_DIR/$sh_rp_d" ]; then
+                    rm -rf "$sh_rp_durable/$sh_rp_d" 2>/dev/null
+                    cp -r "$SH_REPO_DIR/$sh_rp_d" "$sh_rp_durable/$sh_rp_d" 2>/dev/null || \
+                        sh_warn "could not persist $sh_rp_d to $sh_rp_durable"
+                fi
+            done
+            if [ -r "$sh_rp_durable/lib/common.sh" ]; then
+                SH_REPO_DIR=$sh_rp_durable
+                export SH_REPO_DIR
+                sh_step "installed the durable library at $sh_rp_durable"
+            fi
+            ;;
+    esac
+    return 0
+}
+
 # --------------------------------------------------- preferences --
 # A recorded preference that survives an upgrade (issue #17, kejilion
 # persisted-consent shape). The mechanism is the persistence, not the prompt:

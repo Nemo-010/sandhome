@@ -205,10 +205,15 @@ pipes under every shell the host has.
 | a tool "installed" and is not found | `sandhome space --probe`; the toolchain may have landed on a root that does not run it |
 | `Permission denied` running a binary | the home is noexec and the exec view was not built  -  rerun `sandhome install <name>`. It rebuilds the view and probes the tool afterwards, on the adopt path as well as the install path. |
 | `fork/exec ... permission denied` after a successful `go build` | the Go build cache landed on a noexec root; re-run the install so `GOCACHE` is written to `SANDHOME_EXEC` |
+| `go install` binary neither runs nor is on PATH | `GOBIN` now points at `$SANDHOME_EXEC/go-bin` and is on PATH; re-run `sandhome install go`, then `go install`. Build output in a noexec work tree still will not run: build under `$SANDHOME_EXEC` |
+| `npm i -g` CLI not found or `bad interpreter` | the prefix now lives on `$SANDHOME_EXEC/npm-global` with `bin` on PATH; re-run `sandhome install node`. Project-local `.bin` on a noexec checkout has the same cause: run the project from `$SANDHOME_EXEC` |
+| `collect2: posix_spawnp: Permission denied` linking rust | the sysroot linker is on the noexec home; `RUSTFLAGS` forces bfd (see the rust fragment), or `sandhome install zig` plus `sandhome install rust --target <triple>` for a zig-cc wrapper |
+| the working tree itself is noexec | `sandhome doctor` prints a note naming `$SANDHOME_EXEC`; build and run output there, not in the checkout |
 | no echo / no line editing over ssh | the shims are not loaded; `SANDHOME_SHIMS=1` and restart the shell |
 | an ssh login is refused with `publickey` | the login name is absent from the synthetic passwd; set `SANDHOME_PASSWD_USERS` |
 | a full-screen program fails | there is no pty; this is the one thing `errandsh` cannot fix |
-| the exec root filled | `sandhome gc`; staging is removed, toolchain data stays |
+| the exec root filled | `sandhome gc`; staging, exec caches (`cache/`, `tmp/`, `go-bin/` entries older than DAYS), and home tmp older than DAYS are removed, toolchain data stays. `GOCACHE`, `GOBIN`, `NPM_CONFIG_PREFIX`, `CARGO_INSTALL_ROOT`, `CARGO_TARGET_DIR`, and `target/` all land on the exec root: heavy and multi-target builds need a roomy `--exec DIR`. If no candidate fits, the install names the constraint before writing anything |
+| the exec root was cleared by a restart | the tmpfs exec view is gone while `env.sh` persists; re-run the setup, then `sandhome install <name>` to rebuild the view |
 
 ## 8. The report
 

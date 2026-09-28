@@ -142,16 +142,26 @@ tc_node_env() {
         return 0
     fi
     sh_ne_view=$(sh_toolchain_view node)
-    mkdir -p "$SH_HOME/npm-global" "$SH_HOME/cache/npm" 2>/dev/null || true
+    # STOP: THE PREFIX AND CACHE LIVE ON THE EXEC ROOT, NOT THE HOME (issue
+    # #21). A prefix under the noexec home leaves global CLIs neither on PATH
+    # nor executable (`bad interpreter: Permission denied` on a `#!/usr/bin/env
+    # node` script whose inode is noexec). The npx one-shot cache
+    # (`~/.npm/_npx`) has the same property, so it is relocated too.
+    mkdir -p "$SH_EXEC/npm-global" "$SH_EXEC/cache/npm" 2>/dev/null || true
     # Self-sufficient under `set -u`: a leftover fragment must not abort a shell
     # that sources it with the names unset. See tools/go.sh for the shape.
     sh_env_write_fragment node <<EOF
 : "\${SANDHOME_HOME:=$SH_HOME}"
-export SANDHOME_HOME
-NPM_CONFIG_PREFIX="\$SANDHOME_HOME/npm-global"
-NPM_CONFIG_CACHE="\$SANDHOME_HOME/cache/npm"
+: "\${SANDHOME_EXEC:=$SH_EXEC}"
+export SANDHOME_HOME SANDHOME_EXEC
+NPM_CONFIG_PREFIX="\$SANDHOME_EXEC/npm-global"
+NPM_CONFIG_CACHE="\$SANDHOME_EXEC/cache/npm"
 NPM_CONFIG_UPDATE_NOTIFIER=false
 export NPM_CONFIG_PREFIX NPM_CONFIG_CACHE NPM_CONFIG_UPDATE_NOTIFIER
+case ":\$PATH:" in
+  *":\$SANDHOME_EXEC/npm-global/bin:"*) ;;
+  *) PATH="\$SANDHOME_EXEC/npm-global/bin:\$PATH" ;;
+esac
 case ":\$PATH:" in
   *":$sh_ne_view/bin:"*) ;;
   *) PATH="$sh_ne_view/bin:\$PATH" ;;
@@ -162,7 +172,30 @@ EOF
     if ! "$sh_ne_view/bin/node" --version >/dev/null 2>&1; then
         sh_warn "the promoted node at $sh_ne_view/bin/node does not run; node needs an exec-capable home or a larger exec root"
     fi
+    if ! tc_node_behavioural >/dev/null 2>&1; then
+        sh_warn "node installed without an error and still does not run a script from the exec view (home $SH_HOME is noexec)"
+    fi
     return "$sh_ne_frag"
+}
+
+tc_node_behavioural() {
+    sh_nb_tmp=${SH_EXEC:-${TMPDIR:-/tmp}}/node-probe.$$
+    mkdir -p "$sh_nb_tmp" 2>/dev/null || return 1
+    if ! node -e 'console.log("ok")' >/dev/null 2>&1; then
+        rm -rf "$sh_nb_tmp" 2>/dev/null
+        return 1
+    fi
+    # npm must work when node was installed here (the prefix lives on the exec
+    # view); an adopted host node with a broken host npm is the host's defect,
+    # not this toolchain's, so node running is enough there.
+    if [ -d "$(sh_toolchain_root node)" ]; then
+        if ! npm --version >/dev/null 2>&1; then
+            rm -rf "$sh_nb_tmp" 2>/dev/null
+            return 1
+        fi
+    fi
+    rm -rf "$sh_nb_tmp" 2>/dev/null
+    return 0
 }
 
 tc_node_version() {

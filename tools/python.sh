@@ -1,8 +1,10 @@
 #!/bin/sh
 # python - a self-contained CPython through uv. uv is one static binary and it
 # installs a python-build-standalone CPython into the sandhome root, so this
-# never touches the system interpreter.
-TC_python_DESC='CPython, installed by uv (uv is also left on PATH)'
+# never touches the system interpreter. Adopted system pythons still get uv on
+# the exec view (see tc_python_ensure_uv); when uv cannot be fetched the fragment
+# names `python3 -m ensurepip` and venv instead of claiming uv is present.
+TC_python_DESC='CPython, installed by uv (uv is always left on PATH)'
 TC_python_BINS=''
 
 tc_python_probe() {
@@ -63,10 +65,65 @@ tc_python_install() {
     return 0
 }
 
+# tc_python_ensure_uv -> 0 when a runnable uv is on the exec view, fetching it
+# when missing. The adopted-python path used to return before this, so a host
+# with system python and no uv ended with no package manager at all.
+tc_python_ensure_uv() {
+    if sh_have uv && uv --version >/dev/null 2>&1; then
+        sh_promote_toolchain python >/dev/null 2>&1
+        return 0
+    fi
+    sh_pu_root=$(sh_toolchain_root python)
+    case "${SH_KERNEL:-unknown}:${SH_ARCH:-unknown}" in
+        Linux:x86_64|Linux:amd64)   sh_pu_arch='x86_64-unknown-linux-gnu' ;;
+        Linux:aarch64|Linux:arm64)  sh_pu_arch='aarch64-unknown-linux-gnu' ;;
+        Linux:armv7l)               sh_pu_arch='armv7-unknown-linux-gnueabihf' ;;
+        Darwin:x86_64)              sh_pu_arch='x86_64-apple-darwin' ;;
+        Darwin:arm64)               sh_pu_arch='aarch64-apple-darwin' ;;
+        *) sh_warn "no uv build for ${SH_KERNEL:-unknown} ${SH_ARCH:-unknown}"; return 1 ;;
+    esac
+    sh_space_need 30 exec || return 1
+    mkdir -p "$sh_pu_root/bin" 2>/dev/null || return 1
+    sh_pu_url="https://github.com/astral-sh/uv/releases/latest/download/uv-${sh_pu_arch}.tar.gz"
+    if ! sh_fetch_unpack "$sh_pu_url" "$sh_pu_root/uv"; then
+        sh_warn 'could not fetch or unpack uv for the adopted python'
+        return 1
+    fi
+    for sh_pu_tool in uv uvx; do
+        if [ -f "$sh_pu_root/uv/$sh_pu_tool" ]; then
+            mv "$sh_pu_root/uv/$sh_pu_tool" "$sh_pu_root/bin/$sh_pu_tool" 2>/dev/null || true
+        fi
+    done
+    rm -rf "$sh_pu_root/uv" 2>/dev/null
+    sh_promote_toolchain python bin/uv bin/uvx >/dev/null 2>&1
+    sh_have uv && uv --version >/dev/null 2>&1
+}
+
 tc_python_env() {
     if tc_python_probe && ! sh_have uv; then
-        # A working system python was adopted; leave PATH alone so the account's
-        # own interpreter keeps winning.
+        # Adopted system python with no uv: still provide uv on the exec view
+        # without putting the adopted interpreter behind ours. The fragment only
+        # carries uv plus cache env, and names ensurepip/venv when uv cannot
+        # be fetched.
+        if tc_python_ensure_uv; then
+            sh_pe_view=$(sh_toolchain_view python)
+            mkdir -p "$SH_EXEC/cache/uv" 2>/dev/null || true
+            sh_env_write_fragment python <<EOF
+: "\${SANDHOME_HOME:=$SH_HOME}"
+: "\${SANDHOME_EXEC:=$SH_EXEC}"
+export SANDHOME_HOME SANDHOME_EXEC
+UV_CACHE_DIR="\$SANDHOME_EXEC/cache/uv"
+PIP_DISABLE_PIP_VERSION_CHECK=1
+export UV_CACHE_DIR PIP_DISABLE_PIP_VERSION_CHECK
+case ":\$PATH:" in
+  *":$sh_pe_view/bin:"*) ;;
+  *) PATH="$sh_pe_view/bin:\$PATH" ;;
+esac
+export PATH
+EOF
+            return 0
+        fi
+        sh_warn 'adopted python has neither uv nor pip; use python3 -m ensurepip then python3 -m venv (.venv) and . .venv/bin/activate'
         return 0
     fi
     sh_pe_root=$(sh_toolchain_root python)

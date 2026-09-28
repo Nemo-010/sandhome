@@ -80,6 +80,7 @@ usage: sandhome COMMAND [args]
   space [--probe]        where the two roots are, and every candidate tried
   toolchains             name, one-line description, PATH binaries, versions
   install NAME...        adopt or install each toolchain, then write the env
+  install rust --target T   add rust cross targets (comma list, repeatable)
   ensure NAME...         alias for install
   shims [build]          build the LD_PRELOAD shims this machine needs
   test                   run this checkout's whole test suite
@@ -117,6 +118,10 @@ Environment:
   SANDHOME_GO_VERSION_URL, SANDHOME_GO_DL_JSON_URL, SANDHOME_NODE_INDEX_URL
                       point a version or digest parser at a mirror, so the
                       parsers can be tested offline
+  SANDHOME_RUST_TARGETS   comma list of rust cross targets to add on install
+                      (same as install rust --target T)
+  SANDHOME_ZIG_VERSION    pin the zig release (default latest from index)
+  SANDHOME_ZIG_INDEX_URL  point the zig version parser at a mirror for tests
 USAGE
 }
 
@@ -170,18 +175,49 @@ cmd_install() {
     if [ "$#" -eq 0 ]; then
         sh_die 'install needs at least one toolchain name'
     fi
+    # `install rust --target <triple>,...` adds cross targets via rustup and
+    # writes zig-cc linker wrappers on the exec view (see tools/rust.sh and
+    # tools/zig.sh). The flag only applies to rust; other toolchains ignore it.
+    SH_RUST_TARGETS=''
+    sh_c_args=''
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --target)
+                [ "$#" -ge 2 ] || sh_die 'install --target needs a value'
+                if [ -n "$SH_RUST_TARGETS" ]; then
+                    SH_RUST_TARGETS="$SH_RUST_TARGETS,$2"
+                else
+                    SH_RUST_TARGETS=$2
+                fi
+                shift 2 ;;
+            --target=*)
+                sh_c_v=${1#--target=}
+                [ -n "$sh_c_v" ] || sh_die 'install --target needs a value'
+                if [ -n "$SH_RUST_TARGETS" ]; then
+                    SH_RUST_TARGETS="$SH_RUST_TARGETS,$sh_c_v"
+                else
+                    SH_RUST_TARGETS=$sh_c_v
+                fi
+                shift ;;
+            *) sh_c_args="$sh_c_args $1"; shift ;;
+        esac
+    done
+    export SH_RUST_TARGETS
+    if [ -z "$(sh_trim "$sh_c_args")" ]; then
+        sh_die 'install needs at least one toolchain name'
+    fi
     # # STOP: A NAME IS CHECKED BEFORE ANY DOWNLOAD, AND A FAILED ENSURE IS COUNTED.
     # `|| true` made `sandhome install nonsense` print "unknown toolchain" and
     # exit 0, so a script could not tell a typo from a success. sh_fail already
     # increments the counter, so an unknown name and a failed install both end
     # the command non-zero through the check at the bottom of this file.
-    for sh_c_n in "$@"; do
+    for sh_c_n in $sh_c_args; do
         if ! sh_toolchain_known "$sh_c_n"; then
             sh_fail "unknown toolchain $sh_c_n; run 'sandhome toolchains' for the list"
         fi
     done
     sh_env_load
-    for sh_c_n in "$@"; do
+    for sh_c_n in $sh_c_args; do
         sh_toolchain_ensure "$sh_c_n" || true
     done
     sh_env_write

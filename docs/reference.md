@@ -15,6 +15,7 @@ usage: sandhome COMMAND [args]
   space [--probe]        where the two roots are, and every candidate tried
   toolchains             name, one-line description, PATH binaries, versions
   install NAME...        adopt or install each toolchain, then write the env
+  install rust --target T   add rust cross targets (comma list, repeatable)
   ensure NAME...         alias for install
   shims [build]          build the LD_PRELOAD shims this machine needs
   test                   run this checkout's whole test suite
@@ -52,6 +53,10 @@ Environment:
   SANDHOME_GO_VERSION_URL, SANDHOME_GO_DL_JSON_URL, SANDHOME_NODE_INDEX_URL
                       point a version or digest parser at a mirror, so the
                       parsers can be tested offline
+  SANDHOME_RUST_TARGETS   comma list of rust cross targets to add on install
+                      (same as install rust --target T)
+  SANDHOME_ZIG_VERSION    pin the zig release (default latest from index)
+  SANDHOME_ZIG_INDEX_URL  point the zig version parser at a mirror for tests
 ```
 
 ## bootstrap.sh flags
@@ -121,11 +126,12 @@ usage: sh bootstrap.sh [options]
 | `SANDHOME_BIN_DIR` | bootstrap.sh sandhome | `$SH_REPO_DIR/bin` |
 | `SANDHOME_DOH_CANARY` | fetch.sh | `https://github.com` |
 | `SANDHOME_DOH_URL` | fetch.sh bootstrap.sh sandhome | `unset, and the feature is off until it is set` |
-| `SANDHOME_EXEC` | env.sh space.sh bootstrap.sh sandhome fd.sh go.sh jq.sh ripgrep.sh | `unset, and the feature is off until it is set` |
+| `SANDHOME_EXEC` | env.sh report.sh space.sh bootstrap.sh sandhome fd.sh go.sh jq.sh node.sh python.sh ripgrep.sh rust.sh zig.sh | `unset, and the feature is off until it is set` |
+| `SANDHOME_FETCH_DIR` | bootstrap.sh | `$SH_FETCH_DIR` |
 | `SANDHOME_GO_DL_JSON_URL` | sandhome go.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_GO_VERSION_URL` | sandhome go.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_HERE` | profile.sh | `unset, and the feature is off until it is set` |
-| `SANDHOME_HOME` | env.sh profile.sh space.sh bootstrap.sh sandhome go.sh node.sh python.sh | `unset, and the feature is off until it is set` |
+| `SANDHOME_HOME` | env.sh profile.sh space.sh bootstrap.sh sandhome go.sh node.sh python.sh rust.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_MIN_EXEC_MB` | space.sh sandhome | `128` |
 | `SANDHOME_NODE_INDEX_URL` | sandhome node.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_NO_PROFILE` | profile.sh | `unset, and the feature is off until it is set` |
@@ -138,6 +144,7 @@ usage: sh bootstrap.sh [options]
 | `SANDHOME_REPO` | env.sh bootstrap.sh sandhome | `unset, and the feature is off until it is set` |
 | `SANDHOME_REPO_DIR` | env.sh bootstrap.sh sandhome | `unset, and the feature is off until it is set` |
 | `SANDHOME_REQUIRE_DIGEST` | fetch.sh sandhome | `unset, and the feature is off until it is set` |
+| `SANDHOME_RUST_TARGETS` | sandhome rust.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_SHA256` | fetch.sh bootstrap.sh sandhome | `unset, and the feature is off until it is set` |
 | `SANDHOME_SHA256_FD` | fetch.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_SHA256_GO` | fetch.sh | `unset, and the feature is off until it is set` |
@@ -150,7 +157,10 @@ usage: sh bootstrap.sh [options]
 | `SANDHOME_SHA256_PYTHON` | fetch.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_SHA256_RIPGREP` | fetch.sh bootstrap.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_SHA256_RUST` | fetch.sh | `unset, and the feature is off until it is set` |
+| `SANDHOME_SHA256_ZIG` | fetch.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_SHIMS` | env.sh shim.sh sandhome | `unset, and the feature is off until it is set` |
+| `SANDHOME_ZIG_INDEX_URL` | sandhome zig.sh | `unset, and the feature is off until it is set` |
+| `SANDHOME_ZIG_VERSION` | sandhome zig.sh | `unset, and the feature is off until it is set` |
 
 ## errandsh variables
 
@@ -169,9 +179,10 @@ usage: sh bootstrap.sh [options]
 | `go` | `go/bin/go go/bin/gofmt` | Go, from the official go.dev tarball (GOROOT stays in the home root) |
 | `jq` | `bin/jq` | jq, the command-line JSON processor (single static binary) |
 | `node` | `bin/node bin/npm bin/npx` | Node.js with the bundled npm, from the official nodejs.org tarball |
-| `python` | `(via its own PATH fragment)` | CPython, installed by uv (uv is also left on PATH) |
+| `python` | `(via its own PATH fragment)` | CPython, installed by uv (uv is always left on PATH) |
 | `ripgrep` | `bin/rg` | ripgrep (rg), the fast recursive search tool |
-| `rust` | `(via its own PATH fragment)` | Rust via rustup (rustc, cargo, rustfmt, clippy; minimal profile) |
+| `rust` | `cargo/bin/rustup cargo/bin/cargo` | Rust via rustup (rustc, cargo, rustup; minimal profile) |
+| `zig` | `zig` | zig cc cross compiler (also links native rust when the sysroot is noexec) |
 
 ## Tests
 

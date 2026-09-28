@@ -511,4 +511,131 @@ if grep -q 'sh_env_load' "$ROOT/lib/env.sh" 2>/dev/null; then
 fi
 t_is "$bad_order" '' 'sh_env_load never runs before the SANDHOME binding'
 
+# --- 12: the exec-boundary, capacity, durability and router claims ------------
+# Classes B-G: each row is a filed issue with a grep-able fix. A row that
+# regresses reopens its issue, so the guard names the issue per clause.
+# B: every executable output lives on the exec root, never the noexec home.
+case "$(cat "$ROOT/tools/node.sh" 2>/dev/null)" in
+    *'SANDHOME_EXEC/npm-global'*) t_ok 0 'node prefix lives on the exec root (#21)' ;;
+    *) t_ok 1 'node prefix lives on the exec root (#21)' ;;
+esac
+case "$(cat "$ROOT/tools/node.sh" 2>/dev/null)" in
+    *'npm-global/bin'*) t_ok 0 'node global bin is on PATH (#21)' ;;
+    *) t_ok 1 'node global bin is on PATH (#21)' ;;
+esac
+case "$(cat "$ROOT/tools/go.sh" 2>/dev/null)" in
+    *'SANDHOME_EXEC/go-bin'*) t_ok 0 'go GOBIN lives on the exec root (#22)' ;;
+    *) t_ok 1 'go GOBIN lives on the exec root (#22)' ;;
+esac
+case "$(cat "$ROOT/tools/go.sh" 2>/dev/null)" in
+    *'go-bin'*) t_ok 0 'go-bin is on PATH (#22)' ;;
+    *) t_ok 1 'go-bin is on PATH (#22)' ;;
+esac
+case "$(cat "$ROOT/tools/rust.sh" 2>/dev/null)" in
+    *'fuse-ld=bfd'*) t_ok 0 'rust forces bfd on a split root (#19)' ;;
+    *) t_ok 1 'rust forces bfd on a split root (#19)' ;;
+esac
+case "$(cat "$ROOT/tools/rust.sh" 2>/dev/null)" in
+    *'SANDHOME_EXEC/cargo-install'*) t_ok 0 'cargo install lands on the exec root (#19)' ;;
+    *) t_ok 1 'cargo install lands on the exec root (#19)' ;;
+esac
+if grep -q "TC_rust_BINS='cargo/bin/rustup" "$ROOT/tools/rust.sh" 2>/dev/null; then
+    t_ok 0 'rustup is exposed on PATH (#29)'
+else
+    t_ok 1 'rustup is exposed on PATH (#29)'
+fi
+if grep -q 'tc_rust_behavioural\|tc_go_behavioural\|tc_node_behavioural' "$ROOT/tools/rust.sh" "$ROOT/tools/go.sh" "$ROOT/tools/node.sh" 2>/dev/null; then
+    t_ok 0 'behavioural probes exist beside version probes (#19)'
+else
+    t_ok 1 'behavioural probes exist beside version probes (#19)'
+fi
+if grep -q 'workdir.*noexec\|noexec.*workdir\|workdir=%s is noexec' "$ROOT/lib/report.sh" 2>/dev/null; then
+    t_ok 0 'doctor names a noexec workdir (#24)'
+else
+    t_ok 1 'doctor names a noexec workdir (#24)'
+fi
+# C: capacity is gated before writing and gc reclaims caches.
+if grep -q 'sh_view_need' "$ROOT/lib/space.sh" 2>/dev/null; then
+    t_ok 0 'the exec view is size-gated before mirroring (#33)'
+else
+    t_ok 1 'the exec view is size-gated before mirroring (#33)'
+fi
+if grep -q 'SH_EXEC/cache' "$ROOT/lib/space.sh" 2>/dev/null; then
+    t_ok 0 'gc reclaims exec caches, not only staging (#33)'
+else
+    t_ok 1 'gc reclaims exec caches, not only staging (#33)'
+fi
+# D: durable library and reachable docs.
+if grep -q 'sh_repo_persist' "$ROOT/bootstrap.sh" "$ROOT/lib/env.sh" 2>/dev/null && grep -q 'SH_HOME/repo' "$ROOT/lib/env.sh" 2>/dev/null; then
+    t_ok 0 'the pipe bootstrap persists lib/tools/shell under the home (#20)'
+else
+    t_ok 1 'the pipe bootstrap persists lib/tools/shell under the home (#20)'
+fi
+if grep -q 'SANDHOME_FETCH_DIR' "$ROOT/bootstrap.sh" 2>/dev/null; then
+    t_ok 0 'the scratch tree is cleaned after the durable copy (#20)'
+else
+    t_ok 1 'the scratch tree is cleaned after the durable copy (#20)'
+fi
+if [ -r "$ROOT/tools/zig.sh" ]; then
+    t_ok 0 'the zig toolchain exists (#29)'
+else
+    t_ok 1 'the zig toolchain exists (#29)'
+fi
+if grep -q -- '--target' "$ROOT/bin/sandhome" 2>/dev/null && grep -q 'SH_RUST_TARGETS' "$ROOT/bin/sandhome" 2>/dev/null; then
+    t_ok 0 'sandhome install rust takes --target (#29)'
+else
+    t_ok 1 'sandhome install rust takes --target (#29)'
+fi
+if grep -q 'tc_python_ensure_uv' "$ROOT/tools/python.sh" 2>/dev/null; then
+    t_ok 0 'adopted python still provides uv (#32)'
+else
+    t_ok 1 'adopted python still provides uv (#32)'
+fi
+# F+G router rows, each naming its issue.
+if grep -q 'for s in sandhome errandsh sealed-sandbox' "$ROOT/ROUTE.md" 2>/dev/null; then
+    t_ok 0 'clone skills step links each skill by name (#23)'
+else
+    t_ok 1 'clone skills step links each skill by name (#23)'
+fi
+if grep -q 'built by default' "$ROOT/ROUTE.md" 2>/dev/null; then
+    t_ok 0 'shims built-by-default wording matches doctor (#25)'
+else
+    t_ok 1 'shims built-by-default wording matches doctor (#25)'
+fi
+if grep -q 'if command -v sandhome' "$ROOT/ROUTE.md" 2>/dev/null; then
+    t_ok 0 'step 1 guards sandhome calls for a fresh box (#27)'
+else
+    t_ok 1 'step 1 guards sandhome calls for a fresh box (#27)'
+fi
+if grep -q 'stale exec root' "$ROOT/ROUTE.md" 2>/dev/null; then
+    t_ok 0 'a cleared exec root has a row (#27)'
+else
+    t_ok 1 'a cleared exec root has a row (#27)'
+fi
+if grep -q '/reload' "$ROOT/ROUTE.md" 2>/dev/null; then
+    t_ok 0 'the reload claim names /reload (#31)'
+else
+    t_ok 1 'the reload claim names /reload (#31)'
+fi
+if grep -q -i 'nothing.*listen\|No listen' "$ROOT/ROUTE.md" "$ROOT/skills/sealed-sandbox/SKILL.md" 2>/dev/null; then
+    t_ok 0 'a dev-server no-listen row exists (#34)'
+else
+    t_ok 1 'a dev-server no-listen row exists (#34)'
+fi
+if grep -q 'SANDHOME_REF' "$ROOT/ROUTE.md" 2>/dev/null && grep -q 'SANDHOME_SHA256' "$ROOT/ROUTE.md" 2>/dev/null; then
+    t_ok 0 'the paste states the pinning levers (#36)'
+else
+    t_ok 1 'the paste states the pinning levers (#36)'
+fi
+if grep -q 'second copy' "$ROOT/ROUTE.md" 2>/dev/null; then
+    t_ok 0 'the paste states it refetches (#36)'
+else
+    t_ok 1 'the paste states it refetches (#36)'
+fi
+if grep -q 'repo/docs' "$ROOT/ROUTE.md" 2>/dev/null && grep -q 'sandhome help' "$ROOT/ROUTE.md" 2>/dev/null; then
+    t_ok 0 'step 5 resolves without a clone (#35)'
+else
+    t_ok 1 'step 5 resolves without a clone (#35)'
+fi
+
 t_end

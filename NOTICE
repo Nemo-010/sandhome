@@ -14,6 +14,7 @@ cannot be added without recording it.
 | python | `https://github.com/astral-sh/uv/releases/latest/download/` (uv installs CPython from python-build-standalone) | latest-release redirect tag | caller pin only (`SANDHOME_SHA256_PYTHON*`); hashed and printed otherwise |
 | ripgrep | `https://github.com/BurntSushi/ripgrep/releases/download/` | release tag | caller pin only (`SANDHOME_SHA256_RIPGREP*`); hashed and printed otherwise |
 | rust | `https://static.rust-lang.org/rustup/dist/` (rustup-init installs the toolchain) | stable channel | caller pin only (`SANDHOME_SHA256_RUST*`); hashed and printed otherwise |
+| zig | `https://ziglang.org/download/` | `https://ziglang.org/download/index.json`, first version | caller pin only (`SANDHOME_SHA256_ZIG*`); hashed and printed otherwise |
 
 Verification order for every download: bytes land on a sibling temp path,
 never the final name; the digest is taken on what arrived; it is compared

@@ -131,6 +131,19 @@ sh_doctor() {
     sh_doctor_check exec_runs "$(sh_exec_probe "$SH_EXEC" && printf yes || printf no)" yes
     sh_doctor_check exec_on_path "$(case ":$PATH:" in *":$SH_EXEC_BIN:"*) printf yes ;; *) printf no ;; esac)" yes
     sh_doctor_check env_file "$([ -r "$SH_HOME/env.sh" ] && printf yes || printf no)" yes
+    # The working tree may itself be noexec (issue #24): build output there
+    # fails at run time with Permission denied, which reads as an install bug.
+    # This is informational, never a failure: the fix is to build under
+    # SANDHOME_EXEC, not to move the project.
+    sh_doc_cwd=${PWD:-.}
+    if ! sh_exec_probe "$sh_doc_cwd" 2>/dev/null; then
+        printf 'note   workdir=%s is noexec; build and run output under %s\n' "$sh_doc_cwd" "${SH_EXEC:-.}"
+    fi
+    # A cleared tmpfs exec root (container restart) leaves a valid env.sh with
+    # no sandhome on it. Name the state rather than failing silently.
+    if [ ! -x "$SH_EXEC_BIN/sandhome" ] && [ -r "$SH_HOME/repo/bin/sandhome" ]; then
+        printf 'note   exec root was cleared (tmpfs restart); run sandhome install <name> to rebuild the exec view\n'
+    fi
     # A needed shim that is not there is a failure even when the machine looks
     # like it does not need it, because a shim built by an earlier run and a
     # shim needed by this run are the same directory.

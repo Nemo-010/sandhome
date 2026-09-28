@@ -156,7 +156,7 @@ tc_go_env() {
     if [ ! -x "$(sh_toolchain_root go)/go/bin/go" ]; then
         return 0
     fi
-    mkdir -p "$SH_EXEC/tmp" "$SH_EXEC/cache/go-build" 2>/dev/null || true
+    mkdir -p "$SH_EXEC/tmp" "$SH_EXEC/cache/go-build" "$SH_EXEC/go-bin" 2>/dev/null || true
     # # STOP: THE FRAGMENT DEFAULTS BEFORE IT DEREFERENCES, SO IT CANNOT ABORT
     # UNDER `set -u`. A leftover `go.sh` referencing an unset `$SANDHOME_HOME`
     # killed every toolset on a re-run. The concrete home and exec at install
@@ -167,9 +167,14 @@ tc_go_env() {
 export SANDHOME_HOME SANDHOME_EXEC
 GOROOT="$sh_ge_root"
 GOPATH="\$SANDHOME_HOME/go"
+GOBIN="\$SANDHOME_EXEC/go-bin"
 GOCACHE="\$SANDHOME_EXEC/cache/go-build"
 GOTMPDIR="$SH_EXEC/tmp"
-export GOROOT GOPATH GOCACHE GOTMPDIR
+export GOROOT GOPATH GOBIN GOCACHE GOTMPDIR
+case ":\$PATH:" in
+  *":\$SANDHOME_EXEC/go-bin:"*) ;;
+  *) PATH="\$SANDHOME_EXEC/go-bin:\$PATH" ;;
+esac
 case ":\$PATH:" in
   *":$sh_ge_root/bin:"*) ;;
   *) PATH="$sh_ge_root/bin:\$PATH" ;;
@@ -177,6 +182,29 @@ esac
 export PATH
 EOF
     return $?
+}
+
+tc_go_behavioural() {
+    sh_gb_tmp=${SH_EXEC:-${TMPDIR:-/tmp}}/go-probe.$$
+    mkdir -p "$sh_gb_tmp" 2>/dev/null || return 1
+    cat > "$sh_gb_tmp/go.mod" 2>/dev/null <<GOMOD
+module probe
+
+go 1.21
+GOMOD
+    cat > "$sh_gb_tmp/main.go" 2>/dev/null <<GOMAIN
+package main
+import "fmt"
+func main(){fmt.Println("ok")}
+GOMAIN
+    if ( cd "$sh_gb_tmp" && go build -o probe . >/dev/null 2>&1 ); then
+        if "$sh_gb_tmp/probe" >/dev/null 2>&1; then
+            rm -rf "$sh_gb_tmp" 2>/dev/null
+            return 0
+        fi
+    fi
+    rm -rf "$sh_gb_tmp" 2>/dev/null
+    return 1
 }
 
 tc_go_version() {

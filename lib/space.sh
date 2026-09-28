@@ -380,6 +380,31 @@ sh_space_need() {
     return 0
 }
 
+# sh_view_need SRC -> refuse before mirroring when the exec root plainly cannot
+# hold the view. Uses the free-space number the planner already measures and
+# the apparent size of SRC. Names the constraint rather than failing at ENOSPC
+# mid-copy (issue #33 constrains #29: a 172MB zig binary does not fit a 245MB
+# tmpfs that already holds views plus GOCACHE).
+sh_view_need() {
+    sh_vn_src=$1
+    [ -d "$sh_vn_src" ] || return 0
+    sh_vn_need=$(sh_dir_size "$sh_vn_src" 2>/dev/null)
+    case "$sh_vn_need" in
+        ''|*[!0-9]*) return 0 ;;
+    esac
+    # du reports KB; keep 20MB headroom for the copy itself plus a build cache.
+    sh_vn_need_mb=$((sh_vn_need / 1024 + 20))
+    sh_vn_free=$(sh_free_mb "${SH_EXEC:-/tmp}" 2>/dev/null)
+    case "$sh_vn_free" in
+        ''|*[!0-9]*) sh_vn_free=0 ;;
+    esac
+    if [ "$sh_vn_free" -lt "$sh_vn_need_mb" ]; then
+        sh_warn "$SH_EXEC has ${sh_vn_free}MB free and the $sh_vn_src view wants about ${sh_vn_need_mb}MB; set SANDHOME_EXEC to a roomy root (--exec DIR) and re-run"
+        return 1
+    fi
+    return 0
+}
+
 # sh_is_exec_file PATH -> 0 for a regular file that must be COPIED into an exec
 # view rather than symlinked. # STOP: A SHARED OBJECT IS NOT ONE: mmap(PROT_EXEC) from
 # a noexec mount is allowed even where execve is not, which is the measurement
@@ -411,6 +436,10 @@ sh_promote_tree() {
     if [ ! -d "$sh_pt_src" ]; then
         return 0
     fi
+    # Size-gate before writing anything (class C): name the constraint rather
+    # than failing at ENOSPC mid-copy. A hard failure here is a refusal, and
+    # the caller reports it; a soft warning would leave a half view behind.
+    sh_view_need "$sh_pt_src" || return 1
     sh_pt_root_src=$(sh_lex_normalize "$sh_pt_src")
     sh_pt_root_dst=$(sh_lex_normalize "$sh_pt_dst")
     mkdir -p "$sh_pt_dst" 2>/dev/null || return 1
@@ -712,6 +741,27 @@ sh_space_gc() {
             fi
         done
     done
+    # Build caches and targets on the exec root (issue #33): GOCACHE, the exec
+    # tmp, uv/npm caches on exec, and cargo target dirs under the home views.
+    # Only entries older than DAYS are removed, so an active build is kept.
+    if sh_have find; then
+        for sh_gc_dir in "$SH_EXEC/cache" "$SH_EXEC/tmp" "$SH_EXEC/go-bin"; do
+            [ -n "$sh_gc_dir" ] || continue
+            [ -d "$sh_gc_dir" ] || continue
+            for sh_gc_e in "$sh_gc_dir"/* "$sh_gc_dir"/.[!.]*; do
+                [ -e "$sh_gc_e" ] || continue
+                if [ -n "$(find "$sh_gc_e" -maxdepth 0 -mtime +"$sh_gc_days" 2>/dev/null)" ]; then
+                    if [ "${SH_GC_DRY_RUN:-0}" = 1 ]; then
+                        sh_step "would remove $sh_gc_e ($(sh_dir_size "$sh_gc_e"))"
+                    else
+                        rm -rf "$sh_gc_e" 2>/dev/null && sh_gc_removed=$((sh_gc_removed + 1))
+                    fi
+                fi
+            done
+        done
+    else
+        sh_warn "no find; leaving $SH_EXEC/cache and $SH_EXEC/tmp alone"
+    fi
     # # STOP: AGE IS CHECKED WITH find AND NOT ASSUMED. Without find the temp area is
     # left alone and that is said out loud, rather than deleted wholesale:
     # another bootstrap may be holding a directory in it right now.

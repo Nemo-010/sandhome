@@ -117,6 +117,8 @@ sh_bootstrap_refetch() {
         "$sh_fr_tool" "$sh_fr_dir" >&2
     SANDHOME_NO_REFETCH=1
     export SANDHOME_NO_REFETCH
+    SANDHOME_FETCH_DIR=$SH_FETCH_DIR
+    export SANDHOME_FETCH_DIR
     exec sh "$sh_fr_dir/bootstrap.sh" "$@"
 }
 
@@ -477,10 +479,22 @@ sandhome_bootstrap_main() {
 
     sh_bootstrap_install_shell || true
     sh_bootstrap_install_command || true
+    # Durable library (issue #20): the network-only path runs from a scratch
+    # tree under /tmp that the reaper, a reboot, or gc removes, after which
+    # every `sandhome` call exits 2. See sh_repo_persist in lib/env.sh.
+    sh_repo_persist || true
     sh_env_write
     sh_env_load
     sh_bootstrap_path_line
     sh_bootstrap_install_profile || true
+    # The scratch tree served its purpose once the durable copy exists;
+    # remove it so failed and partial runs do not accumulate under /tmp.
+    if [ -n "${SANDHOME_FETCH_DIR:-}" ] && [ "${SANDHOME_FETCH_DIR:-}" != "$SH_REPO_DIR" ]; then
+        rm -rf "${SANDHOME_FETCH_DIR:-/nonexistent}" 2>/dev/null || true
+    fi
+    if [ -n "${SH_FETCH_DIR:-}" ] && [ "${SH_FETCH_DIR:-}" != "$SH_REPO_DIR" ]; then
+        rm -rf "${SH_FETCH_DIR:-/nonexistent}" 2>/dev/null || true
+    fi
 
     SH_INSTALLED=$INSTALLED
     SH_ADOPTED=$ADOPTED

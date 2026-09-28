@@ -10,7 +10,10 @@ A sealed cage typically has: no `bind(2)`, no `/dev/ptmx`, no `/etc/passwd`, no
 or a whitelisted rendezvous. Each has a named workaround here.
 
 `docs/reference.md` carries every command and every variable, generated from
-the code. `docs/architecture.md` and `docs/decisions/` carry the measurements.
+the code. After a network-only setup the docs also live under
+`$SANDHOME_HOME/repo/docs/`; without any docs on disk use `sandhome help` and
+`sandhome <cmd> --help`, which print the same contract. `docs/architecture.md`
+section 6 and `skills/sealed-sandbox/SKILL.md` carry the measurements.
 This page is the map.
 
 ## First, measure
@@ -63,6 +66,13 @@ program colourise a pipe. Turn it on for the one shell that needs a terminal
 and off the moment you need clean output.
 
 No full-screen TUI is possible. Nothing in userspace can create `/dev/ptmx`.
+
+## No listen
+
+A local dev server, `npm run dev`, `python3 -m http.server`, or any process
+that calls `bind(2)` cannot start here: nothing listens. Do not retry bind
+variants. Either dial out to a relay both ends connect to (per the no-bind row
+above) or emit static output instead of serving it.
 
 ## No /etc/passwd
 
