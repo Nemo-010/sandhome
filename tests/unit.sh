@@ -697,6 +697,111 @@ fi
 # A publisher digest that is not hex64 is dropped at parse time.
 printf '[{"filename":"go1.27.1.linux-amd64.tar.gz","sha256":"not-a-digest"}]' > "$tmp/baddigest.json"
 t_is "$(tc_go_sha_from "$tmp/baddigest.json" go1.27.1.linux-amd64.tar.gz)" '' 'a non-hex publisher digest is dropped, not compared'
+
+# --------------------------------------- report defaults --
+# Issue #8: every probe-derived field defaults before formatting. The report
+# must survive every probe failing at once, under set -u, and stay parseable.
+. "$ROOT/lib/report.sh"
+if ( set -u
+     unset SH_OS_ID SH_KERNEL SH_ARCH SH_LIBC SH_WSL SH_PRIVILEGE SH_PROVIDER
+     unset SH_PTY SH_PASSWD SH_HOME SH_HOME_EXEC SH_EXEC SH_FAILURES
+     unset SH_INSTALLED SH_ADOPTED SH_SHIMS_BUILT
+     SH_REPO_DIR=$ROOT SH_LIB_DIR=$ROOT/lib SH_EXEC_BIN=/tmp
+     export SH_REPO_DIR SH_LIB_DIR
+     sh_report_text >/dev/null 2>&1 ); then
+    t_ok 0 'the text report survives every probe failing under set -u'
+else
+    t_ok 1 'the text report survives every probe failing under set -u'
+fi
+rj_out=$( ( set -u
+     unset SH_OS_ID SH_KERNEL SH_ARCH SH_LIBC SH_WSL SH_PRIVILEGE SH_PROVIDER
+     unset SH_PTY SH_PASSWD SH_HOME SH_HOME_EXEC SH_EXEC SH_FAILURES
+     unset SH_INSTALLED SH_ADOPTED SH_SHIMS_BUILT
+     SH_REPO_DIR=$ROOT SH_LIB_DIR=$ROOT/lib SH_EXEC_BIN=/tmp
+     export SH_REPO_DIR SH_LIB_DIR
+     sh_report_json 2>/dev/null ) )
+rj_rc=$?
+t_is "$rj_rc" 0 'the JSON report survives every probe failing under set -u'
+case "$rj_out" in
+    '{'*'}') t_ok 0 'the empty-probe JSON object is braced' ;;
+    *) t_ok 1 "the empty-probe JSON object is braced ($rj_out)" ;;
+esac
+case "$rj_out" in
+    *'"failures":0}'*) t_ok 0 'an absent failures count defaults to numeric zero' ;;
+    *) t_ok 1 "an absent failures count defaults to numeric zero ($rj_out)" ;;
+esac
+if command -v python3 >/dev/null 2>&1; then
+    if printf '%s' "$rj_out" | python3 -m json.tool >/dev/null 2>&1; then
+        t_ok 0 'the empty-probe JSON object parses'
+    else
+        t_ok 1 "the empty-probe JSON object parses ($rj_out)"
+    fi
+    hostile=$(printf 'a"b\\nc')
+    SH_OS_ID=$hostile SH_KERNEL=k SH_ARCH=a SH_LIBC=l SH_WSL=no SH_PRIVILEGE=none SH_PROVIDER=none SH_PTY=yes SH_PASSWD=yes SH_HOME=/tmp SH_HOME_EXEC=yes SH_EXEC=/tmp SH_FAILURES=0 SH_INSTALLED= SH_ADOPTED= sh_report_json > "$tmp/hostile.json" 2>/dev/null
+    if python3 -m json.tool "$tmp/hostile.json" >/dev/null 2>&1; then
+        t_ok 0 'a value carrying a quote and a newline still yields parsing JSON'
+    else
+        t_ok 1 'a value carrying a quote and a newline still yields parsing JSON'
+    fi
+else
+    t_skip 'no python3 to parse the report JSON with'
+fi
+sh_detect_all >/dev/null 2>&1 || true
+
+# --------------------------------------------- preferences --
+# Issue #17: a recorded preference survives env rewrites and upgrades, and is
+# read back where it is used. No consent gate is installed (no telemetry to
+# consent to; the profile rule forbids shell-start prompts); this is the
+# persistence mechanism one would be recorded with, in the bootstrap.
+sh_pref_home_ORIG=$SH_HOME
+SH_HOME="$tmp/prefhome"
+SH_EXEC=/tmp
+if sh_pref_set DEMO_CHOICE 'yes, with a space' && [ "$(sh_pref_get DEMO_CHOICE)" = 'yes, with a space' ]; then
+    t_ok 0 'a recorded preference reads back in the same shell'
+else
+    t_ok 1 'a recorded preference reads back in the same shell'
+fi
+if [ "$(SH_HOME="$tmp/prefhome" sh -c '. '"$ROOT"'/lib/common.sh; . '"$ROOT"'/lib/env.sh; sh_pref_get DEMO_CHOICE')" = 'yes, with a space' ]; then
+    t_ok 0 'a recorded preference reads back in a fresh shell'
+else
+    t_ok 1 'a recorded preference reads back in a fresh shell'
+fi
+if sh_pref_set QUOTED "o'brien" && [ "$(sh_pref_get QUOTED)" = "o'brien" ]; then
+    t_ok 0 'a preference with an apostrophe round-trips byte for byte'
+else
+    t_ok 1 'a preference with an apostrophe round-trips byte for byte'
+fi
+sh_env_write >/dev/null 2>&1
+if [ "$(sh_pref_get DEMO_CHOICE)" = 'yes, with a space' ]; then
+    t_ok 0 'a recorded preference survives an env rewrite (the upgrade path)'
+else
+    t_ok 1 'a recorded preference survives an env rewrite (the upgrade path)'
+fi
+sh_pref_set DEMO_CHOICE second >/dev/null 2>&1
+if [ "$(sh_pref_get DEMO_CHOICE)" = second ] && [ "$(grep -c '^export DEMO_CHOICE=' "$tmp/prefhome/prefs.sh")" = 1 ]; then
+    t_ok 0 're-recording replaces the value instead of appending a second line'
+else
+    t_ok 1 're-recording replaces the value instead of appending a second line'
+fi
+if sh_pref_set 'BAD-NAME' x 2>/dev/null; then
+    t_ok 1 'a preference name outside [A-Za-z0-9_] is refused'
+else
+    t_ok 0 'a preference name outside [A-Za-z0-9_] is refused'
+fi
+if sh_env_body | grep -q 'prefs.sh'; then
+    t_ok 0 'the generated env.sh reads prefs.sh back'
+else
+    t_ok 1 'the generated env.sh reads prefs.sh back'
+fi
+sh_pref_body=$(sh_env_body)
+sh_pref_shell_out=$(sh -c "$sh_pref_body"'; printf "%s" "$DEMO_CHOICE"')
+if [ "$sh_pref_shell_out" = second ]; then
+    t_ok 0 'a shell that sources only the generated env.sh sees the preference'
+else
+    t_ok 1 'a shell that sources only the generated env.sh sees the preference'
+fi
+SH_HOME=$sh_pref_home_ORIG
+sh_detect_all >/dev/null 2>&1 || true
 # # STOP: os-release IS READ FROM BOTH PLACES, AND /usr/lib IS NOT A THOUGHT.
 # On a merged-/usr distribution /etc/os-release is a SYMLINK into /usr/lib, and
 # an image that ships the file without the symlink - a container that bind-mounts

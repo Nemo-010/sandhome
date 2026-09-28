@@ -95,4 +95,14 @@ if [ "$sh_dg_probe" = SH_SHOULD_NOT_EXIST ] && \
 else
     t_ok 1 'the dead-guard detector catches a read-without-assign'
 fi
+
+# The profile fragment never prompts (issue #17): a consent gate belongs in
+# the bootstrap, which runs once, not in the login path, where a prompt is
+# the failure mode the fragment exists to avoid.
+if grep -v '^[[:space:]]*#' "$ROOT"/lib/profile.sh 2>/dev/null | \
+        grep -qE '(^|[^a-zA-Z0-9_])read +-p|(^|[^a-zA-Z0-9_])select([^a-zA-Z0-9_]|$)' 2>/dev/null; then
+    t_ok 1 'lib/profile.sh never prompts at shell start'
+else
+    t_ok 0 'lib/profile.sh never prompts at shell start'
+fi
 t_end

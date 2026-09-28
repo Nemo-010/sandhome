@@ -20,59 +20,75 @@ sh_toolchain_status() {
 }
 
 # sh_report_text -> the human report on stdout. Everything else is stderr.
+#
+# STOP: EVERY PROBE-DERIVED FIELD DEFAULTS BEFORE IT IS FORMATTED (issue #8).
+# A probe that fails answers nothing, and an empty expansion under `set -u`
+# aborts the report mid-object: the yabs defects behind this were an empty
+# score producing malformed JSON and a parser error interleaved into a human
+# table. Nothing here reads an unset variable, nothing interleaves a parser
+# diagnostic into the value (those go to stderr), and the failures count is
+# numeric or zero, so the object always parses.
 sh_report_text() {
-    printf 'os=%s\n'          "$SH_OS_ID"
-    printf 'kernel=%s\n'      "$SH_KERNEL"
-    printf 'arch=%s\n'        "$SH_ARCH"
-    printf 'libc=%s\n'        "$SH_LIBC"
-    printf 'wsl=%s\n'         "$SH_WSL"
-    printf 'privilege=%s\n'   "$SH_PRIVILEGE"
+    printf 'os=%s\n'          "${SH_OS_ID:-unknown}"
+    printf 'kernel=%s\n'      "${SH_KERNEL:-unknown}"
+    printf 'arch=%s\n'        "${SH_ARCH:-unknown}"
+    printf 'libc=%s\n'        "${SH_LIBC:-unknown}"
+    printf 'wsl=%s\n'         "${SH_WSL:-unknown}"
+    printf 'privilege=%s\n'   "${SH_PRIVILEGE:-none}"
     printf 'provider=%s\n'    "${SH_PROVIDER:-none}"
-    printf 'pty=%s\n'         "$SH_PTY"
-    printf 'passwd=%s\n'      "$SH_PASSWD"
-    printf 'home=%s\n'        "$SH_HOME"
-    printf 'home_exec=%s\n'   "$SH_HOME_EXEC"
-    printf 'exec=%s\n'        "$SH_EXEC"
-    printf 'exec_free_mb=%s\n' "$(sh_free_mb "$SH_EXEC")"
-    printf 'installed=%s\n'   "$(sh_lead "$SH_INSTALLED")"
-    printf 'adopted=%s\n'     "$(sh_lead "$SH_ADOPTED")"
+    printf 'pty=%s\n'         "${SH_PTY:-unknown}"
+    printf 'passwd=%s\n'      "${SH_PASSWD:-unknown}"
+    printf 'home=%s\n'        "${SH_HOME:-unknown}"
+    printf 'home_exec=%s\n'   "${SH_HOME_EXEC:-unknown}"
+    printf 'exec=%s\n'        "${SH_EXEC:-unknown}"
+    printf 'exec_free_mb=%s\n' "$(sh_free_mb "${SH_EXEC:-/tmp}" 2>/dev/null)"
+    printf 'installed=%s\n'   "$(sh_lead "${SH_INSTALLED:-}")"
+    printf 'adopted=%s\n'     "$(sh_lead "${SH_ADOPTED:-}")"
     # # STOP: THIS LINE PROBES THE DISK. It printed $SH_SHIMS_BUILT, which is
     # "built by this run", and so was empty on a second run (the .so was
     # already there), on a dry run (nothing was compiled, by design) and under
     # `sandhome report` (which never calls the builder). The two fields below
     # are the two different facts a reader needs, and neither of them is the
     # third one: what is present, and what this machine needs and does not have.
-    printf 'shims=%s\n'       "$(sh_lead "$(sh_shim_present)")"
-    printf 'shims_missing=%s\n' "$(sh_lead "$(sh_shim_needed_missing)")"
+    printf 'shims=%s\n'       "$(sh_lead "$(sh_shim_present 2>/dev/null)")"
+    printf 'shims_missing=%s\n' "$(sh_lead "$(sh_shim_needed_missing 2>/dev/null)")"
     printf 'shims_built_this_run=%s\n' "$(sh_lead "${SH_SHIMS_BUILT:-}")"
-    for sh_rt_name in $(sh_toolchain_available); do
-        printf 'toolchain.%s=%s\n' "$sh_rt_name" "$(sh_toolchain_version "$sh_rt_name")"
+    for sh_rt_name in $(sh_toolchain_available 2>/dev/null); do
+        printf 'toolchain.%s=%s\n' "$sh_rt_name" "$(sh_toolchain_version "$sh_rt_name" 2>/dev/null)"
     done
-    printf 'failures=%s\n' "$SH_FAILURES"
+    sh_rt_fail=${SH_FAILURES:-0}
+    case "$sh_rt_fail" in
+        ''|*[!0-9]*) sh_rt_fail=0 ;;
+    esac
+    printf 'failures=%s\n' "$sh_rt_fail"
 }
 
 # sh_report_json -> one JSON object. Only identifiers, names and counts reach
 # it; every free-text message went to stderr.
 sh_report_json() {
+    sh_rj_fail=${SH_FAILURES:-0}
+    case "$sh_rj_fail" in
+        ''|*[!0-9]*) sh_rj_fail=0 ;;
+    esac
     printf '{'
     printf '"schema":"sandhome/1"'
     printf ',"os":"%s","kernel":"%s","arch":"%s","libc":"%s","wsl":"%s"' \
-        "$(sh_json_escape "$SH_OS_ID")" "$(sh_json_escape "$SH_KERNEL")" \
-        "$(sh_json_escape "$SH_ARCH")" "$(sh_json_escape "$SH_LIBC")" \
-        "$(sh_json_escape "$SH_WSL")"
+        "$(sh_json_escape "${SH_OS_ID:-unknown}")" "$(sh_json_escape "${SH_KERNEL:-unknown}")" \
+        "$(sh_json_escape "${SH_ARCH:-unknown}")" "$(sh_json_escape "${SH_LIBC:-unknown}")" \
+        "$(sh_json_escape "${SH_WSL:-unknown}")"
     printf ',"privilege":"%s","provider":"%s","pty":"%s","passwd":"%s"' \
-        "$(sh_json_escape "$SH_PRIVILEGE")" "$(sh_json_escape "${SH_PROVIDER:-none}")" \
-        "$(sh_json_escape "$SH_PTY")" "$(sh_json_escape "$SH_PASSWD")"
+        "$(sh_json_escape "${SH_PRIVILEGE:-none}")" "$(sh_json_escape "${SH_PROVIDER:-none}")" \
+        "$(sh_json_escape "${SH_PTY:-unknown}")" "$(sh_json_escape "${SH_PASSWD:-unknown}")"
     printf ',"home":"%s","home_exec":"%s","exec":"%s","exec_free_mb":"%s"' \
-        "$(sh_json_escape "$SH_HOME")" "$(sh_json_escape "$SH_HOME_EXEC")" \
-        "$(sh_json_escape "$SH_EXEC")" "$(sh_json_escape "$(sh_free_mb "$SH_EXEC")")"
+        "$(sh_json_escape "${SH_HOME:-unknown}")" "$(sh_json_escape "${SH_HOME_EXEC:-unknown}")" \
+        "$(sh_json_escape "${SH_EXEC:-unknown}")" "$(sh_json_escape "$(sh_free_mb "${SH_EXEC:-/tmp}" 2>/dev/null)")"
     printf ',"installed":"%s","adopted":"%s","shims":"%s"' \
-        "$(sh_json_escape "$(sh_lead "$SH_INSTALLED")")" \
-        "$(sh_json_escape "$(sh_lead "$SH_ADOPTED")")" \
-        "$(sh_json_escape "$(sh_lead "$(sh_shim_present)")")"
+        "$(sh_json_escape "$(sh_lead "${SH_INSTALLED:-}")")" \
+        "$(sh_json_escape "$(sh_lead "${SH_ADOPTED:-}")")" \
+        "$(sh_json_escape "$(sh_lead "$(sh_shim_present 2>/dev/null)")")"
     printf ',"shims_missing":"%s"' \
-        "$(sh_json_escape "$(sh_lead "$(sh_shim_needed_missing)")")"
-    printf ',"failures":%s}\n' "$SH_FAILURES"
+        "$(sh_json_escape "$(sh_lead "$(sh_shim_needed_missing 2>/dev/null)")")"
+    printf ',"failures":%s}\n' "$sh_rj_fail"
 }
 
 # sh_doctor -> probe the things a working sandhome must have and report. It

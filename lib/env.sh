@@ -98,6 +98,11 @@ sh_env_body() {
     printf '    fi\n'
     printf '    ;;\n'
     printf 'esac\n'
+    printf '# Recorded preferences (see sh_pref_set in lib/env.sh): read back on\n'
+    printf '# every shell, kept beside this generated file so rewrites keep them.\n'
+    printf 'if [ -r "$SANDHOME_HOME/prefs.sh" ]; then\n'
+    printf '  . "$SANDHOME_HOME/prefs.sh"\n'
+    printf 'fi\n'
 }
 
 # sh_env_write -> write $SH_HOME/env.sh.
@@ -115,6 +120,82 @@ sh_env_write() {
 
 # sh_env_print -> the same bytes on stdout.
 sh_env_print() { sh_env_body; }
+
+# --------------------------------------------------- preferences --
+# A recorded preference that survives an upgrade (issue #17, kejilion
+# persisted-consent shape). The mechanism is the persistence, not the prompt:
+# a consent flag that lives only in the current shell is a prompt on every
+# shell, and a flag written to a file the tool does not read back is a flag
+# that does not exist. prefs.sh lives BESIDE the generated env.sh, never
+# inside it, so every env rewrite and every upgrade keeps the recorded
+# value; env.sh sources it back on every shell, so the value is read where
+# it is used. sandhome collects no telemetry and prompts nowhere (the
+# profile fragment's rule forbids it: nothing runs at shell start that can
+# fail), so no consent gate is installed; this is the mechanism a future
+# preference, including a consent gate, is recorded with, and it belongs in
+# the bootstrap, which runs once, never in the login path.
+#
+# Names are closed to [A-Za-z0-9_], so no value is ever spliced into a
+# command; the file holds `NAME='quoted'` lines written with sh_sq_quote.
+sh_prefs_file() { printf '%s/prefs.sh' "$SH_HOME"; }
+
+sh_pref_set() {
+    sh_ps_name=$1
+    sh_ps_value=${2:-}
+    case "$sh_ps_name" in
+        ''|*[!A-Za-z0-9_]*) sh_warn "refusing preference name '$sh_ps_name'"; return 1 ;;
+    esac
+    sh_ps_file=$(sh_prefs_file)
+    mkdir -p "$SH_HOME" 2>/dev/null || return 1
+    sh_ps_tmp="$sh_ps_file.tmp.$$"
+    sh_ps_q=$(sh_sq_quote "$sh_ps_value")
+    if [ -r "$sh_ps_file" ]; then
+        sh_ps_kept=''
+        while IFS= read -r sh_ps_line || [ -n "$sh_ps_line" ]; do
+            case "$sh_ps_line" in
+                "$sh_ps_name="*|"export $sh_ps_name="*) ;;
+                *) sh_ps_kept="$sh_ps_kept$sh_ps_line
+" ;;
+            esac
+        done < "$sh_ps_file"
+        printf '%s' "$sh_ps_kept" > "$sh_ps_tmp" || return 1
+    else
+        : > "$sh_ps_tmp" || return 1
+    fi
+    # Exported on source, so children of the shell see the recorded value.
+    printf 'export %s=%s\n' "$sh_ps_name" "$sh_ps_q" >> "$sh_ps_tmp" || return 1
+    mv "$sh_ps_tmp" "$sh_ps_file" || return 1
+    return 0
+}
+
+sh_pref_get() {
+    sh_pg_name=$1
+    case "$sh_pg_name" in
+        ''|*[!A-Za-z0-9_]*) return 1 ;;
+    esac
+    sh_pg_file=$(sh_prefs_file)
+    [ -r "$sh_pg_file" ] || return 1
+    sh_pg_val=''
+    sh_pg_found=0
+    while IFS= read -r sh_pg_line || [ -n "$sh_pg_line" ]; do
+        case "$sh_pg_line" in
+            "export $sh_pg_name="*)
+                sh_pg_val=${sh_pg_line#"export $sh_pg_name="}
+                sh_pg_found=1
+                ;;
+            "$sh_pg_name="*)
+                sh_pg_val=${sh_pg_line#*=}
+                sh_pg_found=1
+                ;;
+        esac
+    done < "$sh_pg_file"
+    [ "$sh_pg_found" = 1 ] || return 1
+    # The stored form is a single-quoted shell word; re-read it the way a
+    # shell would rather than stripping quotes by hand.
+    sh_pg_out=$(sh -c "printf '%s' $sh_pg_val" 2>/dev/null) || return 1
+    printf '%s' "$sh_pg_out"
+    return 0
+}
 
 # sh_profile_source_line -> the one line the login files carry. It guards its own
 # read, because a login file is read by every shell this account starts and a
@@ -150,6 +231,10 @@ sh_install_profile() {
 # only; the exec view is on PATH.
 sh_env_load() {
     sh_path_prepend "$SH_EXEC_BIN"
+    if [ -r "$SH_HOME/prefs.sh" ]; then
+        # shellcheck disable=SC1090
+        . "$SH_HOME/prefs.sh"
+    fi
     if [ -d "$SH_HOME/env.d" ]; then
         for sh_el_f in "$SH_HOME"/env.d/*.sh; do
             [ -r "$sh_el_f" ] || continue
