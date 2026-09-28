@@ -1191,7 +1191,17 @@ with lzma.open(sys.argv[1],"rb") as z:
             fi ;;
         tar.zst|tzst)
             if sh_have zstd; then
-                sh_stream_cat "$sh_sut_dir" | zstd -dc | tar -xf - -C "$sh_sut_dest"
+                # # STOP: --long=30, BECAUSE A LARGE-WINDOW FRAME IS STILL A VALID
+                # FRAME. LLVM's release archive is compressed with a 1GB window
+                # and zstd's decoder default is 128MB, so the stream died with
+                #   Window size larger than maximum : 1073741824 > 134217728
+                #   Use --long=30 or --memory=1024MB
+                # and a 1.18GB download was thrown away over a decoder default.
+                # The flag only raises the ALLOWED window; the decoder still
+                # allocates the frame's own window, so a small archive costs
+                # nothing. The same is true of `tar --zstd` in sh_untar, which
+                # this does not reach.
+                sh_stream_cat "$sh_sut_dir" | zstd -dc --long=30 | tar -xf - -C "$sh_sut_dest"
             else
                 sh_warn 'a zstd stream arrived and no zstd is present'
                 return 1

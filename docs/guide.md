@@ -228,6 +228,7 @@ Drop `tools/<name>.sh`. It declares:
 TC_<name>_DESC='one line for sandhome toolchains'
 TC_<name>_BINS='bin/tool'          # relative executables to expose
 TC_<name>_REQUIRES='other'         # optional; ensured first
+TC_<name>_VIEW_BINS_ONLY=1         # optional; copy BINS, symlink the other executables
 
 tc_<name>_probe()   { ...; }       # 0 when a working copy is already here
 tc_<name>_install() { ...; }       # install into $(sh_toolchain_root <name>)
@@ -248,6 +249,12 @@ The framework, `lib/toolchain.sh`:
 Three rules keep a module portable:
 
 - Install into `sh_toolchain_root <name>` and promote only what must execute.
+  A toolchain whose executables are measured in gigabytes, or merely many,
+  sets `TC_<name>_VIEW_BINS_ONLY=1`: only `TC_<name>_BINS` (and the real file an
+  allowlisted symlink names, e.g. `bin/clang` -> `bin/clang-23`) is copied into
+  the exec view, and every other executable is symlinked back to the home. The
+  LLVM release is the case this exists for: its `bin/` holds dozens of
+executables and runs to gigabytes, while a consumer starts `clang` alone.
 - **Never test a binary by its home path**  -  it may not run there. Declare it in
   `TC_<name>_BINS`, or expose it through the fragment and let the framework's
   post-promote probe decide.

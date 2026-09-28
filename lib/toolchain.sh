@@ -280,6 +280,19 @@ sh_toolchain_install_one() {
         "tc_${sh_te_name}_env" || sh_warn "toolchain $sh_te_name wrote no env fragment"
     fi
     sh_env_load
+    # # STOP: PATH WAS JUST REWRITTEN, SO THE SHELL'S COMMAND HASH IS STALE.
+    # The probe above ran the tool this install is about to replace - on this
+    # sandbox /usr/bin/rustc is a rustup proxy - and the shell remembered where
+    # it found it. After the install the view directory gains a real rustc, but
+    # a hashed command keeps winning for as long as the path it names still
+    # exists, so the final probe ran the PROXY again and a healthy install was
+    # reported as
+    #   [-] toolchain rust installed without an error and still does not run
+    #   from the exec view
+    # while a fresh shell ran the view's rustc perfectly. Measured with dash:
+    #   without `hash -r` the shell ran the hashed system command; with it, the
+    #   view. The hashed path does not disappear, so the shell never notices.
+    hash -r 2>/dev/null || :
     # # NOTE: THE LAST WORD IS A PROBE, NOT AN EXIT CODE. A toolchain that installed
     # "without an error" and does not answer afterwards is the exact claim this
     # tree exists to refuse, and the split root is where it would hide. It runs

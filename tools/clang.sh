@@ -6,11 +6,21 @@
 # sandbox and past every single-file limit a process can raise. The install goes
 # through sh_fetch_unpack, which fetches ranges into parts under the limit and
 # unpacks from the concatenated stream, so no file bigger than the limit is ever
-# written. The view is large (the LLVM binaries are hundreds of MB), so the exec
-# floor is deliberately high; on a small exec root the install refuses by name
-# rather than filling it.
+# written.
+#
+# # STOP: ONLY clang AND clang++ ARE COPIED INTO THE EXEC VIEW. The LLVM release
+# ships dozens of executables (llvm-ar, llvm-objdump, the -XX variants, lld,
+# llvm-config, ...) and promoting the whole tree copied every one of them, so a
+# small exec root had to hold the entire bin/ - hundreds of MB - for a consumer
+# who only ever starts `clang`. TC_clang_VIEW_BINS_ONLY tells the promote step to
+# copy the named bins and symlink the rest back to the home, which is enough
+# because the driver re-execs only itself for -cc1, reads its resource headers
+# and libLLVM through symlinks (mmap(PROT_EXEC) is allowed on a noexec mount),
+# and hands the final link to the system linker. The exec root then holds the
+# ~150MB clang binary instead of the whole toolchain.
 TC_clang_DESC='Clang/LLVM, from the official LLVM release tarball (a >1GB download)'
 TC_clang_BINS='bin/clang bin/clang++'
+TC_clang_VIEW_BINS_ONLY=1
 
 tc_clang_probe() {
     sh_have clang && clang --version >/dev/null 2>&1
@@ -37,13 +47,21 @@ tc_clang_install() {
         *) sh_warn 'could not resolve the current LLVM release'; return 1 ;;
     esac
     sh_ci_ver=${sh_ci_tag#llvmorg-}
-    sh_ci_asset="LLVM-${sh_ci_ver}-Linux-${sh_ci_arch}.tar.xz"
+    # # STOP: THE zst ASSET IS PREFERRED WHERE ZSTD EXISTS. It is 1.18GB against
+    # 2.01GB for the xz, and zstd decompresses several times faster, which is the
+    # difference between an LLVM install that is worth attempting on a sandbox
+    # and one that is not. The xz stays the fallback for a host without zstd.
+    if command -v zstd >/dev/null 2>&1 || command -v unzstd >/dev/null 2>&1; then
+        sh_ci_asset="LLVM-${sh_ci_ver}-Linux-${sh_ci_arch}.tar.zst"
+    else
+        sh_ci_asset="LLVM-${sh_ci_ver}-Linux-${sh_ci_arch}.tar.xz"
+    fi
     sh_ci_url="https://github.com/llvm/llvm-project/releases/download/${sh_ci_tag}/${sh_ci_asset}"
     # The x86_64 tree extracted to ~12GB here, plus ~1.9GB of parts held at the
-    # same time, and a view in the hundreds of MB; both roots are named so a
-    # small host refuses before spending the transfer.
+    # same time. The home is named because that is where the tree goes; the exec
+    # root is not given a static number, because only TC_clang_BINS is copied and
+    # sh_view_need measures that copy before writing it.
     sh_space_need 16000 home || return 1
-    sh_space_need 3000 exec || return 1
     if [ "$SH_DRY_RUN" = 1 ]; then
         sh_step "would install $sh_ci_url into $sh_ci_root"
         return 0

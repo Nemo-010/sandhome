@@ -637,4 +637,137 @@ case "$d38_out" in
     *) t_ok 0 'a toolchain nobody asked for is not a failure (#38)' ;;
 esac
 
+# # STOP: A COMMAND HASHED BEFORE THE INSTALL MUST NOT BE ANSWERED WITH AFTER.
+# sh_toolchain_install_one asks "is it already here?" through PATH, and on a host
+# whose same-named binary is a proxy, that probe RUNS the proxy and the shell
+# remembers where it found it. The install then writes a working binary into the
+# exec view, but the hash still names the proxy - which still exists - so the
+# final verification probe ran the proxy again and reported a healthy install as
+#   [-] toolchain hashed installed without an error and still does not run
+#   from the exec view
+# while a fresh shell ran the view's copy perfectly. Measured with dash: without
+# `hash -r` the shell ran the hashed system command; with it, the view. The
+# fixture plants exactly that state: a failing same-named stub on PATH, and a
+# module whose install puts a working one in the view.
+cat > "$work/repo/tools/hashed.sh" <<'EOF'
+TC_hashed_BINS='bin/hashed'
+tc_hashed_probe() { sh_have hashed && hashed --check; }
+tc_hashed_install() {
+    mkdir -p "$(sh_toolchain_root hashed)/bin" || return 1
+    printf '#!/bin/sh\n[ "$1" = --check ] && exit 0\nexit 0\n' > "$(sh_toolchain_root hashed)/bin/hashed"
+    chmod 0755 "$(sh_toolchain_root hashed)/bin/hashed"
+    return 0
+}
+EOF
+mkdir -p "$work/stub"
+printf '#!/bin/sh\nexit 1\n' > "$work/stub/hashed"
+chmod 0755 "$work/stub/hashed"
+hashed_out=$(SH_LIB_DIR="$work/repo/lib" SH_REPO_DIR="$work/repo" \
+    SH_HOME_TOOLCHAINS="$work/tc" SH_EXEC="$work/exec" SH_HOME="$work/home" \
+    SH_EXEC_BIN="$work/exec/bin" SH_EXEC_VIEWS="$work/exec/views" \
+    SH_HOME_TMP="$work/home/tmp" SH_HOME_EXEC=no SH_DRY_RUN=0 SH_SELF=test \
+    PATH="$work/stub:$PATH" sh "$work/ensure.sh" hashed 2>&1)
+t_contains "$hashed_out" 'STATUS=0' \
+    'a toolchain whose name is a failing stub on PATH still verifies after install (#71, command hash reset)'
+case "$hashed_out" in
+    *'still does not run from the exec view'*)
+        t_ok 1 'the stale-PATH command is not used for the final verification probe' ;;
+    *)
+        t_ok 0 'the stale-PATH command is not used for the final verification probe' ;;
+esac
+
+# --- the split-root rust wrapper ---------------------------------------------
+# # STOP: A WRAPPER AROUND THE VIEW'S rustc PASSES --sysroot, AND clippy KEEPS
+# ITS argv[1]. rustc derives its sysroot from the directory holding the
+# librustc_driver.so it loaded, and in the view that file is a symlink back to
+# the noexec home, so `rustc --print sysroot` answers with the home and the link
+# then spawns <home>/.../gcc-ld/ld.lld, which cannot be exec'd:
+#   collect2: fatal error: posix_spawnp: Permission denied
+# No environment variable moves it (SYSROOT, RUSTC_SYSROOT and RUST_SYSROOT were
+# measured and ignored); --sysroot does. The fixture below builds a fake home
+# toolchain, promotes it the way the framework does, and reads what the module
+# left in the view. The clippy clause is separate because clippy is driven
+# through RUSTC_WORKSPACE_WRAPPER, which calls `clippy-driver <rustc> <args>`:
+# putting --sysroot first made the driver read the rustc path and `-` as two
+# input files.
+rfx="$work/rustfix"
+mkdir -p "$rfx/home/toolchains/rust/rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin" \
+         "$rfx/home/toolchains/rust/cargo/bin" "$rfx/exec/bin" "$rfx/exec/views" "$rfx/home/tmp"
+for b in rustc rustdoc clippy-driver; do
+    printf '#!/bin/sh\nexit 0\n' > "$rfx/home/toolchains/rust/rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/$b"
+    chmod 0755 "$rfx/home/toolchains/rust/rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/$b"
+done
+for b in rustup cargo; do
+    printf '#!/bin/sh\nexit 0\n' > "$rfx/home/toolchains/rust/cargo/bin/$b"
+    chmod 0755 "$rfx/home/toolchains/rust/cargo/bin/$b"
+done
+cat > "$work/rustfix.sh" <<'RUSTFIX'
+set -u
+for m in common detect space fetch env toolchain; do
+    . "$1/lib/$m.sh"
+done
+rfx=$2
+SH_HOME=$rfx/home
+SH_HOME_TOOLCHAINS=$rfx/home/toolchains
+SH_EXEC=$rfx/exec
+SH_EXEC_BIN=$rfx/exec/bin
+SH_EXEC_VIEWS=$rfx/exec/views
+SH_HOME_TMP=$rfx/home/tmp
+SH_HOME_EXEC=no
+export SH_HOME SH_HOME_TOOLCHAINS SH_EXEC SH_EXEC_BIN SH_EXEC_VIEWS SH_HOME_TMP SH_HOME_EXEC
+mkdir -p "$SH_EXEC_BIN" "$SH_EXEC_VIEWS" "$SH_HOME_TMP" 2>/dev/null
+sh_toolchain_load rust >/dev/null 2>&1
+sh_promote_toolchain rust cargo/bin/rustup cargo/bin/cargo >/dev/null 2>&1
+tc_rust_env >/dev/null 2>&1
+bin=$(sh_toolchain_view rust)/rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin
+frag=$(sh_env_fragment rust)
+printf 'WRAP=%s\n' "$(grep -c 'sysroot wrapper' "$bin/rustc" 2>/dev/null)"
+printf 'SYSROOT=%s\n' "$(grep -c -- '--sysroot' "$bin/rustc" 2>/dev/null)"
+printf 'REAL=%s\n' "$([ -f "$bin/rustc.real" ] && echo yes || echo no)"
+printf 'CLIPPYARGV=%s\n' "$(grep -c 'w="$1"' "$bin/clippy-driver" 2>/dev/null)"
+printf 'RUSTUP_HOME=%s\n' "$(grep -c "^RUSTUP_HOME=\"$rfx/home/toolchains/rust/rustup\"" "$frag" 2>/dev/null)"
+printf 'RUSTC=%s\n' "$(grep -c "^export RUSTC=\"$bin/rustc\"" "$frag" 2>/dev/null)"
+RUSTFIX
+rfx_out=$(sh "$work/rustfix.sh" "$ROOT" "$rfx" 2>&1)
+t_contains "$rfx_out" 'WRAP=1' 'the view rustc is a --sysroot wrapper on a split root'
+t_contains "$rfx_out" 'SYSROOT=1' 'the rustc wrapper passes --sysroot'
+t_contains "$rfx_out" 'REAL=yes' 'the real rustc is kept beside the wrapper as rustc.real'
+t_contains "$rfx_out" 'CLIPPYARGV=1' 'the clippy wrapper keeps the rustc path first (RUSTC_WORKSPACE_WRAPPER protocol)'
+t_contains "$rfx_out" 'RUSTUP_HOME=1' 'the fragment keeps RUSTUP_HOME on the home'
+t_contains "$rfx_out" 'RUSTC=1' 'the fragment names the wrapper as RUSTC'
+
+# --- repair runs the module's post-promote step ------------------------------
+# # STOP: sh_promote_toolchain COPY REGULAR EXECUTABLES OVER THE VIEW, SO A
+# MODULE THAT REWRITES ONE OF THEM AFTER THE MIRROR HAS THAT WORK UNDONE BY
+# repair. Measured: `sandhome repair rust` left the view's rustc real again, it
+# reported the HOME sysroot, and the next link died with
+# `collect2: fatal error: posix_spawnp: Permission denied` over an install that
+# had been working. install calls tc_<name>_env after the promote; repair has to
+# leave the view in the same state. The fixture's env writes a stamp into the
+# promoted view, which is the smallest form of that post-promote step.
+rep_fix="$work/repfix"
+rm -rf "$rep_fix"
+cp -R "$ROOT" "$rep_fix" 2>/dev/null
+cat > "$rep_fix/tools/wrapsum.sh" <<'WRAPSUM'
+TC_wrapsum_DESC='a repair fixture'
+TC_wrapsum_BINS='bin/wrapsum'
+tc_wrapsum_probe() { return 1; }
+tc_wrapsum_install() { return 1; }
+tc_wrapsum_env() {
+    printf 'ran\n' > "$(sh_toolchain_root wrapsum)/.env-ran"
+    return 0
+}
+WRAPSUM
+mkdir -p "$rep_fix/home/toolchains/wrapsum/bin" "$rep_fix/exec/bin" "$rep_fix/exec/views" 2>/dev/null
+printf '#!/bin/sh\nexit 0\n' > "$rep_fix/home/toolchains/wrapsum/bin/wrapsum"
+chmod 0755 "$rep_fix/home/toolchains/wrapsum/bin/wrapsum"
+SANDHOME_HOME="$rep_fix/home" SANDHOME_EXEC="$rep_fix/exec" \
+SANDHOME_REPO_DIR="$rep_fix" SH_REPO_DIR="$rep_fix" \
+sh "$rep_fix/bin/sandhome" repair wrapsum >/dev/null 2>&1
+if [ -f "$rep_fix/home/toolchains/wrapsum/.env-ran" ]; then
+    t_ok 0 'repair runs the module post-promote step, so a rewritten view survives it'
+else
+    t_ok 1 'repair runs the module post-promote step, so a rewritten view survives it'
+fi
+
 t_end

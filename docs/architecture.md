@@ -92,8 +92,15 @@ namespaces and two modules defining `install` would shadow each other silently.
    already carries a toolchain should not download a second copy.
 3. Promote: build the exec view and link every `TC_<name>_BINS` entry into
    `$SANDHOME_EXEC/bin`. This runs on **both** paths, because an adopted
-   toolchain has no home tree to mirror and the link is all it needs.
-4. Call `tc_<name>_env`, load the environment again.
+   toolchain has no home tree to mirror and the link is all it needs. By default
+   the view copies every regular executable and symlinks the data back to the
+   home; a module that sets `TC_<name>_VIEW_BINS_ONLY` narrows the copy to its
+   declared bins plus the real file an allowlisted symlink names, so a toolchain
+   like LLVM does not fill a small exec root with executables nobody starts.
+4. Call `tc_<name>_env`, load the environment again. The shell's command hash is
+   reset first, because the probe in step 2 ran the tool this install replaces
+   (on a host whose `rustc` is a rustup proxy) and a hashed command keeps winning
+   while the path it names still exists.
 5. **Probe once more.** A toolchain that installed "without an error" and does
    not answer is the exact claim this tree exists to refuse, and the split root
    is where it hides. The post-promote probe runs for an adoption too, because

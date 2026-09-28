@@ -472,6 +472,19 @@ cmd_repair() {
         [ -n "$sh_rp_bins" ] || continue
         # shellcheck disable=SC2086
         if sh_promote_toolchain "$sh_rp_name" $sh_rp_bins; then
+            # # STOP: THE MODULE GETS ITS POST-PROMOTE STEP, AS IT DOES ON INSTALL.
+            # sh_promote_toolchain copies regular executables over the view, so a
+            # module that rewrites one of them after the mirror - rust's
+            # --sysroot wrapper around the view's rustc - has that work undone
+            # by repair. Measured: `sandhome repair rust` left the view's rustc
+            # real again, it reported the HOME sysroot, and the next link died
+            # with `collect2: fatal error: posix_spawnp: Permission denied` over
+            # an install that had been working. Installing calls
+            # tc_<name>_env after the promote; repair has to leave the view in
+            # the same state.
+            if command -v "tc_${sh_rp_name}_env" >/dev/null 2>&1; then
+                "tc_${sh_rp_name}_env" >/dev/null 2>&1 || true
+            fi
             sh_say "repaired the exec view for $sh_rp_name"
         else
             sh_fail "could not rebuild the exec view for $sh_rp_name"

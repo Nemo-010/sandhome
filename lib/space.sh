@@ -705,7 +705,8 @@ sh_view_copy_kb() {
             fi
             # A symlink is mirrored as a link, never copied.
             [ -L "$sh_vck_e" ] && continue
-            sh_is_exec_file "$sh_vck_e" || continue
+            sh_vck_rel=${sh_vck_e#"$sh_vck_src"/}
+            sh_is_exec_copy "$sh_vck_e" "$sh_vck_rel" || continue
             sh_vck_k=$(du -sk "$sh_vck_e" 2>/dev/null | { read -r sh_vck_kb _ || :; printf '%s' "$sh_vck_kb"; })
             case "$sh_vck_k" in
                 ''|*[!0-9]*) continue ;;
@@ -754,6 +755,24 @@ sh_is_exec_file() {
         *.so|*.so.*|*.dylib|*.dll|*.a|*.rlib|*.rmeta|*.o) return 1 ;;
     esac
     return 0
+}
+
+# sh_is_exec_copy PATH REL -> 0 when sh_promote_tree should COPY this regular
+# executable rather than symlink it. With SH_VIEW_ONLY empty it is every
+# executable, which is the default and what a small toolchain wants. A module may
+# set TC_<name>_VIEW_BINS_ONLY=1 to name a SUBSET: the LLVM release carries
+# dozens of executables nobody starts (llvm-ar, llvm-objdump, the -XX variants)
+# and copying all of them overflows an exec root that holds `clang` alone with
+# room to spare. The rest are symlinked like data, which is enough because clang
+# re-execs only itself for -cc1 and uses the system linker for the final link.
+sh_is_exec_copy() {
+    sh_iec_rel=${2:-}
+    sh_is_exec_file "$1" || return 1
+    [ -n "${SH_VIEW_ONLY:-}" ] || return 0
+    case " $SH_VIEW_ONLY " in
+        *" $sh_iec_rel "*) return 0 ;;
+    esac
+    return 1
 }
 
 # sh_promote_tree SRC DEST -> mirror SRC into DEST. Directories are recreated,
@@ -874,7 +893,16 @@ sh_promote_tree() {
                 sh_warn "$sh_pt_e is a symlink whose target is missing and could not be reproduced"
                 continue
             fi
-            if sh_is_exec_file "$sh_pt_e"; then
+            if sh_is_exec_copy "$sh_pt_e" "${sh_pt_e#"$sh_pt_src"/}"; then
+                # # STOP: THE DESTINATION MAY BE A SYMLINK FROM AN EARLIER VIEW, AND
+                # `cp -f` FOLLOWS IT. When a path moves from mirrored to copied -
+                # which is exactly what adding a slim-view allowlist does to
+                # bin/clang-23 - the old symlink points at the SOURCE, so cp
+                # compares the two and refuses with "are the same file"; the
+                # binary then stays a symlink to the noexec home and cannot run.
+                # The stale entry is removed first, which the copy branch always
+                # owns.
+                rm -f "$sh_pt_d/$sh_pt_b" 2>/dev/null
                 if cp -f "$sh_pt_e" "$sh_pt_d/$sh_pt_b" 2>/dev/null; then
                     chmod 0755 "$sh_pt_d/$sh_pt_b" 2>/dev/null || true
                 else
@@ -938,7 +966,55 @@ sh_promote_toolchain() {
         if [ "$SH_HOME_EXEC" = yes ]; then
             sh_ptc_view=$sh_ptc_root
         else
+            # A module that ships a large toolchain names the executables worth
+            # copying (TC_<name>_VIEW_BINS_ONLY); the rest of the tree is
+            # symlinked like data. The list is the BIN_REL arguments this call
+            # already received, so nothing extra is parsed.
+            eval "sh_ptc_only=\${TC_${sh_ptc_name}_VIEW_BINS_ONLY:-}"
+            if [ -n "$sh_ptc_only" ]; then
+                SH_VIEW_ONLY="$*"
+            else
+                SH_VIEW_ONLY=''
+            fi
+            # # STOP: AN ALLOWLISTED NAME MAY BE A SYMLINK TO THE REAL BINARY, AND
+            # THE TARGET HAS TO BE COPIED TOO. LLVM's bin/clang is a symlink to
+            # bin/clang-23 (282MB), so a list naming only `bin/clang` copied no
+            # executable at all: the link was mirrored, the target was symlinked
+            # back to the noexec home, and the new clang could not execve. Each
+            # allowlisted entry that is an in-tree symlink therefore drags its
+            # resolved target into the list, following the chain (clang++ ->
+            # clang -> clang-23) to a fixed depth. A target outside the tree is
+            # left alone, exactly as sh_promote_tree leaves it.
+            sh_ptc_i=0
+            while [ "$sh_ptc_i" -lt 8 ]; do
+                sh_ptc_i=$((sh_ptc_i + 1))
+                sh_ptc_added=''
+                for sh_ptc_rel in $SH_VIEW_ONLY; do
+                    [ -L "$sh_ptc_root/$sh_ptc_rel" ] || continue
+                    sh_ptc_t=$(readlink "$sh_ptc_root/$sh_ptc_rel" 2>/dev/null)
+                    case "$sh_ptc_t" in
+                        '') continue ;;
+                        /*) sh_ptc_abs=$(sh_lex_normalize "$sh_ptc_t") ;;
+                        *)  if [ "${sh_ptc_rel%/*}" = "$sh_ptc_rel" ]; then
+                                sh_ptc_abs=$(sh_lex_normalize "$sh_ptc_root/$sh_ptc_t")
+                            else
+                                sh_ptc_abs=$(sh_lex_normalize "$sh_ptc_root/${sh_ptc_rel%/*}/$sh_ptc_t")
+                            fi ;;
+                    esac
+                    case "$sh_ptc_abs" in
+                        "$sh_ptc_root"/*) sh_ptc_cur=${sh_ptc_abs#"$sh_ptc_root"/} ;;
+                        *) continue ;;
+                    esac
+                    case " $SH_VIEW_ONLY $sh_ptc_added " in
+                        *" $sh_ptc_cur "*) continue ;;
+                    esac
+                    sh_ptc_added="$sh_ptc_added $sh_ptc_cur"
+                done
+                [ -n "$sh_ptc_added" ] || break
+                SH_VIEW_ONLY="$SH_VIEW_ONLY$sh_ptc_added"
+            done
             sh_promote_tree "$sh_ptc_root" "$sh_ptc_view" || sh_fail "could not build the exec view for $sh_ptc_name"
+            SH_VIEW_ONLY=''
         fi
     else
         # Adopted: no home tree. Link the probe's answer, or the module's own

@@ -814,4 +814,43 @@ case "$doc_full" in
     *) t_ok 1 "doctor names a full exec root as full (#60) (got: $(printf '%s' "$doc_full" | tail -2))" ;;
 esac
 
+# # STOP: A SLIM VIEW COPIES ONLY THE BINS THE MODULE NAMES. The LLVM release
+# ships dozens of executables (llvm-ar, llvm-objdump, the -XX variants, lld) and
+# promoting all of them overflowed an exec root that holds `clang` alone with
+# room to spare. TC_<name>_VIEW_BINS_ONLY selects the subset; everything else -
+# the other executables and every shared object - is symlinked like data, which
+# is enough because the driver re-execs only itself for -cc1 and reads libLLVM
+# through a symlink. The fixture plants a needed bin beside an unwanted one and
+# reads which of them was COPIED.
+sl="$tmp-slim"
+rm -rf "$sl"
+mkdir -p "$sl/home/toolchains/x/bin" "$sl/home/toolchains/x/lib" \
+         "$sl/exec/bin" "$sl/exec/views" "$sl/home/tmp"
+printf '#!/bin/sh\nexit 0\n' > "$sl/home/toolchains/x/bin/clang-23"
+chmod 0755 "$sl/home/toolchains/x/bin/clang-23"
+ln -s clang-23 "$sl/home/toolchains/x/bin/clang"
+dd if=/dev/zero of="$sl/home/toolchains/x/bin/llvm-objdump" bs=1k count=64 2>/dev/null
+chmod 0755 "$sl/home/toolchains/x/bin/llvm-objdump"
+dd if=/dev/zero of="$sl/home/toolchains/x/lib/libLLVM.so" bs=1k count=128 2>/dev/null
+sh -c '
+    for m in common detect space; do . "$1/lib/$m.sh"; done
+    SH_HOME=$2/home; SH_HOME_TOOLCHAINS=$2/home/toolchains; SH_EXEC=$2/exec
+    SH_EXEC_BIN=$2/exec/bin; SH_EXEC_VIEWS=$2/exec/views; SH_HOME_TMP=$2/home/tmp; SH_HOME_EXEC=no
+    export SH_HOME SH_HOME_TOOLCHAINS SH_EXEC SH_EXEC_BIN SH_EXEC_VIEWS SH_HOME_TMP SH_HOME_EXEC
+    mkdir -p "$SH_EXEC_BIN" "$SH_EXEC_VIEWS" "$SH_HOME_TMP"
+    TC_x_VIEW_BINS_ONLY=1
+    v=$(sh_toolchain_view x)
+    sh_promote_toolchain x bin/clang
+    [ -f "$v/bin/clang-23" ] && [ ! -L "$v/bin/clang-23" ] && printf "target-copied\n"
+    [ -L "$v/bin/clang" ] && printf "link-mirrored\n"
+    [ -L "$v/bin/llvm-objdump" ] && printf "objdump-linked\n"
+    [ -L "$v/lib/libLLVM.so" ] && printf "lib-linked\n"
+' sh "$ROOT" "$sl" > "$sl/out" 2>/dev/null
+slim_out=$(cat "$sl/out" 2>/dev/null)
+t_contains "$slim_out" 'target-copied' 'a slim view copies the real target an allowlisted symlink names'
+t_contains "$slim_out" 'link-mirrored' 'the allowlisted symlink is mirrored into the view'
+t_contains "$slim_out" 'objdump-linked' 'a slim view symlinks an undeclared executable'
+t_contains "$slim_out" 'lib-linked' 'a slim view still symlinks shared objects'
+rm -rf "$sl"
+
 t_end
