@@ -1,6 +1,6 @@
 ---
 name: sandhome
-description: Set up and repair a portable agent sandbox with sandhome - detect which roots can execute, install or adopt toolchains (jq, ripgrep, fd, python, node, rust, go), write the environment, and diagnose a tool that installed but will not run. Use when a fresh sandbox needs tooling, when HOME is on a noexec mount, when a binary is Permission denied, when go run fails after a successful build, or when an agent needs a toolchain in under a minute.
+description: Set up and repair a portable agent sandbox with sandhome - detect which roots can execute, install or adopt toolchains (jq, ripgrep, fd, python, node, rust, go, zig, clang, deno, bun, mold), download an archive larger than the per-file size limit by sharding it, write the environment, and diagnose a tool that installed but will not run. Use when a fresh sandbox needs tooling, when HOME is on a noexec mount, when a binary is Permission denied, when go run fails after a successful build, when a download dies with File size limit exceeded, or when an agent needs a toolchain in under a minute.
 ---
 
 # sandhome

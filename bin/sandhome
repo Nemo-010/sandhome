@@ -88,7 +88,8 @@ usage: sandhome COMMAND [args]
   selftest               the checks that need this machine and no network
   selftest shims         build and exercise the LD_PRELOAD shims
   selftest exec          the noexec-home end-to-end: install, promote, run
-  shell [args]           run errandsh, the pty-less line discipline
+  shell [args]           run errandsh, the line discipline with a userspace pty
+  pty CMD...             run CMD with a userspace pty (no /dev/ptmx needed)
   exec CMD...            run CMD with the sandhome environment loaded
   report [--json]        the full report
   gc [DAYS] [--dry-run]   remove staging older than DAYS (default 7)
@@ -258,6 +259,19 @@ cmd_shell() {
     fi
     sh_die 'no errandsh found'
 }
+# pty CMD... -> run CMD with a userspace pty, where the kernel has none. The
+# wrapper exports the fakepty interposer and execs, so a subshell CMD spawns
+# keeps the terminal. This is the same path errandsh uses for a full-screen
+# program, exposed for a caller that is not in an errandsh session.
+cmd_pty() {
+    if [ "$#" -eq 0 ]; then
+        sh_die 'pty needs a command'
+    fi
+    if [ ! -r "$SH_REPO_DIR/shell/faketty" ]; then
+        sh_die "no faketty wrapper at $SH_REPO_DIR/shell/faketty"
+    fi
+    exec sh "$SH_REPO_DIR/shell/faketty" "$@"
+}
 cmd_exec() {
     if [ "$#" -eq 0 ]; then
         sh_die 'exec needs a command'
@@ -369,6 +383,11 @@ sh_cmd_needs_roots() {
         fi
         sh_die 'no writable mount here both allows exec and can be written; set SANDHOME_EXEC to one'
     fi
+    # A create plan may have moved the exec root; make sure the command that was
+    # just invoked is on the root it chose (issue #41).
+    if [ "${1:-}" = install ]; then
+        sh_exec_install_launchers
+    fi
     return 0
 }
 
@@ -423,6 +442,7 @@ case "${1:-help}" in
     install|ensure) sh_cmd_needs_roots install; shift; cmd_install "$@" ;;
     shims)       sh_cmd_needs_roots shims; shift; cmd_shims "$@" ;;
     shell)       shift; cmd_shell "$@" ;;
+    pty)         shift; cmd_pty "$@" ;;
     exec)        shift; cmd_exec "$@" ;;
     report)      shift; cmd_report "$@" ;;
     gc)          sh_cmd_needs_roots gc; shift; cmd_gc "$@" ;;

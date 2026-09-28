@@ -21,9 +21,16 @@ the page to read before adding a toolchain to it.
 
   **Free space decides between working candidates, and it is the decision that
   matters.** On this sandbox `/dev/shm` works and has 244MB while `/tmp` works
-  and has 52GB; the default is `/tmp`, and installing `go` onto the other one
-  fails for want of room. `SANDHOME_MIN_EXEC_MB` raises the bar; when no
+  and has 52GB; the first plan picks `/tmp`, and installing `go` onto the other
+  one fails for want of room. `SANDHOME_MIN_EXEC_MB` raises the bar; when no
   candidate clears it the first that works is used and a warning says so.
+
+  **The choice is then stable.** The root recorded in `$SANDHOME_HOME/env.sh`
+  is reused while it still runs a file, so a later install does not migrate the
+  exec root out from under the views, caches, launchers and PATH entry that
+  already live on it (issue #41). A recorded root that is gone or refuses exec
+  falls back to the roomiest working candidate, and `--exec` (or
+  `SANDHOME_EXEC`) overrides both.
 
 When the home runs binaries the two collapse and nothing is copied. When it does
 not, a toolchain installs into the home and an **exec view** is mirrored onto the
@@ -154,31 +161,62 @@ That lets the parser be tested against a local file, which is how both of the
 version parsers here are covered offline. See
 [`decisions/toolchain-contract.md`](decisions/toolchain-contract.md).
 
+### Downloads larger than the file-size limit
+
+A sandbox can pin a per-file cap (`ulimit -f`, RLIMIT_FSIZE) that no process can
+raise  -  measured here at exactly 1,000,000,000 bytes, where `curl` died with
+`File size limit exceeded` on a 1.9GB asset. A single file above the cap is
+unreachable by construction, and resuming appends to a file already at the cap.
+`sandhome` never makes one: when `Content-Length` exceeds the cap, `sh_fetch_stream`
+fetches numbered ranges  -  each under the cap  -  and `sh_stream_untar` unpacks a
+`.tar.*` from the concatenated stream. The digest is taken over the stream, so
+verification is unchanged. `SANDHOME_FETCH_CHUNK_MB` sets the range size
+(default 256, capped at three quarters of the limit). A `.zip` above the limit is
+refused by name, because a zip's directory sits at the end and cannot be read as
+a stream. `sandhome install clang` is the worked example: the x86_64 LLVM tarball
+is about 1.9GB.
+
+`--with clang` is the one toolchain not in a toolset, because its view is large
+(hundreds of MB) and it wants a roomy exec root; `zig`, `deno`, `bun` and `mold`
+are in the `languages` and `agent` toolsets.
+
+### Cross compilers and linkers
+
+`zig cc` is a complete C/C++ compiler and cross compiler, and it is also a
+linker: `zig cc hello.c -o hello`, `zig cc -target aarch64-linux-musl hello.c`.
+`mold` is a fast ELF linker: `gcc -fuse-ld=mold hello.c` and `g++ -fuse-ld=mold`.
+The mold archive ships both `mold` and `ld.mold`, and the latter is what
+`-fuse-ld=mold` looks for; clang accepts `-fuse-ld=mold` too, or
+`--ld-path=$(command -v mold)`. For a rust cross target, `sandhome install rust
+--target <triple>` writes a `zig cc -target <triple>` linker wrapper and exports
+`CARGO_TARGET_<TRIPLE>_LINKER`.
+
 ## 5. The shims
 
 Two `LD_PRELOAD` interposers, built only when the machine needs them:
 
-- **`fakepty`**  -  makes fds 0-2 look like a terminal to a pipe-backed shell, so
-  readline and echo work where there is no `/dev/ptmx`.
+- **`fakepty`**  -  a USERSPACE pty. It makes the session's descriptors look
+  like a terminal (isatty, termios, window size, `/dev/tty`) where there is no
+  `/dev/ptmx`, so readline, echo and full-screen programs work over a pipe.
 - **`fakepwd`**  -  answers `getpwnam`/`getpwuid` from a synthetic database, for a
   cage with no `/etc/passwd`. It reads `$SANDHOME_PASSWD`; `env.sh` exports it.
 
 Both are built into `$SANDHOME_HOME/shims/`. `env.sh` puts them in `LD_PRELOAD`
-only when `SANDHOME_SHIMS` is set to something other than `0`, and **the default
-is off, deliberately**: `fakepty` reports fds 0-2 as a terminal, so every
-terminal-aware program then colourises a *pipe*, which breaks `jq -r`, `git` and
-`ls --color=auto`. Measured:
+only when `SANDHOME_SHIMS` is set to something other than `0`. `fakepty` is no
+longer a blanket `isatty()==1`: `env.sh` also exports `SANDHOME_FAKEPTY_ID`, the
+readlink identity of the session's own descriptors, and only THOSE are faked. A
+pipe opened later is a new object and stays a pipe, so `jq -n 1 | cat` does not
+put ANSI codes into `cat`. Without the variable the older fds 0-2 behaviour is
+kept.
 
-```
-$ LD_PRELOAD=fakepty.so jq -n '{ok:1}'
-^[[1;39m{^[[0m
-  ^[[1;34m"ok"^[[0m^[[1;39m:^[[0m ^[[0;39m1^[[0m
-^[[1;39m}^[[0m
-```
+`shell/faketty` is the caller-facing half: it sets that id, the window size and
+`LD_PRELOAD`, then `exec`s, so a subshell the command starts inherits the
+terminal. `sandhome pty CMD` and errandsh's foreground mode both go through it.
 
 ```sh
 SANDHOME_SHIMS=1 . "$SANDHOME_HOME/env.sh"   # on, for this shell
 SANDHOME_SHIMS=0 . "$SANDHOME_HOME/env.sh"   # off, for this shell
+sandhome pty top                             # a terminal for one command
 ```
 
 > **Neither can reach a statically linked binary.** A static binary carries its
@@ -194,9 +232,31 @@ database  -  an ssh server refuses an unknown account with `Permission denied
 `sandhome shell` runs `shell/errandsh`, a POSIX-sh line discipline that gives a
 pty-less session echo, line editing, history, completion, bracketed paste and
 real signal handling at the prompt. `sandhome shell -c 'cmd'` is an exec channel
-with no discipline. It cannot run a full-screen TUI: nothing in userspace can
-create `/dev/ptmx`. Its test is `tests/errandsh-posix.sh`, which drives it over
+with no discipline. Its test is `tests/errandsh-posix.sh`, which drives it over
 pipes under every shell the host has.
+
+**Full-screen programs work, without a kernel pty.** A cage has no `/dev/ptmx`,
+so `faketty(1)` and `fakepty(1)`  -  which both call `openpty(3)`  -  cannot run
+(the measured error is `out of pty devices`). `shims/fakepty.c` is a USERSPACE
+pty instead, and `shell/faketty` is the wrapper that exports it and execs:
+
+```sh
+sandhome pty nano file      # any command gets a terminal
+sandhome pty top
+faketty less file           # the wrapper directly
+```
+
+In errandsh a full-screen program is detected by name and run in the foreground
+on the session's own descriptors, so it reads the operator's keys directly; the
+line discipline steps aside for that one command and returns afterwards. `pty
+CMD` forces the path for anything not on the list, and `ERRANDSH_PTY=0` turns
+the automatic part off. Because the interposer is exported and exec'd, a
+subshell the program spawns keeps the terminal.
+
+The one thing it cannot reach is a STATICALLY LINKED program: LD_PRELOAD has
+nothing to interpose into. The list of programs, and `SANDHOME_FAKEPTY_SIZE`
+(`COLSxROWS`, default `COLUMNSxLINES`, then 80x24), are described in
+`docs/reference.md`.
 
 ## 7. Troubleshooting
 
@@ -212,7 +272,9 @@ pipes under every shell the host has.
 | the working tree itself is noexec | `sandhome doctor` prints a note naming `$SANDHOME_EXEC`; build and run output there, not in the checkout |
 | no echo / no line editing over ssh | the shims are not loaded; `SANDHOME_SHIMS=1` and restart the shell |
 | an ssh login is refused with `publickey` | the login name is absent from the synthetic passwd; set `SANDHOME_PASSWD_USERS` |
-| a full-screen program fails | there is no pty; this is the one thing `errandsh` cannot fix |
+| a full-screen program runs in batch mode | it is statically linked (nothing to interpose into), or `faketty` is not built. `sandhome pty CMD` forces the userspace pty; `sandhome shims build` builds it |
+| `File size limit exceeded` on a download | `ulimit -f` pins a per-file cap; sandhome shards any download whose `Content-Length` exceeds it and unpacks a `.tar.*` from the stream. `SANDHOME_FETCH_CHUNK_MB` tunes the range size. A `.zip` above the cap is refused by name |
+| `mold` is on PATH but `-fuse-ld=mold` cannot find it | the mold archive ships both `mold` and `ld.mold`; both land on the exec bin. Check `command -v ld.mold`. Clang accepts `--ld-path=$(command -v mold)` as well |
 | the exec root filled | `sandhome gc`; staging, exec caches (`cache/`, `tmp/`, `go-bin/` entries older than DAYS), and home tmp older than DAYS are removed, toolchain data stays. `GOCACHE`, `GOBIN`, `NPM_CONFIG_PREFIX`, `CARGO_INSTALL_ROOT`, `CARGO_TARGET_DIR`, and `target/` all land on the exec root: heavy and multi-target builds need a roomy `--exec DIR`. If no candidate fits, the install names the constraint before writing anything |
 | the exec root was cleared by a restart | the tmpfs exec view is gone while `env.sh` persists; re-run the setup, then `sandhome install <name>` to rebuild the view |
 

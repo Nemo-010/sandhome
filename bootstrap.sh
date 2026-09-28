@@ -273,8 +273,8 @@ sh_toolset_names() {
         minimal)   printf 'jq\n' ;;
         cli)       printf 'jq ripgrep fd\n' ;;
         developer) printf 'jq ripgrep fd python node\n' ;;
-        languages) printf 'jq ripgrep fd python node rust go\n' ;;
-        agent)     printf 'jq ripgrep fd python node rust go\n' ;;
+        languages) printf 'jq ripgrep fd python node rust go zig deno bun mold\n' ;;
+        agent)     printf 'jq ripgrep fd python node rust go zig deno bun mold\n' ;;
         *)         return 1 ;;
     esac
 }

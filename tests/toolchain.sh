@@ -214,10 +214,20 @@ else
 fi
 if command -v rustc >/dev/null 2>&1; then
     sh_toolchain_load rust >/dev/null 2>&1
-    if tc_rust_behavioural >/dev/null 2>&1; then
-        t_ok 0 'rust behavioural probe links and runs native (#19)'
+    # # STOP: A rustc PROXY WITH NO DEFAULT TOOLCHAIN IS NOT A rustc. On a host
+    # whose /usr/bin/rustc is rustup's proxy, `rustc --version` fails and
+    # tc_rust_probe (the same test the installer uses) is false; calling the
+    # behavioural probe then reported a tree defect for a tool that is not
+    # installed here. Gate on the module's own probe, so the clause measures the
+    # tree when a working rustc is present and skips when it is not.
+    if tc_rust_probe >/dev/null 2>&1; then
+        if tc_rust_behavioural >/dev/null 2>&1; then
+            t_ok 0 'rust behavioural probe links and runs native (#19)'
+        else
+            t_ok 1 'rust behavioural probe links and runs native (#19)'
+        fi
     else
-        t_ok 1 'rust behavioural probe links and runs native (#19)'
+        t_skip 'rust behavioural probe: no working rustc on this host'
     fi
 else
     t_skip 'rust behavioural probe: no rustc on this host'

@@ -368,6 +368,18 @@ sh_total_mb() {
     }
 }
 
+# sh_file_bytes PATH -> the size of PATH in bytes, or nothing. `wc -c` reads the
+# file rather than stat-ing it, but it is the one spelling that answers under a
+# BusyBox userland with no `stat`; the size of a fetch part is also small enough
+# that reading it is not a cost, and the streaming paths never call this on the
+# whole archive.
+sh_file_bytes() {
+    wc -c < "$1" 2>/dev/null | {
+        read -r sh_fb_n _ || :
+        printf '%s' "$sh_fb_n"
+    }
+}
+
 # sh_json_escape STRING -> STRING safe inside a JSON string. Only the five
 # mandatory escapes and control characters are handled; sandhome only ever puts
 # identifiers, paths and counts through here.
