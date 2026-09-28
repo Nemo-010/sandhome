@@ -68,14 +68,36 @@ t_skip() {
     printf '  skip %s\n' "$1"
 }
 
-# t_end [EXIT_CODE] -> summarise and hand back the exit code the file should
-# use. Every test file ends with `t_end`, so this is where the three claims are
-# kept apart:
+# t_end [EXIT_CODE] -> summarise, EXIT with the code, and never merely return
+# it.
+#
+# # STOP: t_end EXITS AND DOES NOT RETURN, BECAUSE A TEST FILE'S EXIT STATUS IS
+# ITS LAST COMMAND'S AND EVERY FILE ENDS HERE. `t_end` used to `return` the code
+# and every caller ignored it, because a script cannot exit with a value another
+# function returned. The result was the whole suite's weakest property: a file
+# printed its own FAIL lines, printed "3 run, 3 failed, 0 skipped", and exited
+# 0. tests/run.sh read the exit code to decide passed/failed, so the three
+# failures were reported under `passed`, and a test file that failed was green.
+# Measured here, on tests/harness.sh itself:
+#   $ sh tests/harness.sh | tail -1
+#   harness: 13 run, 2 failed, 0 skipped
+#   $ sh tests/harness.sh >/dev/null 2>&1; echo $?
+#   0
+# `return` is kept for the in-process callers - a subshell that only wants the
+# number - but the default is `exit`, and a caller that wants a return passes
+# `t_end --return`.
+#
+# The three claims are kept apart:
 #   0  every clause that could run here passed
 #   2  a clause could not run here (the suite maps this to "skipped")
 #   1  a clause failed
 t_end() {
     t_end_rc=${1:-0}
+    t_end_ret=''
+    if [ "$t_end_rc" = --return ]; then
+        t_end_ret=1
+        t_end_rc=0
+    fi
     if [ "$TESTS_FAIL" -gt 0 ]; then
         t_end_rc=1
     elif [ "${TESTS_SKIP:-0}" -gt 0 ] && [ "$t_end_rc" = 0 ]; then
@@ -83,7 +105,10 @@ t_end() {
     fi
     printf '%s: %s run, %s failed, %s skipped\n' \
         "$TESTS_NAME" "$TESTS_RUN" "$TESTS_FAIL" "${TESTS_SKIP:-0}"
-    return "$t_end_rc"
+    if [ -n "$t_end_ret" ]; then
+        return "$t_end_rc"
+    fi
+    exit "$t_end_rc"
 }
 
 # tests_repo_dir -> the checkout root, from this file's location.

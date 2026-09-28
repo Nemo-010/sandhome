@@ -54,7 +54,15 @@ export SH_REPO_DIR SH_LIB_DIR SANDHOME_BIN_DIR
 . "$SH_LIB_DIR/report.sh"
 
 sh_detect_all
-sh_space_plan
+# # STOP: THE PLAN IS RESOLVED WITHOUT CREATING, AND THE COMMANDS THAT INSTALL
+# CREATE. `sh_space_plan` ran unconditionally before the dispatcher and it
+# mkdir'd both roots on the way, so `sandhome version` created four directories
+# under each of SANDHOME_HOME and SANDHOME_EXEC, and with an unwritable home it
+# died at startup with no usage text. A read-only plan answers the same question
+# about the machine as it stands; the three commands that put something on disk
+# (install, shims, gc) re-plan with creation. tests/space.sh asserts both
+# directions, including that `install` still creates.
+sh_space_plan --no-create
 
 usage() {
     cat <<'USAGE'
@@ -75,7 +83,7 @@ usage: sandhome COMMAND [args]
   shell [args]           run errandsh, the pty-less line discipline
   exec CMD...            run CMD with the sandhome environment loaded
   report [--json]        the full report
-  gc [DAYS]              remove staging older than DAYS (default 7)
+  gc [DAYS] [--dry-run]   remove staging older than DAYS (default 7)
   version                print the schema version
   help                   this text
 
@@ -85,7 +93,12 @@ Environment:
   SANDHOME_REPO   the checkout that holds lib/, tools/ and shell/
   SANDHOME_SHIMS  set to 1 to put the shims in LD_PRELOAD
   SANDHOME_PASSWD_USERS   extra names for the synthetic passwd database
-  SANDHOME_SHA256 pin the sha256 of every download this run makes
+  SANDHOME_SHA256 a default digest for downloads with no pin of their own.
+                  Prefer SANDHOME_SHA256_<NAME> (the toolchain, upper-cased)
+                  or SANDHOME_SHA256_<ASSET> (the url's last path segment,
+                  upper-cased, no extension, hyphens as underscores), which
+                  apply to one download. Resolution order: <NAME>, <ASSET>,
+                  a digest the publisher published, then this.
   SANDHOME_REF    branch or tag the pipe bootstrap fetches. Default main
   SANDHOME_REPO_DIR   the checkout the installed copy of this command reads.
                       Set by env.sh; read it, do not set it.
@@ -200,8 +213,101 @@ cmd_report() {
         sh_report_text
     fi
 }
-cmd_gc() { sh_say "removed $(sh_space_gc "${1:-7}") staging entries"; }
-cmd_version() { printf 'sandhome/1\n'; }
+# # STOP: GC VALIDATES ITS ARGUMENT AND MEASURES WHAT IT RECLAIMED. `gc abc` and
+# `gc -5` used to print "removed 0 staging entries" and exit 0: the value went
+# straight into `find -mtime +"$days"`, find failed, the substitution was empty,
+# nothing was removed, and the command reported success. The line now refuses a
+# value that is not a whole number of days by name and exits 2, which is what
+# `install` already does for an unknown toolchain, and it prints the space
+# actually reclaimed rather than a count of entries - the reason to run gc is a
+# full exec root, and a count says nothing about bytes. `--dry-run` names what
+# it would remove and removes nothing, which a command that deletes should have
+# had from the start.
+cmd_gc() {
+    sh_cg_days=7
+    sh_cg_dry=0
+    for sh_cg_arg in "$@"; do
+        case "$sh_cg_arg" in
+            --dry-run) sh_cg_dry=1 ;;
+            -*)
+                sh_die "gc does not take '$sh_cg_arg'; it takes DAYS, or --dry-run"
+                ;;
+            *)
+                sh_cg_days=$sh_cg_arg
+                ;;
+        esac
+    done
+    case "$sh_cg_days" in
+        ''|*[!0-9]*)
+            sh_die "gc needs a whole number of days, not '$sh_cg_days'"
+            ;;
+    esac
+    sh_cg_before=$(sh_free_kb "$SH_HOME_TMP")
+    if [ "$sh_cg_dry" = 1 ]; then
+        SH_GC_DRY_RUN=1
+        export SH_GC_DRY_RUN
+    fi
+    sh_cg_removed=$(sh_space_gc "$sh_cg_days") || return $?
+    if [ "$sh_cg_dry" = 1 ]; then
+        sh_say "dry run: nothing was removed; the entries above are what gc $sh_cg_days would delete"
+        return 0
+    fi
+    sh_cg_after=$(sh_free_kb "$SH_HOME_TMP")
+    sh_cg_line="removed $sh_cg_removed staging entries"
+    case "$sh_cg_before" in
+        ''|*[!0-9]*) ;;
+        *)
+            case "$sh_cg_after" in
+                ''|*[!0-9]*) ;;
+                *)
+                    sh_cg_kb=$((sh_cg_after - sh_cg_before))
+                    [ "$sh_cg_kb" -lt 0 ] && sh_cg_kb=0
+                    sh_cg_mb=$((sh_cg_kb / 1024))
+                    # # STOP: THE BRACES GO ROUND THE VARIABLE AND NOT ROUND IT
+                    # AND THE UNIT. `${x}MB` is `sh_xMB` to the shell, which is a
+                    # name nothing ever set, so the line died under `set -u` with
+                    # "sh_cg_mbMB: parameter not set" on the very first `gc` a
+                    # caller ran. Measured here, on the fix for the argument check
+                    # in the same function: a guard that breaks the happy path it
+                    # was added to protect.
+                    sh_cg_line="$sh_cg_line, ${sh_cg_kb}KB (${sh_cg_mb}MB) reclaimed"
+                    ;;
+            esac
+            ;;
+    esac
+    sh_say "$sh_cg_line"
+    return 0
+}
+# # NOTE: BOTH PROGRAMS REPORT THE SAME SCHEMA STRING, AND A READER WHO CHECKS
+# ONE HAS TO CHECK THE SAME ONE. `bootstrap.sh --version` printed `bootstrap/1`
+# and `sandhome version` printed `sandhome/1`: two spellings of the same value,
+# so a script that wanted to know whether this tree is schema 1 had to try both
+# and could not tell a version difference from a program-name difference. The
+# schema is a property of the TREE, not of the file that prints it, and both
+# now print `sandhome/1`. The program name still goes in the human line the
+# bootstrap prints while setting up, so nothing is lost by the two agreeing.
+SH_VERSION_LINE='sandhome/1'
+cmd_version() { printf '%s\n' "$SH_VERSION_LINE"; }
+
+# sh_cmd_needs_roots COMMAND -> create both roots, now, for the commands that
+# put something on disk. A read-only plan answered first so that the commands
+# that only ask could run on a machine whose home cannot be created; this is the
+# other half, and it is the ONLY place a root is brought into being by this
+# command. An unusable root is refused here, by name, which is what a create
+# plan would have done from startup.
+sh_cmd_needs_roots() {
+    if [ "${SH_PLAN_CREATED:-0}" = 1 ]; then
+        return 0
+    fi
+    sh_space_plan || return 2
+    if [ "${SH_EXEC_UNUSABLE:-0}" = 1 ]; then
+        if [ -n "${SANDHOME_EXEC:-}" ]; then
+            sh_die "SANDHOME_EXEC=$SANDHOME_EXEC is not writable or does not allow exec"
+        fi
+        sh_die 'no writable mount here both allows exec and can be written; set SANDHOME_EXEC to one'
+    fi
+    return 0
+}
 
 # STOP: `selftest` AND `test` RUN WHAT IS IN THE CHECKOUT, AND WERE NAMED IN THE
 # USAGE WITHOUT EXISTING. An agent that reads `sandhome help`, picks the obvious
@@ -213,7 +319,11 @@ cmd_selftest() {
     case ${1:-} in
         shims) sandhome_test_one shims ;;
         exec)  sandhome_test_one bootstrap ;;
-        *)      sandhome_test_one syntax
+        # `harness` runs first here too. selftest is what an agent runs under
+        # pressure, and a run that reports a broken suite as green is worse than
+        # a run that reports nothing; see the note in tests/run.sh.
+        *)      sandhome_test_one harness
+                 sandhome_test_one syntax
                  sandhome_test_one unit
                  sandhome_test_one space
                  sandhome_test_one shims
@@ -247,12 +357,12 @@ case "${1:-help}" in
     path)        cmd_path ;;
     space)       shift; cmd_space "$@" ;;
     toolchains)  shift; cmd_toolchains "$@" ;;
-    install|ensure) shift; cmd_install "$@" ;;
-    shims)       shift; cmd_shims "$@" ;;
+    install|ensure) sh_cmd_needs_roots install; shift; cmd_install "$@" ;;
+    shims)       sh_cmd_needs_roots shims; shift; cmd_shims "$@" ;;
     shell)       shift; cmd_shell "$@" ;;
     exec)        shift; cmd_exec "$@" ;;
     report)      shift; cmd_report "$@" ;;
-    gc)          shift; cmd_gc "$@" ;;
+    gc)          sh_cmd_needs_roots gc; shift; cmd_gc "$@" ;;
     test)        cmd_test ;;
     selftest)    shift; cmd_selftest "${1:-}" ;;
     version|--version) cmd_version ;;

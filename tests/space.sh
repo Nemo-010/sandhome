@@ -188,5 +188,105 @@ else
 fi
 t_ok "$(case $gc_n in ''|*[!0-9]*) echo 1;; *) echo 0;; esac)" 'gc answers a plain count'
 
+# # STOP: GC REFUSES AN ARGUMENT THAT IS NOT A WHOLE NUMBER OF DAYS, AND SAYS
+# WHICH ARGUMENT. The value went straight into `find -mtime +"$days"`, so
+# `sandhome gc abc` ran a find that failed, removed nothing, and PRINTED
+# "removed 0 staging entries" with exit 0 - a success for a command that did
+# nothing, on the one command here that deletes. `gc -5` became `-mtime +-5`
+# the same way. The check is here and in bin/sandhome; this is the library half.
+gc_rc=0
+gc_out=$(sh_space_gc abc 2>&1) || gc_rc=$?
+t_is "$gc_rc" '2' 'gc refuses a non-numeric day count with a status a caller can branch on'
+case "$gc_out" in
+    *abc*) t_ok 0 'the refusal names the value it was given' ;;
+    *) t_ok 1 "the refusal names the value it was given (got: $gc_out)" ;;
+esac
+gc_rc=0
+sh_space_gc -5 >/dev/null 2>&1 || gc_rc=$?
+t_is "$gc_rc" '2' 'gc refuses a negative day count too'
+gc_rc=0
+sh_space_gc '' >/dev/null 2>&1 || gc_rc=$?
+t_is "$gc_rc" '0' 'gc with an empty argument falls back to the default and does not fail'
+# A day count is used as an integer by find; a float must be refused rather than
+# passed through, because `find -mtime +7.5` is a find error on some builds and a
+# silent no-op on others.
+gc_rc=0
+sh_space_gc 7.5 >/dev/null 2>&1 || gc_rc=$?
+t_is "$gc_rc" '2' 'gc refuses a fractional day count'
+
+# A DRY RUN NAMES WHAT IT WOULD DELETE AND DELETES NOTHING. A command that
+# removes directories should be able to answer that question before it does it.
+mkdir -p "$SH_HOME_TMP/aged"
+: > "$SH_HOME_TMP/aged/file"
+touch -d '2000-01-01 00:00:00' "$SH_HOME_TMP/aged" 2>/dev/null || true
+if [ -d "$SH_HOME_TMP/aged" ]; then
+    dry_out=$( SH_GC_DRY_RUN=1 sh_space_gc 7 2>&1 )
+    t_contains "$dry_out" "$SH_HOME_TMP/aged" 'a dry run names the entry it would remove'
+    t_ok "$([ -d "$SH_HOME_TMP/aged" ]; echo $?)" 'a dry run removes nothing'
+else
+    t_skip 'could not backdate a directory, so the gc dry-run clause did not run'
+fi
+rm -rf "$SH_HOME_TMP/aged"
+
+# # STOP: A READ-ONLY PLAN CREATES NOTHING, AND THAT IS THE WHOLE POINT OF THE
+# `--no-create` FORM. The planner used to mkdir both roots on the way to
+# answering anything, and bin/sandhome called it before its dispatcher, so every
+# subcommand created them - `sandhome version` created four directories under
+# each of SANDHOME_HOME and SANDHOME_EXEC - and with an unwritable home it died
+# at startup with no usage text, so the two commands a caller reaches for
+# BECAUSE something is broken were the two that could not run on a broken
+# machine. Measured, before the fix:
+#   $ SANDHOME_HOME=/tmp/h SANDHOME_EXEC=/tmp/e sh bin/sandhome version
+#   sandhome/1
+#   $ find /tmp/h /tmp/e -maxdepth 1 -type d | wc -l
+#   8
+# The create form must still create, or nothing here works; that is checked
+# below as its own clause rather than assumed, because a guard that refuses
+# everything looks exactly like a good one until it blocks real work.
+ro="$tmp/readonly"
+SANDHOME_HOME="$ro/home" SANDHOME_EXEC="$ro/exec" \
+    sh -c '. "$1/lib/common.sh"; . "$1/lib/detect.sh"; . "$1/lib/space.sh"; sh_space_plan --no-create' \
+    sh "$ROOT" >/dev/null 2>&1
+t_ok "$([ ! -d "$ro/home" ] && [ ! -d "$ro/exec" ]; echo $?)" \
+    'a read-only plan creates neither root'
+
+SANDHOME_HOME="$ro/home" SANDHOME_EXEC="$ro/exec" \
+    sh -c '. "$1/lib/common.sh"; . "$1/lib/detect.sh"; . "$1/lib/space.sh"; sh_space_plan' \
+    sh "$ROOT" >/dev/null 2>&1
+t_ok "$([ -d "$ro/home" ] && [ -d "$ro/exec/bin" ]; echo $?)" \
+    'a creating plan still creates both roots and the exec bin'
+
+# AND THE SUBCOMMANDS THAT ONLY ASK CREATE NOTHING. This is driven through the
+# real command, because the claim is about the command and not about the
+# library: bin/sandhome could call the creating plan again tomorrow and every
+# clause above would still hold.
+for ro_cmd in version help env report path 'space --probe'; do
+    ro2="$tmp/ro-$(printf '%s' "$ro_cmd" | tr ' -' '__')"
+    rm -rf "$ro2"
+    SANDHOME_HOME="$ro2/home" SANDHOME_EXEC="$ro2/exec" SANDHOME_REPO_DIR="$ROOT" \
+        sh "$ROOT/bin/sandhome" $ro_cmd >/dev/null 2>&1
+    t_ok "$([ ! -d "$ro2/home" ] && [ ! -d "$ro2/exec" ]; echo $?)" \
+        "sandhome $ro_cmd creates nothing"
+done
+
+# AND THE COMMAND THAT INSTALLS STILL CREATES. Same reason, other direction.
+ro3="$tmp/ro-install"
+SANDHOME_HOME="$ro3/home" SANDHOME_EXEC="$ro3/exec" SANDHOME_REPO_DIR="$ROOT" \
+    sh "$ROOT/bin/sandhome" shims >/dev/null 2>&1
+t_ok "$([ -d "$ro3/home" ] && [ -d "$ro3/exec" ]; echo $?)" \
+    'sandhome shims, which installs, does create the roots'
+
+# AND version ANSWERS ON A MACHINE WHOSE HOME CANNOT BE CREATED. This is the
+# case the old startup die made unreachable: /proc/1 is not writable by anyone.
+ro_out=$(SANDHOME_HOME=/proc/1/nope SANDHOME_EXEC=/proc/1/nope2 SANDHOME_REPO_DIR="$ROOT" \
+    sh "$ROOT/bin/sandhome" version 2>/dev/null)
+t_is "$ro_out" 'sandhome/1' 'version answers on a machine whose configured home is unwritable'
+ro_out=$(SANDHOME_HOME=/proc/1/nope SANDHOME_EXEC=/proc/1/nope2 SANDHOME_REPO_DIR="$ROOT" \
+    sh "$ROOT/bin/sandhome" help 2>/dev/null)
+case "$ro_out" in
+    *'usage: sandhome'*) t_ok 0 'help prints its usage on a machine whose home is unwritable' ;;
+    *) t_ok 1 'help prints its usage on a machine whose home is unwritable' ;;
+esac
+
 chmod 0755 "$tmp/ro" 2>/dev/null
 t_end

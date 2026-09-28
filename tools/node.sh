@@ -82,7 +82,7 @@ tc_node_install() {
     rm -rf "$sh_ni_root" 2>/dev/null
     mkdir -p "$sh_ni_root" 2>/dev/null || return 1
     sh_ni_tar="$sh_ni_stage/${sh_ni_name}.tar.xz"
-    if ! sh_fetch_verified "$sh_ni_url" "$sh_ni_tar" "$sh_ni_sha"; then
+    if ! sh_fetch_verified "$sh_ni_url" "$sh_ni_tar" "$(sh_pin_for "$sh_ni_url" node "$sh_ni_sha")"; then
         return 1
     fi
     if ! sh_untar "$sh_ni_tar" "$sh_ni_root"; then

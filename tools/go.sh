@@ -127,7 +127,7 @@ tc_go_install() {
     rm -rf "$sh_gi_root" 2>/dev/null
     mkdir -p "$sh_gi_root" 2>/dev/null || return 1
     sh_gi_tar="$sh_gi_stage/go-$sh_gi_ver.tar.gz"
-    if ! sh_fetch_verified "$sh_gi_url" "$sh_gi_tar" "${SANDHOME_SHA256:-$sh_gi_sha}"; then
+    if ! sh_fetch_verified "$sh_gi_url" "$sh_gi_tar" "$(sh_pin_for "$sh_gi_url" go "$sh_gi_sha")"; then
         return 1
     fi
     if ! sh_untar "$sh_gi_tar" "$sh_gi_root"; then

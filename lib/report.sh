@@ -36,7 +36,15 @@ sh_report_text() {
     printf 'exec_free_mb=%s\n' "$(sh_free_mb "$SH_EXEC")"
     printf 'installed=%s\n'   "$(sh_lead "$SH_INSTALLED")"
     printf 'adopted=%s\n'     "$(sh_lead "$SH_ADOPTED")"
-    printf 'shims=%s\n'       "$(sh_lead "${SH_SHIMS_BUILT:-}")"
+    # # STOP: THIS LINE PROBES THE DISK. It printed $SH_SHIMS_BUILT, which is
+    # "built by this run", and so was empty on a second run (the .so was
+    # already there), on a dry run (nothing was compiled, by design) and under
+    # `sandhome report` (which never calls the builder). The two fields below
+    # are the two different facts a reader needs, and neither of them is the
+    # third one: what is present, and what this machine needs and does not have.
+    printf 'shims=%s\n'       "$(sh_lead "$(sh_shim_present)")"
+    printf 'shims_missing=%s\n' "$(sh_lead "$(sh_shim_needed_missing)")"
+    printf 'shims_built_this_run=%s\n' "$(sh_lead "${SH_SHIMS_BUILT:-}")"
     for sh_rt_name in $(sh_toolchain_available); do
         printf 'toolchain.%s=%s\n' "$sh_rt_name" "$(sh_toolchain_version "$sh_rt_name")"
     done
@@ -61,7 +69,9 @@ sh_report_json() {
     printf ',"installed":"%s","adopted":"%s","shims":"%s"' \
         "$(sh_json_escape "$(sh_lead "$SH_INSTALLED")")" \
         "$(sh_json_escape "$(sh_lead "$SH_ADOPTED")")" \
-        "$(sh_json_escape "$(sh_lead "${SH_SHIMS_BUILT:-}")")"
+        "$(sh_json_escape "$(sh_lead "$(sh_shim_present)")")"
+    printf ',"shims_missing":"%s"' \
+        "$(sh_json_escape "$(sh_lead "$(sh_shim_needed_missing)")")"
     printf ',"failures":%s}\n' "$SH_FAILURES"
 }
 

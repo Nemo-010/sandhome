@@ -140,9 +140,20 @@ for need in sh curl tar uname id df; do
         herm_clean=no
     fi
 done
+# # NOTE: --no-shims, BECAUSE THIS RUN DELIBERATELY HAS NO COMPILER. The hermetic
+# PATH is built from a fixed list that carries no cc and no gcc, so on a machine
+# with no pty and no /etc/passwd - which is every machine this was written for -
+# both shims are NEEDED, cannot be built, and the bootstrap now counts that as a
+# failure and exits 1. That is the correct behaviour and it was the defect: the
+# run used to end `failures=0` with two needed shims missing. But this clause is
+# about the INSTALL PATH - download, digest, unpack, mirror, run - and the shim
+# path is covered by tests/shims.sh against a real compiler. A test that failed
+# for a reason it does not claim to check is a test that hides the failure it
+# does claim to check, so the shims are turned off here explicitly and the
+# clause keeps its own subject.
 fresh_out=$(PATH="$herm_bin" SANDHOME_HOME="$fresh_home" SANDHOME_EXEC="$fresh_exec" \
             sh "$ROOT/bootstrap.sh" --toolset minimal --no-profile --no-path-line \
-            --no-shell 2>"$work/fresh-err.txt")
+            --no-shell --no-shims 2>"$work/fresh-err.txt")
 fresh_status=$?
 if [ "$fresh_status" != 0 ]; then
     case "$(cat "$work/fresh-err.txt" 2>/dev/null)" in

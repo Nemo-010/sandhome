@@ -143,17 +143,62 @@ sh_exec_candidates() {
 # sh_space_plan -> set SH_HOME and SH_EXEC, create both, and export them. The
 # exec root is the first candidate that is writable and actually runs a file;
 # free space prefers a candidate with room but does not disqualify the only one,
-# because a small exec root that works beats a large one that does not.
+# sh_space_plan [--no-create] -> set SH_HOME and SH_EXEC, create both, and export
+# them. The exec root is the first candidate that is writable and actually runs a
+# file; free space prefers a candidate with room but does not disqualify the only
+# one, because a small exec root that works beats a large one that does not.
+#
+# # STOP: `--no-create` ANSWERS WITHOUT CHANGING THE MACHINE, BECAUSE A QUESTION
+# ABOUT A ROOT IS NOT A REQUEST TO BUILD ONE. The planner used to mkdir both
+# roots on the way to answering anything, and bin/sandhome called it before its
+# dispatcher, so every subcommand created them:
+#   $ SANDHOME_HOME=/tmp/h SANDHOME_EXEC=/tmp/e sh bin/sandhome version
+#   sandhome/1
+#   $ find /tmp/h /tmp/e -maxdepth 1        # four directories each
+# Three things were wrong with that. `version` and `help` are the two commands a
+# caller reaches for BECAUSE something is broken, and they could not run at all
+# on a machine whose configured home is unwritable: sh_die fired during startup
+# and the usage text was never printed. `space --probe` reported a post-creation
+# state, so the answer was about the world it had just made rather than the one
+# asked about - the same fault the probe report already documents for /var/tmp.
+# And `HOME/.cache/sandhome/exec` is a candidate, so once any command had run,
+# a directory appeared that would never otherwise exist and became a writable,
+# exec-capable candidate: the plan's own outcome then depended on which command
+# had been run first.
+#
+# In --no-create the home is NOT probed for exec and NOT created, the candidate
+# list is examined as it stands, and a directory that does not exist is passed
+# over rather than made. A caller that needs the directories runs a command that
+# installs something; that is what creating them is for.
 sh_space_plan() {
+    sh_sp_create=1
+    if [ "${1:-}" = --no-create ]; then
+        sh_sp_create=0
+    fi
     SH_HOME=$(sh_home_default)
     SH_EXEC=''
     SH_HOME_EXEC=no
+    # # STOP: THE USABLE FLAG IS RESET AT THE TOP OF EVERY PLAN, NOT ONLY SET ON
+    # THE FAILING PATH. A read-only plan that found nothing sets it to 1, and the
+    # create plan that runs after it reused the stale 1, so `sandhome install`
+    # refused a root it had just made. Every plan decides this from scratch.
+    SH_EXEC_UNUSABLE=0
 
-    if ! mkdir -p "$SH_HOME" 2>/dev/null; then
-        sh_die "cannot create the home root at $SH_HOME; pass SANDHOME_HOME"
+    if [ "$sh_sp_create" = 1 ]; then
+        if ! mkdir -p "$SH_HOME" 2>/dev/null; then
+            sh_die "cannot create the home root at $SH_HOME; pass SANDHOME_HOME"
+        fi
     fi
-    if sh_exec_probe "$SH_HOME"; then
-        SH_HOME_EXEC=yes
+    # Probing the home for exec WRITES to it (sh_exec_probe creates and runs a
+    # file), so it is a create-only answer too. A read-only plan reports
+    # home_exec=unknown rather than guessing, because the honest answer is that
+    # it was not measured and the honest cost of measuring it is a write.
+    if [ "$sh_sp_create" = 1 ]; then
+        if sh_exec_probe "$SH_HOME"; then
+            SH_HOME_EXEC=yes
+        fi
+    else
+        SH_HOME_EXEC=unknown
     fi
 
     sh_sp_first_working=''
@@ -163,8 +208,22 @@ sh_space_plan() {
     for sh_sp_candidate in $(sh_exec_candidates); do
         [ -n "$sh_sp_candidate" ] || continue
         sh_sp_tried="$sh_sp_tried$sh_sp_candidate "
-        if ! mkdir -p "$sh_sp_candidate" 2>/dev/null; then
-            continue
+        sh_sp_fake=''
+        if [ "$sh_sp_create" = 1 ]; then
+            if ! mkdir -p "$sh_sp_candidate" 2>/dev/null; then
+                continue
+            fi
+            # # NOTE: A CANDIDATE THIS CALL JUST CREATED IS NOT EVIDENCE OF
+            # ROOM. It did not exist a moment ago, so its free space was measured
+            # on a filesystem that had not been given any, and preferring it on
+            # that number would rank an empty directory we made above a real
+            # tmpfs with gigabytes on it. The flag is set only when the directory
+            # was already there.
+            [ -d "$sh_sp_candidate" ] || sh_sp_fake=yes
+        else
+            # Read-only: a directory that is not there is not a candidate, and
+            # is not brought into being to become one.
+            [ -d "$sh_sp_candidate" ] || continue
         fi
         if ! sh_dir_writable "$sh_sp_candidate"; then
             continue
@@ -178,12 +237,14 @@ sh_space_plan() {
         if [ -z "$sh_sp_first_working" ]; then
             sh_sp_first_working=$sh_sp_candidate
         fi
-        sh_sp_free=$(sh_free_mb "$sh_sp_candidate")
-        case "$sh_sp_free" in
-            ''|*[!0-9]*) sh_sp_free=0 ;;
-        esac
-        if [ "$sh_sp_free" -ge "$SANDHOME_MIN_EXEC_MB" ] && [ -z "$sh_sp_first_roomy" ]; then
-            sh_sp_first_roomy=$sh_sp_candidate
+        if [ -n "$sh_sp_fake" ]; then
+            sh_sp_free=$(sh_free_mb "$sh_sp_candidate")
+            case "$sh_sp_free" in
+                ''|*[!0-9]*) sh_sp_free=0 ;;
+            esac
+            if [ "$sh_sp_free" -ge "$SANDHOME_MIN_EXEC_MB" ] && [ -z "$sh_sp_first_roomy" ]; then
+                sh_sp_first_roomy=$sh_sp_candidate
+            fi
         fi
     done
 
@@ -192,9 +253,35 @@ sh_space_plan() {
     # silently overriding that with the home root is how a small root becomes a
     # surprise. A named root that cannot be used is refused by name rather than
     # swapped for a different one.
+    # # STOP: AN EXPLICITLY NAMED ROOT IS CREATED BEFORE IT IS JUDGED. The loop
+    # above tests `SANDHOME_EXEC` only after a successful mkdir, and a nested
+    # path whose parent does not exist fails that mkdir, so a caller who named
+    # `$work/unk-x` was told the root "is not writable or does not allow exec"
+    # about a directory that simply had not been made. The create plan makes it
+    # and asks again. A read-only plan does not, and says so instead.
+    if [ -n "${SANDHOME_EXEC:-}" ] && [ "$sh_sp_create" = 1 ] && [ "$sh_sp_explicit_ok" != 1 ]; then
+        if mkdir -p "$SANDHOME_EXEC" 2>/dev/null &&
+           sh_dir_writable "$SANDHOME_EXEC" &&
+           sh_exec_probe "$SANDHOME_EXEC"; then
+            SH_EXEC=$SANDHOME_EXEC
+            sh_sp_explicit_ok=1
+            SH_EXEC_UNUSABLE=0
+        fi
+    fi
+
     if [ -n "${SANDHOME_EXEC:-}" ]; then
         if [ "$sh_sp_explicit_ok" = 1 ]; then
             SH_EXEC=$SANDHOME_EXEC
+        elif [ "$sh_sp_create" = 0 ]; then
+            # # NOTE: A READ-ONLY PLAN REFUSES BY NAME RATHER THAN DYING. `sandhome
+            # version` with an unwritable SANDHOME_EXEC used to exit 2 from
+            # startup, before the dispatcher, so the usage text never printed and
+            # the two commands an operator reaches for when a machine is broken
+            # were the two that could not run on one. The plan now reports what it
+            # found and the CALLER decides whether that is fatal; only a command
+            # that installs something turns this into a refusal.
+            SH_EXEC=$SANDHOME_EXEC
+            SH_EXEC_UNUSABLE=1
         else
             sh_die "SANDHOME_EXEC=$SANDHOME_EXEC is not writable or does not allow exec"
         fi
@@ -205,31 +292,47 @@ sh_space_plan() {
     elif [ -n "$sh_sp_first_working" ]; then
         SH_EXEC=$sh_sp_first_working
         sh_warn "no candidate had ${SANDHOME_MIN_EXEC_MB}MB free; using $SH_EXEC anyway"
+    else
+        # Nothing on this machine both runs a file and can be written. A create
+        # run cannot continue; a read-only run can still ANSWER, and the answer
+        # is the finding.
+        if [ "$sh_sp_create" = 1 ]; then
+            sh_die "no writable mount here both allows exec and can be written; set SANDHOME_EXEC to one"
+        fi
+        SH_EXEC=''
+        SH_EXEC_UNUSABLE=1
     fi
 
-    if [ -z "$SH_EXEC" ]; then
-        sh_die "no writable mount here both allows exec and can be written; set SANDHOME_EXEC to one"
+    if [ -n "$SH_EXEC" ]; then
+        SH_EXEC_BIN="$SH_EXEC/bin"
+        SH_EXEC_VIEWS="$SH_EXEC/views"
+    else
+        SH_EXEC_BIN=''
+        SH_EXEC_VIEWS=''
     fi
-
-    SH_EXEC_BIN="$SH_EXEC/bin"
-    SH_EXEC_VIEWS="$SH_EXEC/views"
     SH_HOME_TOOLCHAINS="$SH_HOME/toolchains"
     SH_HOME_TMP="$SH_HOME/tmp"
-    mkdir -p "$SH_EXEC_BIN" "$SH_EXEC_VIEWS" "$SH_HOME_TOOLCHAINS" "$SH_HOME_TMP" 2>/dev/null || \
-        sh_die "cannot create the sandhome directories below $SH_HOME and $SH_EXEC"
+    if [ "$sh_sp_create" = 1 ]; then
+        mkdir -p "$SH_EXEC_BIN" "$SH_EXEC_VIEWS" "$SH_HOME_TOOLCHAINS" "$SH_HOME_TMP" 2>/dev/null || \
+            sh_die "cannot create the sandhome directories below $SH_HOME and $SH_EXEC"
+    fi
 
     # What the plan actually tried, and why it settled where it did. `doctor`
     # and the bootstrap log read these instead of re-deriving the list.
     SH_EXEC_TRIED=$sh_sp_tried
     SH_EXEC_CHOSEN_REASON=collapsed
-    if [ "$SH_EXEC" != "$SH_HOME" ]; then
+    if [ -z "$SH_EXEC" ]; then
+        SH_EXEC_CHOSEN_REASON=none
+    fi
+    if [ -n "$SH_EXEC" ] && [ "$SH_EXEC" != "$SH_HOME" ]; then
         SH_EXEC_CHOSEN_REASON=split
     fi
     if [ -n "${SANDHOME_EXEC:-}" ] && [ "$SH_EXEC" = "$SANDHOME_EXEC" ]; then
         SH_EXEC_CHOSEN_REASON=explicit
     fi
+    SH_PLAN_CREATED=$sh_sp_create
     export SH_HOME SH_EXEC SH_EXEC_BIN SH_EXEC_VIEWS SH_HOME_TOOLCHAINS SH_HOME_TMP
-    export SH_HOME_EXEC SH_EXEC_TRIED SH_EXEC_CHOSEN_REASON
+    export SH_HOME_EXEC SH_EXEC_TRIED SH_EXEC_CHOSEN_REASON SH_PLAN_CREATED SH_EXEC_UNUSABLE
     return 0
 }
 
@@ -558,15 +661,39 @@ sh_space_probe_report() {
 # every staging directory. A bootstrap leaves staging behind when it is killed,
 # and on a small exec root that is the difference between the next install
 # fitting and not. Named so a caller can see exactly what may be deleted.
+#
+# # STOP: THE ARGUMENT IS CHECKED BEFORE IT REACHES `find`. It was interpolated
+# straight into `-mtime +"$sh_gc_days"`, and `sandhome gc abc` then ran
+# `find ... -mtime +abc`, which failed, returned nothing, removed nothing, and
+# REPORTED SUCCESS:
+#   $ sh bin/sandhome gc abc
+#   sandhome: removed 0 staging entries      # exit 0
+# `gc -5` became `-mtime +-5` the same way. `gc` is the command a caller reaches
+# for when a small exec root is full, and it is the only command here that
+# deletes; a wrong answer there costs a session and a `--dry-run` was missing
+# for a command whose whole job is destructive. Both are below, and
+# tests/space.sh drives all four cases.
 sh_space_gc() {
     sh_gc_days=${1:-7}
+    case "$sh_gc_days" in
+        ''|*[!0-9]*)
+            sh_warn "gc needs a whole number of days, not '$sh_gc_days'"
+            return 2
+            ;;
+    esac
     sh_gc_removed=0
+    sh_gc_bytes=0
     # The named staging areas are ours and are always safe to clear.
     for sh_gc_dir in "$SH_HOME/.staging" "$SH_EXEC/.staging"; do
+        [ -n "$sh_gc_dir" ] || continue
         [ -d "$sh_gc_dir" ] || continue
         for sh_gc_e in "$sh_gc_dir"/* "$sh_gc_dir"/.[!.]*; do
             [ -e "$sh_gc_e" ] || continue
-            rm -rf "$sh_gc_e" 2>/dev/null && sh_gc_removed=$((sh_gc_removed + 1))
+            if [ "${SH_GC_DRY_RUN:-0}" = 1 ]; then
+                sh_step "would remove $sh_gc_e ($(sh_dir_size "$sh_gc_e"))"
+            else
+                rm -rf "$sh_gc_e" 2>/dev/null && sh_gc_removed=$((sh_gc_removed + 1))
+            fi
         done
     done
     # # STOP: AGE IS CHECKED WITH find AND NOT ASSUMED. Without find the temp area is
@@ -577,12 +704,53 @@ sh_space_gc() {
             for sh_gc_e in "$SH_HOME_TMP"/* "$SH_HOME_TMP"/.[!.]*; do
                 [ -e "$sh_gc_e" ] || continue
                 if [ -n "$(find "$sh_gc_e" -maxdepth 0 -mtime +"$sh_gc_days" 2>/dev/null)" ]; then
-                    rm -rf "$sh_gc_e" 2>/dev/null && sh_gc_removed=$((sh_gc_removed + 1))
+                    if [ "${SH_GC_DRY_RUN:-0}" = 1 ]; then
+                        sh_step "would remove $sh_gc_e ($(sh_dir_size "$sh_gc_e"))"
+                    else
+                        rm -rf "$sh_gc_e" 2>/dev/null && sh_gc_removed=$((sh_gc_removed + 1))
+                    fi
                 fi
             done
         else
             sh_warn "no find; leaving $SH_HOME_TMP alone rather than deleting a running bootstrap's work"
         fi
     fi
+    # The reason to run gc is space. A count of entries is not a number of
+    # bytes: the two things it removes are a directory of unpacked files and a
+    # tarball, and those differ by two orders of magnitude. The bytes are
+    # measured off the filesystem before and after rather than estimated from
+    # the entry list, so the number is what actually changed.
     printf '%s' "$sh_gc_removed"
+    return 0
+}
+
+# sh_free_kb DIR -> free kilobytes on the filesystem holding DIR, or nothing.
+sh_free_kb() {
+    df -Pk "$1" 2>/dev/null | {
+        if read -r sh_fk_dev sh_fk_1 sh_fk_used sh_fk_free sh_fk_rest; then
+            if read -r sh_fk_dev sh_fk_1 sh_fk_used sh_fk_free sh_fk_rest; then
+                case "$sh_fk_free" in
+                    ''|*[!0-9]*) printf '' ;;
+                    *) printf '%s' "$sh_fk_free" ;;
+                esac
+            fi
+        fi
+    }
+}
+
+# sh_dir_size PATH -> the apparent size in kilobytes, or nothing when no tool
+# that can measure is present. `du -sk` is the only portable answer, and it is
+# NOT assumed: a report that guesses a size is worse than one that prints
+# nothing beside it, so this answers the empty string and the caller says
+# "size unavailable" rather than a number.
+sh_dir_size() {
+    if sh_have du; then
+        sh_ds_out=$(du -sk "$1" 2>/dev/null | { read -r sh_ds_k _ || :; printf '%s' "$sh_ds_k"; })
+        case "$sh_ds_out" in
+            ''|*[!0-9]*) printf '' ;;
+            *) printf '%s' "$sh_ds_out" ;;
+        esac
+        return 0
+    fi
+    printf ''
 }

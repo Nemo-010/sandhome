@@ -113,6 +113,43 @@ sh_split_on() {
 
 sh_commas_to_spaces() { sh_split_on ',' "$1"; }
 
+# sh_upper STRING -> STRING with a-z folded to A-Z, and every other byte left
+# alone. This is `tr`'s other job, and the same image does not carry tr.
+#
+# NOTE: THE ALPHABET IS A CONSTANT AND NOT A COMPUTED RANGE, BECAUSE POSIX SH HAS
+# NO WAY TO GENERATE ONE. The mapping walks the space-separated lower-case list
+# and drops one character from a contiguous upper-case string per step, which is
+# the same "delete from the front" idiom used everywhere else in this file. An
+# earlier version of this helper shelled out to `tr`, so a caller that built an
+# environment-variable name out of it died on a userland with no tr - which is
+# precisely the userland this tree is written for.
+SH_ALPHA_LOWER='a b c d e f g h i j k l m n o p q r s t u v w x y z'
+SH_ALPHA_UPPER='ABCDEFGHIJKLMNOPQRSTUVWXYZ'
+sh_upper() {
+    sh_up_out=''
+    sh_up_rest=$1
+    while [ -n "$sh_up_rest" ]; do
+        sh_up_c=${sh_up_rest%"${sh_up_rest#?}"}
+        sh_up_rest=${sh_up_rest#?}
+        sh_up_conv=''
+        case "$sh_up_c" in
+            [a-z])
+                sh_up_tail=$SH_ALPHA_UPPER
+                for sh_up_n in $SH_ALPHA_LOWER; do
+                    if [ "$sh_up_n" = "$sh_up_c" ]; then
+                        break
+                    fi
+                    sh_up_tail=${sh_up_tail#?}
+                done
+                sh_up_conv=${sh_up_tail%"${sh_up_tail#?}"}
+                ;;
+        esac
+        [ -n "$sh_up_conv" ] || sh_up_conv=$sh_up_c
+        sh_up_out="$sh_up_out$sh_up_conv"
+    done
+    printf '%s' "$sh_up_out"
+}
+
 # sh_in_list ITEM LIST, where LIST may be space, comma or pipe separated.
 sh_in_list() {
     case " $(sh_split_on ',|' "$2") " in

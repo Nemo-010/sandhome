@@ -171,13 +171,24 @@ usage: sh bootstrap.sh [options]
   --no-path-line      do not add the exec bin directory to the login files
   --dry-run           print what would be done and change nothing
   --json              print the report as one JSON object
-  --version           print the schema version and exit
+  --version           print the schema version (sandhome/1) and exit
   -h, --help          this text
 
   SANDHOME_REPO       owner/name to fetch when run from a pipe.
                       Default talaria0101/sandhome.
   SANDHOME_REF        branch or tag to fetch. Default main
-  SANDHOME_SHA256     pin a sha256 for every download this run makes
+  SANDHOME_SHA256     a default digest for any download that has no pin of its
+                      own. Prefer the per-download forms below, which do not
+                      apply to a download the caller did not name.
+  SANDHOME_SHA256_<NAME>    pin one toolchain, e.g. SANDHOME_SHA256_RIPGREP.
+                      <NAME> is the toolchain name, upper-cased.
+  SANDHOME_SHA256_<ASSET>   pin one url asset, e.g.
+                      SANDHOME_SHA256_JQ_LINUX_AMD64. <ASSET> is the url's
+                      last path segment, upper-cased, without its extension,
+                      with hyphens written as underscores.
+                      Resolution order per download: <NAME>, then <ASSET>, then
+                      a digest the publisher published, then SANDHOME_SHA256.
+                      See docs/decisions/pinning.md.
 USAGE
 }
 
@@ -246,7 +257,13 @@ sh_bootstrap_args() {
             --no-path-line)    SH_PATH_LINE=none; shift ;;
             --dry-run)         SH_DRY_RUN=1; shift ;;
             --json)            SH_JSON=1; shift ;;
-            --version)         printf '%s/%s\n' "$SH_SELF" "$SH_VERSION"; exit 0 ;;
+            # # NOTE: THE VERSION LINE IS THE TREE'S SCHEMA AND NOT THIS FILE'S
+            # NAME. It printed `bootstrap/1` where `sandhome version` printed
+            # `sandhome/1`, so a caller checking whether this checkout is schema 1
+            # had to try both programs and could not tell a version difference
+            # from a program-name difference. `sandhome --version` and
+            # `sandhome version` both answer `sandhome/1` now, and so does this.
+            --version)         printf 'sandhome/%s\n' "$SH_VERSION"; exit 0 ;;
             -h|--help)         usage; exit 0 ;;
             *)                 usage >&2; printf 'bootstrap: [-] unknown argument %s\n' "$1" >&2; exit 2 ;;
         esac
@@ -390,10 +407,19 @@ sandhome_bootstrap_main() {
     if [ "$SH_SHIMS" != none ]; then
         sh_shim_build_all "$SH_REPO_DIR/shims"
         sh_shim_write_passwd
+        # # NOTE: --require-shims NARROWS THIS AND DOES NOT ENABLE IT. The needed-
+        # and-missing check lives in sh_shim_build_all, which is the single place
+        # both entry points go through; it ran here a second time only under
+        # --require-shims, so a machine with no compiler finished with
+        # `failures=0` and exit 0. The flag now means one narrower thing: refuse
+        # when a shim is PRESENT but older than its source, which is a different
+        # defect and which this check could not see at all.
         if [ "$SH_NEED_SHIMS" = 1 ]; then
             for sh_mb_shim in fakepty fakepwd; do
-                if [ "$(sh_shim_need "$sh_mb_shim")" = yes ] && [ ! -f "$(sh_shims_dir)/$sh_mb_shim.so" ]; then
-                    sh_fail "the $sh_mb_shim shim is needed here and could not be built"
+                if [ "$(sh_shim_need "$sh_mb_shim")" = yes ] && [ -f "$(sh_shims_dir)/$sh_mb_shim.so" ]; then
+                    if [ "$(sh_shims_dir)/$sh_mb_shim.so" -ot "$SH_REPO_DIR/shims/$sh_mb_shim.c" ]; then
+                        sh_fail "the $sh_mb_shim shim is older than its source and --require-shims is set"
+                    fi
                 fi
             done
         fi

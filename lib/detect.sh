@@ -45,15 +45,34 @@ sh_detect_provider() {
 
 # OpenBSD, NetBSD and MidnightBSD have no /etc/os-release; the kernel fallback
 # is what keeps their `os:` rows from being dead.
+#
+# # STOP: BOTH LOCATIONS ARE READ, AND /usr/lib IS NOT AN AFTERTHOUGHT. The
+# os-release specification names /etc/os-release as a symlink INTO /usr/lib on
+# every merged-/usr distribution, and /usr/lib/os-release as the real file. The
+# old code read /etc only, so on any image that ships the file WITHOUT the
+# symlink - a container that bind-mounts it, a minimal rootfs, a foreign
+# distribution - `os_id` answered `unknown`, and the first line of every report
+# and every bootstrap was wrong on a machine that had already told us exactly
+# what it was. Measured on the machine these fixes were made on, whose
+# /etc/os-release does not exist and whose /usr/lib/os-release reads ID="void":
+#   sh -c '. ./lib/common.sh; . ./lib/detect.sh; sh_detect_os_id'   ->  unknown
+# /etc is still tried FIRST, because a distribution that overrides the file
+# there is overriding it deliberately.
+#
+# The file is NOT SOURCED. A distribution's os-release is data, and it may
+# carry PATH= or LD_PRELOAD=; sourcing it into the caller's shell would let a
+# file that was only read as a document rewrite the process that read it. Only
+# the one ID= line is extracted, and the quotes come off with parameter
+# expansion rather than with sed, because this tree does not depend on sed for a
+# transformation the shell already does.
 sh_detect_os_id() {
-    if [ -r /etc/os-release ]; then
-        # shellcheck disable=SC1091
-        . /etc/os-release
-        if [ -n "${ID:-}" ]; then
-            printf '%s' "$ID"
-            return 0
-        fi
-    fi
+    for sh_do_file in /etc/os-release /usr/lib/os-release; do
+        [ -r "$sh_do_file" ] || continue
+        sh_do_id=$(sh_do_read_id "$sh_do_file")
+        [ -n "$sh_do_id" ] || continue
+        printf '%s' "$sh_do_id"
+        return 0
+    done
     case "$(uname -s)" in
         FreeBSD)   printf 'freebsd' ;;
         NetBSD)    printf 'netbsd' ;;
@@ -61,6 +80,31 @@ sh_detect_os_id() {
         DragonFly) printf 'dragonfly' ;;
         Darwin)    printf 'darwin' ;;
         *)         printf 'unknown' ;;
+    esac
+}
+
+# sh_do_read_id FILE -> the value of ID= in FILE, or nothing. grep is used when
+# it is present and the line is read with the shell when it is not, because
+# this file is loaded on userlands that carry no grep at all.
+sh_do_read_id() {
+    sh_dri_line=''
+    if sh_have grep; then
+        sh_dri_line=$(grep -m1 '^ID=' "$1" 2>/dev/null) || sh_dri_line=''
+    fi
+    if [ -z "$sh_dri_line" ] && [ -r "$1" ]; then
+        while IFS= read -r sh_dri_raw || [ -n "$sh_dri_raw" ]; do
+            case "$sh_dri_raw" in
+                ID=*) sh_dri_line=$sh_dri_raw; break ;;
+            esac
+        done < "$1"
+    fi
+    case "$sh_dri_line" in
+        ID=\"*\")
+            sh_dri_val=${sh_dri_line#ID=\"}
+            printf '%s' "${sh_dri_val%\"}"
+            ;;
+        ID=*)  printf '%s' "${sh_dri_line#ID=}" ;;
+        *)     printf '' ;;
     esac
 }
 

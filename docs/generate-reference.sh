@@ -49,9 +49,108 @@ printf '\n'
 # --- the environment variables, and where each is read ----------------------
 printf '## Environment variables\n\n'
 printf '| variable | read by | default |\n| --- | --- | --- |\n'
+
+# gen_default_of VAR -> the default the CODE gives VAR, or nothing.
+#
+# # STOP: THE EXTRACTOR IS A NAMED FUNCTION AND NOT A NESTED `sed` PIPE, AND THE
+# PATTERN IS NOT `\?`. The old one-liner was
+#     grep -h "\"\?${var}\"?:=" ... | head -1 | sed 's/.*:="\?//; s/"\?$//'
+# and it answered the empty string for EVERY variable in the tree, because in a
+# POSIX basic regular expression `\?` is a LITERAL QUESTION MARK, not "optional".
+# The pattern therefore only matched a line containing `"?VAR"?:=`, and no line
+# in this tree does. Only the plain `^ *VAR=` fallback below ever produced a
+# value. The visible consequence was SANDHOME_MIN_EXEC_MB reported as "unset,
+# and the feature is off until it is set" while the code read
+# `: "${SANDHOME_MIN_EXEC_MB:=${SH_MIN_EXEC_MB:-128}}"` and used 128 - the
+# generated table contradicting the generated usage block in the same file.
+# `tests/docs.sh` could not see it, because that check compares the reference
+# against THIS generator: a check that compares a document to the thing that
+# produced it can only catch drift, never an extraction bug. There is now a
+# second reader of the same facts in tests/unit.sh that does not go through here.
+gen_default_of() {
+    gd_var=$1
+    gd_line=$(grep -h "$gd_var" "$ROOT"/lib/*.sh "$ROOT"/bootstrap.sh \
+             "$ROOT"/bin/sandhome "$ROOT"/tools/*.sh 2>/dev/null |
+             grep ':=' | head -1)
+    if [ -z "$gd_line" ]; then
+        gd_line=$(grep -h "^ *$gd_var=" "$ROOT"/lib/*.sh "$ROOT"/bootstrap.sh \
+                 "$ROOT"/bin/sandhome "$ROOT"/tools/*.sh 2>/dev/null | head -1)
+    fi
+    [ -n "$gd_line" ] || return 0
+    case "$gd_line" in
+        *'${'*)
+            # Everything after the LAST `:=` is the default expression.
+            gd_rest=${gd_line##*:=}
+            # Take the INNERMOST `${NAME:-default}` by hand, with parameter
+            # expansion only. `: "${A:=${B:-128}}"` -> after `##*:=` is
+            # `${B:-128}}`; but a three-level default nests twice more, so this
+            # is a LOOP, not a single strip: while the remainder still opens a
+            # `${`, drop that name and keep the inner default. A nested `sed`
+            # with capture groups got this wrong under BRE, where `$` and `{`
+            # are not the metacharacters the pattern assumed, and produced
+            # `{SH_MIN_EXEC_MB:-128}}` - braces still on, a default that is not
+            # a value.
+            while :; do
+                case "$gd_rest" in
+                    '${'*)
+                        # Drop `${NAME:-` in one step. `#*:-` is SHORTEST-prefix
+                        # match, so it removes exactly `${NAME:-` and keeps the
+                        # default; `%%:[-=]*` is longest-suffix and removes the
+                        # default instead, which is how this printed the NAME.
+                        # Three levels of nesting take three passes of the loop
+                        # below, and a default with no `${` in it exits at once.
+                        gd_rest=${gd_rest#\$\{}
+                        case "$gd_rest" in
+                            *:-*) gd_rest=${gd_rest#*:-} ;;
+                        esac
+                        ;;
+                    *) break ;;
+                esac
+            done
+            # # STOP: THE CLOSING QUOTE COMES OFF BEFORE THE BRACES, IN THAT
+            # ORDER, OR A BRACE-TERMINATED DEFAULT IS NEVER REACHED. The source
+            # line ends `: "${SANDHOME_MIN_EXEC_MB:=${SH_MIN_EXEC_MB:-128}}"`, so
+            # after the `:=` the remainder is `${SH_MIN_EXEC_MB:-128}}"` - it ends
+            # in a QUOTE, not a brace. A loop that trims trailing `}` from the
+            # right therefore does nothing at all, because the rightmost
+            # character is `"`, and the table printed `128}}"` for a variable the
+            # code sets to 128. Trim the quote, then the braces.
+            while :; do
+                case "$gd_rest" in
+                    *'"') gd_rest=${gd_rest%\"} ;;
+                    *) break ;;
+                esac
+            done
+            while :; do
+                case "$gd_rest" in
+                    *'}') gd_rest=${gd_rest%\}} ;;
+                    *) break ;;
+                esac
+            done
+            gd_rest=${gd_rest#\"}
+            printf '%s' "$gd_rest" | cut -c1-40
+            ;;
+        *)
+            gd_rest=${gd_line#*=}
+            gd_rest=${gd_rest#\"}
+            gd_rest=${gd_rest%\"}
+            printf '%s' "$gd_rest" | cut -c1-40
+            ;;
+    esac
+}
+
 for var in $(cat "$ROOT"/lib/*.sh "$ROOT"/bootstrap.sh "$ROOT"/bin/sandhome \
                  "$ROOT"/tools/*.sh 2>/dev/null |
              grep -o 'SANDHOME_[A-Z0-9_]*' | sort -u); do
+    # A NAME THAT ENDS IN AN UNDERSCORE IS A FORMAT PREFIX, NOT A VARIABLE.
+    # `sh_pin_name` prints `SANDHOME_SHA256_%s`, and the token scan sees
+    # `SANDHOME_SHA256_` and writes a row for a variable nothing ever reads.
+    # The per-name pins are listed explicitly by the `case` in sh_pin_for, and
+    # the bare one is a real variable, so a trailing underscore is always an
+    # artifact of a format string.
+    case "$var" in
+        *_ ) continue ;;
+    esac
     readers=''
     for f in "$ROOT"/lib/*.sh "$ROOT"/bootstrap.sh "$ROOT"/bin/sandhome "$ROOT"/tools/*.sh; do
         [ -r "$f" ] || continue
@@ -59,13 +158,18 @@ for var in $(cat "$ROOT"/lib/*.sh "$ROOT"/bootstrap.sh "$ROOT"/bin/sandhome \
             readers="$readers ${f##*/}"
         fi
     done
-    # The default is whatever the code assigns it, when it assigns one. Both
-    # spellings are read: `: "${VAR:=value}"` in a library, and a plain
-    # assignment in a script. A variable with no assignment is OFF, and saying
-    # so is more use to a reader than an empty cell.
-    def=$(grep -h "\"\?${var}\"?:=" "$ROOT"/lib/*.sh "$ROOT"/bootstrap.sh \
-          "$ROOT"/bin/sandhome "$ROOT"/tools/*.sh 2>/dev/null |
-          head -1 | sed 's/.*:="\?//; s/"\?$//' | cut -c1-40)
+    # # STOP: THE PATTERN MATCHES THE REAL ASSIGNMENT, AND BRE HAS NO `\?`.
+    # The extractor used `"\?${var}"\?:=`, where `\?` in a basic regular
+    # expression is a LITERAL QUESTION MARK, not "optional". It therefore only
+    # ever matched a line that literally contained `"?VAR"?:=`, which no line in
+    # this tree does, so the `:=` branch never fired for any variable; only the
+    # plain `^ *VAR=` fallback below ever produced a value. That is why
+    # SANDHOME_MIN_EXEC_MB - assigned as `: "${SANDHOME_MIN_EXEC_MB:=
+    # ${SH_MIN_EXEC_MB:-128}}"`, which is not at the start of a line and does
+    # not end after the default - was reported as unset while the code used
+    # 128. The pattern is now the two real spellings, and the default is taken
+    # from the INNERMOST `${...:-...}` inside it.
+    def=$(gen_default_of "$var")
     if [ -z "$def" ]; then
         def=$(grep -h "^ *${var}=" "$ROOT"/lib/*.sh "$ROOT"/bootstrap.sh \
               "$ROOT"/bin/sandhome "$ROOT"/tools/*.sh 2>/dev/null |

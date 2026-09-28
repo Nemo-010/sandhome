@@ -47,8 +47,23 @@ tc_ripgrep_version() {
 # toolchain is ADOPTED rather than installed. There is no home tree in that case,
 # so this is what `$SANDHOME_EXEC/bin` links against, and what the promote step
 # mirrors through an exec view when the copy cannot run from where it sits.
+#
+# # STOP: `command -v rg`, NOT `command -v ripgrep`, AND THE BINARY NAME IS THE
+# MODULE'S OWN. `TC_ripgrep_BINS='bin/rg'` and the probe asks for `rg`; this
+# function asked for `ripgrep`, which no ripgrep release has ever installed, so
+# it answered nothing on every machine. The answer was empty rather than wrong,
+# which is why it was dormant: sh_promote_toolchain fell through to its own
+# `command -v "$bin"` fallback and found the binary by luck. The cost of the
+# luck is that this function - the declared way for a module to say where its
+# working copy lives - was never exercised at all, and the same shape in another
+# module would have pointed the view at a different program than the one
+# TC_<name>_BINS names. Measured with a working rg on PATH as `rg`:
+#   which rg=[/tmp/fb/rg]   adopted=[]
+# It now answers /tmp/fb. The general guard is in tests/unit.sh, which requires
+# every module's tc_<name>_adopted to name the directory its own _BINS binary
+# was found in, so the next module that copies this shape is caught.
 tc_ripgrep_adopted() {
-    sh_rg_which=$(command -v ripgrep 2>/dev/null)
+    sh_rg_which=$(command -v rg 2>/dev/null)
     [ -n "$sh_rg_which" ] || return 0
     sh_rg_dir=${sh_rg_which%/*}
     [ -n "$sh_rg_dir" ] || sh_rg_dir=.

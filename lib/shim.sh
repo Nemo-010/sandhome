@@ -69,23 +69,52 @@ sh_shim_build() {
 
 # sh_shim_build_all SRC_DIR -> build whichever shims are needed here. A shim the
 # machine does not need is not built, so a normal host gets nothing.
+#
+# # STOP: A NEEDED SHIM THAT IS NOT THERE AFTERWARDS IS A FAILURE, AND THE
+# FUNCTION IS WHERE THAT IS DECIDED. It used to append a name only when
+# `sh_shim_build` returned 0 and then `return 0` regardless, so a machine that
+# needed fakepty, had no C compiler, and therefore had no fakepty.so finished
+# the whole bootstrap with `failures=0` and exit 0. The only trace was one
+# `[!]` line on stderr, which is exactly what the `shims=` report field was
+# supposed to surface and could not. Measured, with PATH holding no compiler:
+#   bootstrap: [!] no C compiler is present, so fakepty cannot be built
+#   bootstrap: [!] no C compiler is present, so fakepwd cannot be built
+#   failures=0
+#   $? = 0
+# sh_doctor already treated a needed-but-absent shim as a hard invariant, so
+# the rule existed in two places and only one of them held. It lives here now,
+# which is the one place both the bootstrap and `sandhome shims` go through.
+# `--require-shims` used to be the only way to learn this; it still narrows the
+# check to a STALE shim, which is a different defect.
 sh_shim_build_all() {
     sh_sba_dir=$1
     sh_sba_built=''
+    sh_sba_failed=''
     for sh_sba_name in fakepty fakepwd; do
         sh_sba_need=$(sh_shim_need "$sh_sba_name")
+        sh_sba_out="$(sh_shims_dir)/$sh_sba_name.so"
         if [ "$sh_sba_need" != yes ]; then
             sh_step "$sh_sba_name: this machine has $(sh_sba_what "$sh_sba_name"); not needed"
             continue
         fi
+        if [ "$SH_DRY_RUN" = 1 ]; then
+            sh_shim_build "$sh_sba_name" "$sh_sba_dir/$sh_sba_name.c" || true
+            continue
+        fi
         if sh_shim_build "$sh_sba_name" "$sh_sba_dir/$sh_sba_name.c"; then
-            # A dry run compiles nothing, so the report must not name a built
-            # shim. The report is read from the machine, never from intent.
-            if [ "$SH_DRY_RUN" != 1 ]; then
-                sh_sba_built="$sh_sba_built $sh_sba_name"
-            fi
+            sh_sba_built="$sh_sba_built $sh_sba_name"
+        fi
+        # The build's exit status is not the question. The question is whether
+        # the machine now has the file, and a build can return 0 without
+        # writing one.
+        if [ ! -f "$sh_sba_out" ]; then
+            sh_fail "the $sh_sba_name shim is needed on this machine and is not at $sh_sba_out; install a C compiler (cc or gcc) and run this again"
+            sh_sba_failed="$sh_sba_failed $sh_sba_name"
         fi
     done
+    # WHAT WAS BUILT BY THIS RUN, which is a different fact from what is
+    # present, and the report prints the second one (sh_shim_report). This
+    # value is what the `[!]` guard on a stale build reads.
     SH_SHIMS_BUILT=${sh_sba_built# }
     export SH_SHIMS_BUILT
     return 0
@@ -154,8 +183,22 @@ sh_shim_write_passwd() {
     return 0
 }
 
-# sh_shim_report -> what was needed, what was built, and where. Every value is
+# sh_shim_report -> what was needed, what is present, and where. Every value is
 # read from the machine: a shim is named as built only when its object exists.
+#
+# # STOP: THIS READS THE OBJECTS AND NOT $SH_SHIMS_BUILT, AND THE REPORT FIELD
+# PRINTS WHAT IS HERE. `SH_SHIMS_BUILT` means "built by this run", and the
+# report line read it, which made `shims=` empty on every path that reaches it:
+#   - a second run finds the .so already there, so sh_shim_build returns 0 and
+#     nothing is appended;
+#   - `--dry-run` compiled nothing, so nothing was appended by design;
+#   - `sandhome report` never calls the builder at all, so it was unset;
+# and on the one case that did populate it, a dry run on a home where the shims
+# were already built printed an empty field while the files sat right there.
+# A report that answers "none of the shims this machine needs are present" when
+# both of them are is the exact class of claim this tree exists to refuse, and
+# it is the one the report's own NOTE disclaims. tests/shims.sh and
+# tests/unit.sh now assert both directions.
 sh_shim_report() {
     sh_sr_dir=$(sh_shims_dir)
     sh_sr_pty=no;  sh_sr_fakepwd=no
@@ -167,4 +210,34 @@ sh_shim_report() {
         "$([ -r "$sh_sr_dir/passwd" ] && printf '%s' "$sh_sr_dir/passwd" || printf none)" \
         "$sh_sr_dir" \
         "${SANDHOME_SHIMS:+on}${SANDHOME_SHIMS:-off}"
+}
+
+# sh_shim_present -> the shims that are present in $SH_HOME/shims, space
+# separated, read off the disk. This is the value the `shims=` report field
+# prints; it is a probe, like every other line in the report, and it answers
+# about a home no run of this command has touched.
+sh_shim_present() {
+    sh_sp_present=''
+    for sh_sp_name in fakepty fakepwd; do
+        if [ -f "$(sh_shims_dir)/$sh_sp_name.so" ]; then
+            sh_sp_present="$sh_sp_present $sh_sp_name"
+        fi
+    done
+    printf '%s' "${sh_sp_present# }"
+}
+
+# sh_shim_needed_missing -> the shims this machine needs and does not have,
+# space separated. Empty is the good answer, and it is a DIFFERENT answer from
+# `sh_shim_present` being empty: that is a machine with a pty and a passwd
+# database, which needs nothing. The report prints both so neither is read as
+# the other.
+sh_shim_needed_missing() {
+    sh_snm_missing=''
+    for sh_snm_name in fakepty fakepwd; do
+        if [ "$(sh_shim_need "$sh_snm_name")" = yes ] && \
+           [ ! -f "$(sh_shims_dir)/$sh_snm_name.so" ]; then
+            sh_snm_missing="$sh_snm_missing $sh_snm_name"
+        fi
+    done
+    printf '%s' "${sh_snm_missing# }"
 }

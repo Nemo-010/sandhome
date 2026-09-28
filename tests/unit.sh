@@ -192,5 +192,183 @@ t_is "$(sh_read_file_spaces "$tmp/full.json")" 'a b ' \
     'a newline-terminated file is read the same way'
 t_is "$(sh_read_file "$tmp/partial.json")" 'ab' 'read_file joins the lines without a separator'
 
+# # STOP: sh_upper IS A HELPER AND NOT `tr`, BECAUSE THE USERLANDS THIS TOOL
+# RUNS ON CARRY NO tr. The pin resolver below builds environment-variable names
+# out of it, and a version that shelled out to `tr` died on exactly the machine
+# it was written for. It is also the one helper in this file that is not a
+# single parameter expansion, so it is the one a reader can check by hand.
+t_is "$(sh_upper jq)" 'JQ' 'upper folds a short name'
+t_is "$(sh_upper 'Mixed_Case-9')" 'MIXED_CASE-9' 'upper leaves everything but a-z alone'
+t_is "$(sh_upper '')" '' 'upper of nothing is nothing'
+t_is "$(sh_upper a)Z" 'AZ' 'upper maps the first and last of the alphabet'
+t_is "$(sh_upper abcxyz)" 'ABCXYZ' 'upper maps a whole word'
+
+# --------------------------------------------------------------- digest pins --
+# # STOP: ONE DIGEST FOR EVERY DOWNLOAD CANNOT PIN A TOOLSET. SANDHOME_SHA256
+# was documented as "pin a sha256 for every download this run makes" and was
+# passed to EVERY download, so a `cli` toolset - three downloads - could only
+# ever match the first one and failed the other two with a message blaming the
+# mirror. The result was ORDER-DEPENDENT, which is how a reader knows a check
+# is broken rather than strict. A pin is now resolved per download.
+JQ_URL='https://github.com/jqlang/jq/releases/latest/download/jq-linux-amd64'
+RG_URL='https://github.com/BurntSushi/ripgrep/releases/download/15.2.0/ripgrep-15.2.0-x86_64-unknown-linux-musl.tar.gz'
+GO_URL='https://go.dev/dl/go1.27.1.linux-amd64.tar.gz'
+
+t_is "$(SANDHOME_SHA256_JQ=pinjq sh_pin_for "$JQ_URL" jq)" 'pinjq' \
+    'a jq pin answers for a jq download'
+t_is "$(SANDHOME_SHA256_JQ=pinjq sh_pin_for "$RG_URL" ripgrep)" '' \
+    'a jq pin does not answer for a ripgrep download'
+t_is "$(SANDHOME_SHA256=one sh_pin_for "$RG_URL" ripgrep)" 'one' \
+    'the bare value is a default that applies where nothing more specific is'
+t_is "$(SANDHOME_SHA256_JQ=pinjq SANDHOME_SHA256=one sh_pin_for "$JQ_URL" jq)" 'pinjq' \
+    'a named pin beats the bare default'
+# THE LOAD-BEARING ORDER: a digest the PUBLISHER published outranks the bare
+# value, so setting SANDHOME_SHA256 to pin one download no longer silently
+# disables go.dev's own digest for another. That was the worst of the old
+# behaviour - a weaker check the caller set for something else had turned off a
+# stronger one - and it is a NO-OP in the wrong direction.
+t_is "$(SANDHOME_SHA256=one sh_pin_for "$GO_URL" go published)" 'published' \
+    'a published digest beats the bare default'
+t_is "$(SANDHOME_SHA256=one SANDHOME_SHA256_GO=mine sh_pin_for "$GO_URL" go published)" 'mine' \
+    'a caller pin beats the published digest'
+t_is "$(sh_pin_for "$GO_URL" go)" '' 'no pin and no published digest answers nothing'
+
+# # STOP: THE PIN KEY IS CUT BY HAND, BECAUSE `${url##*/}` IS GLOB SYNTAX AND AN
+# URL IS NOT A GLOB. It answered the WHOLE URL for `https://x/jq?a=1` - there is
+# no `/` after the last one it matches - so the key it built was
+# `HTTPS://X/JQ?A=1`, and a query string has to come off before the extension.
+t_is "$(sh_pin_key "$JQ_URL")" 'JQ-LINUX-AMD64' 'the pin key is the last path segment, upper-cased'
+t_is "$(sh_pin_key 'https://x/uv.tar.gz?t=abc')" 'UV.TAR' 'a query string does not survive into the key'
+t_is "$(sh_pin_key 'https://x/rustup-init')" 'RUSTUP-INIT' 'a file with no extension keeps its name'
+# # STOP: THE LOOKUP IS A `case` AND NOT `eval`. `eval "x=\${$var:-}"` is the only
+# indirect read POSIX sh has, and it is a command as soon as the name holds a
+# hyphen, an asterisk or a slash. Both of those were produced here before the
+# `case` replaced the arithmetic: `SANDHOME_SHA256_JQ-LINUX-AMD64=bbb` printed
+# "not found" and a key built from an url printed "Bad substitution".
+# # STOP: A POSIX sh ASSIGNMENT CANNOT HOLD A HYPHEN IN ITS NAME, SO THE
+# VARIABLE IS UNDERSCORED WHILE THE KEY KEEPS THE FILE'S HYPHENS. The first
+# design spelled the variable `SANDHOME_SHA256_JQ-LINUX-AMD64`, which a caller
+# cannot set at all - `dash: SANDHOME_SHA256_JQ-LINUX-AMD64=bbb: not found` -
+# so the arm that read it could never see a value. Both spellings are checked
+# here because a key that stops matching its arm fails silently, answering
+# nothing rather than something wrong.
+t_is "$(SANDHOME_SHA256_JQ_LINUX_AMD64=pinasset sh_pin_for "$JQ_URL" jq)" 'pinasset' \
+    'a pin named for a url asset is readable, which an eval-built name was not'
+t_is "$(SANDHOME_SHA256_JQ_LINUX_AMD64=pinasset sh_pin_for "$JQ_URL" jq '')" 'pinasset' \
+    'the asset pin answers even when the module passes no name'
+t_is "$(SANDHOME_SHA256_JQ=bytool sh_pin_for "$JQ_URL" jq)" 'bytool' \
+    'the toolchain-named pin still answers for the same url' 
+t_is "$(sh_pin_names | tr -s ' \n' ' ')" ' fd go jq node python ripgrep rust ' \
+    'the pin-name list is the shape the clause above assumes'
+
+# EVERY MODULE HAS A PIN NAME, so a new toolchain cannot be added without one.
+missing_pins=''
+for m in "$ROOT"/tools/*.sh; do
+    [ -r "$m" ] || continue
+    mname=${m##*/}; mname=${mname%.sh}
+    case " $(sh_pin_names) " in
+        *" $mname "*) ;;
+        *) missing_pins="$missing_pins $mname" ;;
+    esac
+done
+t_is "$missing_pins" '' 'every toolchain module has a SANDHOME_SHA256_<name> pin'
+
+# # STOP: THE PROVENANCE LINE IS NAMED AND QUOTED, BECAUSE AN UNQUOTED VALUE WITH
+# A SPACE IN IT IS WORD-SPLIT BY dash INTO A COMMAND. `sh_fv_from=the release`
+# printed "release: not found", left the variable UNSET, and killed the run at
+# the next expansion with "sh: 134: sh_fv_from: parameter not set" - inside a
+# printf, so it EXITED the process and the caller never saw a status at all.
+# It is a dash RUNTIME behaviour: shellcheck does not flag it, so the guard has
+# to be an executed clause. The whole of sh_fetch_verified is driven below
+# through a local file under `set -u`, which is the only way to see this.
+printf 'payload\n' > "$tmp/pin-target"
+REAL_SHA=$(sha256sum "$tmp/pin-target" 2>/dev/null | cut -d' ' -f1)
+if [ -n "$REAL_SHA" ]; then
+    if ( . ./lib/common.sh; . ./lib/fetch.sh
+          sh_fetch_verified "file://$tmp/pin-target" "$tmp/pin-dest" "$REAL_SHA" ) 2>"$tmp/fv-err"; then
+        t_ok 0 'sh_fetch_verified returns 0 when the digest matches'
+    else
+        t_ok 1 "sh_fetch_verified returns 0 when the digest matches ($(cat "$tmp/fv-err"))"
+    fi
+    if ( . ./lib/common.sh; . ./lib/fetch.sh
+          sh_fetch_verified "file://$tmp/pin-target" "$tmp/pin-dest2" \
+          0000000000000000000000000000000000000000000000000000000000000000 ) 2>/dev/null; then
+        t_ok 1 'a mismatched digest is refused'
+    else
+        t_ok 0 'a mismatched digest is refused'
+    fi
+    # The provenance line must survive the trip through `set -u` without
+    # aborting, and must name the pin that answered rather than the string
+    # "the release" when a pin answered.
+    # curl writes a progress meter to stderr that would swamp the line, so the
+    # fetcher is stubbed to a copy: what is under test is the DIGEST step, not
+    # the transport, and sh_fetch_verified's own message is what is read.
+    mkdir -p "$tmp/stub"
+    # The real invocation is `curl -fSL --retry 3 --retry-delay 2 -o DEST URL`,
+    # so the stub reads to -o, takes DEST, then copies URL to it. A one-liner
+    # lost the URL to a shift and reported "cannot stat pin-dest3", which reads
+    # like a failure of the thing under test and is not one.
+    {
+        printf '%s\n' '#!/bin/sh'
+        printf '%s\n' 'while [ "$#" -gt 0 ] && [ "$1" != "-o" ]; do shift; done'
+        printf '%s\n' '[ "$1" = "-o" ] || exit 1'
+        printf '%s\n' 'shift'
+        printf '%s\n' 'sh_stub_dest=$1'
+        printf '%s\n' 'shift'
+        printf '%s\n' 'sh_stub_src=$1'
+        printf '%s\n' 'case "$sh_stub_src" in file://*) sh_stub_src=${sh_stub_src#file://} ;; esac'
+        printf '%s\n' 'cp "$sh_stub_src" "$sh_stub_dest"'
+    } > "$tmp/stub/curl"
+    chmod +x "$tmp/stub/curl"
+    fv_out=$( cd "$ROOT" && PATH="$tmp/stub:$PATH" SANDHOME_SHA256_JQ=$REAL_SHA sh -uc '
+        . ./lib/common.sh
+        . ./lib/fetch.sh
+        sh_fetch_verified "file://'"$tmp"'/pin-target" "'"$tmp"'/pin-dest3" \
+            "$(sh_pin_for "file://'"$tmp"'/pin-target" jq)" 2>&1' 2>/dev/null )
+    # The URL here is a `file://` one whose asset key is PIN-TARGET, so the
+    # pin that answers is neither the bare value nor a toolchain name; what the
+    # line must NOT say is "the release", which is a false provenance for a
+    # value the caller supplied.
+    case "$fv_out" in
+        *'the release'*) t_ok 1 'the digest step does not claim the release when a pin answered' ;;
+        *) t_ok 0 'the digest step names the pin that answered, not the release' ;;
+    esac
+    case "$fv_out" in
+        *'parameter not set'*) t_ok 1 'the digest step aborts under set -u' ;;
+        *) t_ok 0 'the digest step does not abort under set -u' ;;
+    esac
+    # And with no pin at all, the provenance is the release, quoted and intact.
+    fv_out2=$( cd "$ROOT" && PATH="$tmp/stub:$PATH" sh -uc '
+        . ./lib/common.sh
+        . ./lib/fetch.sh
+        sh_fetch_verified "file://'"$tmp"'/pin-target" "'"$tmp"'/pin-dest4" 2>&1' 2>/dev/null )
+    # With no pin at all there is nothing to compare against, so the line says
+    # exactly that and never claims a match it did not make.
+    case "$fv_out2" in
+        *'no digest to compare against'*) t_ok 0 'with no pin the digest step says so plainly' ;;
+        *) t_ok 1 "with no pin the digest step says so plainly (got: $fv_out2)" ;;
+    esac
+else
+    t_skip 'no sha256 tool to check a digest with'
+fi
+
+# ------------------------------------------------------------------ os id --
+# # STOP: os-release IS READ FROM BOTH PLACES, AND /usr/lib IS NOT A THOUGHT.
+# On a merged-/usr distribution /etc/os-release is a SYMLINK into /usr/lib, and
+# an image that ships the file without the symlink - a container that bind-mounts
+# it, a minimal rootfs - answered `unknown` on the first line of every report.
+# Measured on the machine this was fixed on, whose /usr/lib/os-release says
+# ID="void" and whose /etc/os-release does not exist.
+t_ok "$( [ -n "$(sh_do_read_id /usr/lib/os-release 2>/dev/null)" ] && echo 0 || echo 1 )" \
+    'the ID in /usr/lib/os-release is readable when /etc/os-release is absent'
+t_is "$(sh_do_read_id "$tmp/no-such-release")" '' 'a missing os-release reads as nothing'
+printf 'ID=quoted-value\nPATH=/tmp/evil\n' > "$tmp/rel"
+t_is "$(sh_do_read_id "$tmp/rel")" 'quoted-value' 'ID is read with its quotes removed'
+# The file is DATA and is not sourced, so a distribution whose os-release
+# carries a PATH= cannot rewrite the process that read it.
+os_before=$PATH
+( . ./lib/common.sh; . ./lib/detect.sh; sh_do_read_id "$tmp/rel" >/dev/null )
+t_is "$PATH" "$os_before" 'reading an os-release does not rewrite PATH'
+
 rm -rf "$tmp"
 t_end

@@ -20,7 +20,7 @@ tc_jq_install() {
     sh_space_need 16 home || return 1
     mkdir -p "$sh_ji_root/bin" 2>/dev/null || return 1
     sh_ji_url="https://github.com/jqlang/jq/releases/latest/download/$sh_ji_asset"
-    if ! sh_fetch_verified "$sh_ji_url" "$sh_ji_root/bin/jq" "${SANDHOME_SHA256:-}"; then
+    if ! sh_fetch_verified "$sh_ji_url" "$sh_ji_root/bin/jq" "$(sh_pin_for "$sh_ji_url" jq)"; then
         return 1
     fi
     chmod 0755 "$sh_ji_root/bin/jq" 2>/dev/null || true

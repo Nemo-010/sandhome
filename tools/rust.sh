@@ -47,7 +47,7 @@ tc_rust_install() {
     mkdir -p "$sh_ri_rustup" "$sh_ri_cargo" 2>/dev/null || return 1
     sh_ri_url="https://static.rust-lang.org/rustup/dist/${sh_ri_triple}/rustup-init"
     sh_ri_init="$SH_HOME_TMP/rustup-init.$$"
-    if ! sh_fetch_verified "$sh_ri_url" "$sh_ri_init" "${SANDHOME_SHA256:-}"; then
+    if ! sh_fetch_verified "$sh_ri_url" "$sh_ri_init" "$(sh_pin_for "$sh_ri_url" rust)"; then
         return 1
     fi
     chmod 0755 "$sh_ri_init" 2>/dev/null || true
