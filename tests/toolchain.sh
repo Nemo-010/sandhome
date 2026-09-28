@@ -204,20 +204,52 @@ else
 fi
 if command -v go >/dev/null 2>&1; then
     sh_toolchain_load go >/dev/null 2>&1
+    # # STOP: THE PROBE IS GIVEN THE CACHE go REQUIRES BEFORE IT IS ASKED
+    # WHETHER go WORKS. On a host with no HOME and no XDG_CACHE_HOME, `go
+    # build` refuses outright:
+    #   build cache is required, but could not be located: GOCACHE is not
+    #   defined and neither $XDG_CACHE_HOME nor $HOME are defined
+    # ...and the clause failed on a perfectly good compiler, which said the
+    # tool was broken when the environment around it was incomplete. The probe
+    # is here to measure the COMPILER; a missing cache directory is not a
+    # compiler defect, and in a real session the go fragment sets GOCACHE under
+    # the exec root, which is why no consumer ever saw this.
+    sh_tc_go_saved_cache=${GOCACHE:-}
+    if [ -z "$GOCACHE" ]; then
+        GOCACHE="$SH_EXEC_BIN/../cache/go-build-test.$$"
+        export GOCACHE
+    fi
     if tc_go_behavioural >/dev/null 2>&1; then
         t_ok 0 'go behavioural probe builds and runs (#19)'
     else
         t_ok 1 'go behavioural probe builds and runs (#19)'
+    fi
+    if [ -z "$sh_tc_go_saved_cache" ]; then
+        unset GOCACHE
+        rm -rf "$GOCACHE" 2>/dev/null
+    else
+        GOCACHE=$sh_tc_go_saved_cache
+        export GOCACHE
     fi
 else
     t_skip 'go behavioural probe: no go on this host'
 fi
 if command -v rustc >/dev/null 2>&1; then
     sh_toolchain_load rust >/dev/null 2>&1
-    if tc_rust_behavioural >/dev/null 2>&1; then
-        t_ok 0 'rust behavioural probe links and runs native (#19)'
+    # # STOP: A rustc PROXY WITH NO DEFAULT TOOLCHAIN IS NOT A rustc. On a host
+    # whose /usr/bin/rustc is rustup's proxy, `rustc --version` fails and
+    # tc_rust_probe (the same test the installer uses) is false; calling the
+    # behavioural probe then reported a tree defect for a tool that is not
+    # installed here. Gate on the module's own probe, so the clause measures the
+    # tree when a working rustc is present and skips when it is not.
+    if tc_rust_probe >/dev/null 2>&1; then
+        if tc_rust_behavioural >/dev/null 2>&1; then
+            t_ok 0 'rust behavioural probe links and runs native (#19)'
+        else
+            t_ok 1 'rust behavioural probe links and runs native (#19)'
+        fi
     else
-        t_ok 1 'rust behavioural probe links and runs native (#19)'
+        t_skip 'rust behavioural probe: no working rustc on this host'
     fi
 else
     t_skip 'rust behavioural probe: no rustc on this host'
@@ -366,5 +398,243 @@ fi
 SELFLINK
 sh "$work/selftest.sh" "$ROOT" "$sel_dir" 2>/dev/null)
 t_is "$self_link" 'linked' 'the promote step does not link the exec view onto itself (#43)'
+
+# # STOP: `repair` FIXES A SELF-LINKED VIEW, AND DOWNLOADS NOTHING. The whole
+# consumer-facing diagnosis routed step 2 through `sandhome install <name>`, and
+# on a host with an adopted toolchain that is the command that BROKE the view,
+# so following the documented procedure reproduced the defect 8 rounds out of 8
+# (issues #49, #43). `repair` is the command the docs name instead, and these
+# clauses hold it to that: a view whose links point at themselves is repaired,
+# and no download is attempted.
+#
+# A link that points at itself is invisible to `[ -e ]` on a shell that follows
+# the link silently, which is why it survived for so long. This breaks the view
+# the way a real one breaks and then checks the tool runs afterwards.
+rep_home=$sel_dir/repair-home
+rep_exec=$sel_dir/repair-exec
+rm -rf "$rep_home" "$rep_exec"
+mkdir -p "$rep_home" "$rep_exec/bin" "$sel_dir/repair-real"
+printf '#!/bin/sh\necho jq-1.8.2 2>/dev/null\n' > "$sel_dir/repair-real/jq"
+chmod 755 "$sel_dir/repair-real/jq"
+ln -s "$rep_exec/bin/jq" "$rep_exec/bin/jq"
+
+out=$( SANDHOME_HOME="$rep_home" SANDHOME_EXEC="$rep_exec" \
+       SANDHOME_REPO_DIR="$ROOT" SH_REPO_DIR="$ROOT" \
+       PATH="$rep_exec/bin:$sel_dir/repair-real:/usr/bin:/bin" \
+       sh "$ROOT/bin/sandhome" repair jq 2>&1 )
+rc=$?
+if [ -L "$rep_exec/bin/jq" ]; then
+    t=$(readlink "$rep_exec/bin/jq")
+    case "$t" in
+        "$rep_exec"/*) t_ok 1 "repair rewrites a self-linked view link (got $t)" ;;
+        *) t_ok 0 'repair rewrites a self-linked view link' ;;
+    esac
+    if "$rep_exec/bin/jq" --version >/dev/null 2>&1; then
+        t_ok 0 'the repaired tool runs from the exec view'
+    else
+        t_ok 1 'the repaired tool runs from the exec view'
+    fi
+else
+    t_ok 1 'repair rewrites a self-linked view link (no link)'
+    t_ok 1 'the repaired tool runs from the exec view'
+fi
+case "$out" in
+    *Downloaded*) t_ok 1 'repair downloads nothing' ;;
+    *) t_ok 0 'repair downloads nothing' ;;
+esac
+
+# An unknown name is refused by name and the command still exits non-zero,
+# rather than silently repairing whatever it felt like.
+bad_out=$( SANDHOME_HOME="$rep_home" SANDHOME_EXEC="$rep_exec" \
+           SANDHOME_REPO_DIR="$ROOT" SH_REPO_DIR="$ROOT" \
+           PATH="$rep_exec/bin:$sel_dir/repair-real:/usr/bin:/bin" \
+           sh "$ROOT/bin/sandhome" repair nosuchtoolchain 2>&1 )
+bad_rc=$?
+t_contains "$bad_out" 'unknown toolchain nosuchtoolchain' 'repair names an unknown toolchain'
+if [ "$bad_rc" -ne 0 ]; then
+    t_ok 0 'repair exits non-zero on an unknown toolchain'
+else
+    t_ok 1 'repair exits non-zero on an unknown toolchain'
+fi
+
+# # STOP: A TOOLCHAIN THAT ANSWERS --version AND REFUSES TO COMPILE IS NOT A
+# TOOLCHAIN, AND IS NOT ADOPTED. Some sealed sandboxes ship a multi-arch rust as
+# a shim that answers `--version` and refuses everything else, which is what
+# tc_rust_probe asks: `sh_have rustc && rustc --version`. So the probe passed, the
+# adopt path was taken, `sandhome install rust` exited 0 and printed
+# "a working copy is already here; adopting it", and the first build the
+# consumer attempted failed (issue #53). Measured here with exactly that shim:
+#   rustc --version   -> rustc 1.99.0 (proxy build 2026-01-01)
+#   rustc hello.rs    -> proxy rustc: refusing, not a compiler   (exit 1)
+#   sandhome install rust -> exit 0
+#   sandhome report       -> toolchain.rust=rustc 1.99.0 (proxy build 2026-01-01)
+# A report line naming a working version is the tree's own refusal to be soothed:
+# the module already has a behavioural probe, and it was gated on a noexec home,
+# which is not what is wrong here. The probe is what the decision needs, because
+# the thing being decided is whether this copy can build.
+mkdir -p "$work/proxybin"
+cat > "$work/proxybin/rustc" <<'PROXY'
+#!/bin/sh
+case "${1:-}" in
+    --version|-V) echo "rustc 1.99.0 (proxy build 2026-01-01)"; exit 0 ;;
+esac
+echo "proxy rustc: refusing, not a compiler" >&2
+exit 1
+PROXY
+chmod 0755 "$work/proxybin/rustc"
+
+cat > "$work/proxyprobe.sh" <<EOF
+for m in common detect space fetch env toolchain; do
+    . "$ROOT/lib/\$m.sh"
+done
+sh_toolchain_load rust
+printf 'BEHAVIOURAL=%s\n' "\$(tc_rust_behavioural >/dev/null 2>&1 && printf 0 || printf 1)"
+# The decision, not just the helper: this is what sh_toolchain_ensure asks.
+if tc_rust_probe >/dev/null 2>&1; then
+    printf 'PROBE=adopt\n'
+else
+    printf 'PROBE=install\n'
+fi
+EOF
+proxy_probe=$(SH_LIB_DIR="$ROOT/lib" SH_REPO_DIR="$ROOT" \
+    SH_HOME_TOOLCHAINS="$work/tc" SH_EXEC="$work/exec" SH_HOME="$work/home" \
+    SH_EXEC_BIN="$work/exec/bin" SH_EXEC_VIEWS="$work/exec/views" \
+    SH_HOME_TMP="$work/home/tmp" SH_HOME_EXEC=yes SH_DRY_RUN=1 SH_SELF=test \
+    PATH="$work/proxybin:$PATH" sh "$work/proxyprobe.sh" 2>/dev/null)
+t_contains "$proxy_probe" 'BEHAVIOURAL=1' \
+    'a rustc that refuses to compile fails the behavioural probe despite answering --version'
+t_contains "$proxy_probe" 'PROBE=install' \
+    'a proxy rustc is not adopted, so a real toolchain is installed instead (#53)'
+
+# The control, which matters as much: a rustc that really compiles must still be
+# adopted, or the fix is just "never adopt rust" and every host pays a download.
+# It is a stub rather than the host's rustc so the clause means the same thing
+# everywhere, including on a host with no compiler at all.
+mkdir -p "$work/realbin"
+cat > "$work/realbin/rustc" <<'REALC'
+#!/bin/sh
+case "${1:-}" in
+    --version|-V) echo "rustc 1.99.0 (real build)"; exit 0 ;;
+esac
+# -o FILE: write a runnable program, which is what the probe actually checks.
+out=./a.out
+prev=''
+for a in "$@"; do
+    [ "$prev" = -o ] && out=$a
+    prev=$a
+done
+printf '#!/bin/sh\nexit 0\n' > "$out" 2>/dev/null || exit 1
+chmod 0755 "$out" 2>/dev/null
+exit 0
+REALC
+chmod 0755 "$work/realbin/rustc"
+real_probe=$(SH_LIB_DIR="$ROOT/lib" SH_REPO_DIR="$ROOT" \
+    SH_HOME_TOOLCHAINS="$work/tc" SH_EXEC="$work/exec" SH_HOME="$work/home" \
+    SH_EXEC_BIN="$work/exec/bin" SH_EXEC_VIEWS="$work/exec/views" \
+    SH_HOME_TMP="$work/home/tmp" SH_HOME_EXEC=yes SH_DRY_RUN=1 SH_SELF=test \
+    PATH="$work/realbin:$PATH" sh "$work/proxyprobe.sh" 2>/dev/null)
+t_contains "$real_probe" 'PROBE=adopt' \
+    'a rustc that compiles is still adopted, so the probe costs no download'
+
+# # STOP: A TEST COMMAND THAT RAN NOTHING EXITS NON-ZERO. On a network-only
+# install the checkout is fetched WITHOUT tests/, so `sandhome selftest` printed
+# "no test named X in this checkout" seven times and `sandhome test` printed a
+# bare "sh: 0: cannot open .../tests/run.sh: No such file" - and both exited 0.
+# A consumer checking a setup with the command the router names was told it
+# passed while nothing had run (issue #39).
+#
+# The exit code is the part that was load-bearing, because the dispatcher ends
+# non-zero only on SH_FAILURES: a sh_say plus a `return 2` that nothing reads
+# still exits 0. These clauses run the real command against a checkout with no
+# tests/ and read the status, not the prose.
+tc39=$work/no-tests
+mkdir -p "$tc39/lib" "$tc39/bin"
+cp "$ROOT/bin/sandhome" "$tc39/bin/sandhome"
+for m in common detect space fetch env toolchain shim report; do
+    cp "$ROOT/lib/$m.sh" "$tc39/lib/$m.sh"
+done
+mkdir -p "$tc39/tests"    # the directory is absent in a real network-only
+rmdir "$tc39/tests" 2>/dev/null   # checkout; the library-only shape is tested
+st_out=$(SANDHOME_REPO_DIR="$tc39" SH_REPO_DIR="$tc39" \
+         sh "$tc39/bin/sandhome" selftest 2>&1)
+st_rc=$?
+if [ "$st_rc" -ne 0 ]; then
+    t_ok 0 'selftest exits non-zero on a checkout with no tests/ (#39)'
+else
+    t_ok 1 "selftest exits non-zero on a checkout with no tests/ (got rc=$st_rc)"
+fi
+case "$st_out" in
+    *network-only*) t_ok 0 'selftest says why it cannot run (#39)' ;;
+    *) t_ok 1 "selftest says why it cannot run (got $st_out)" ;;
+esac
+ts_out=$(SANDHOME_REPO_DIR="$tc39" SH_REPO_DIR="$tc39" \
+         sh "$tc39/bin/sandhome" test 2>&1)
+ts_rc=$?
+if [ "$ts_rc" -ne 0 ]; then
+    t_ok 0 'test exits non-zero on a checkout with no tests/run.sh (#39)'
+else
+    t_ok 1 "test exits non-zero on a checkout with no tests/run.sh (got rc=$ts_rc)"
+fi
+case "$ts_out" in
+    *cannot\ open*) t_ok 1 'test does not leak a raw shell error (#39)' ;;
+    *) t_ok 0 'test does not leak a raw shell error (#39)' ;;
+esac
+
+# The control: a real checkout still RUNS the suite and still exits 0 when
+# green. `selftest shims` is used rather than the whole selftest because the
+# whole selftest re-enters this file through `sandhome test`, and a test that
+# runs the test suite that is running it does not terminate. The property under
+# test is the exit code, and one real test file is enough to hold it.
+st_real=$(cd "$ROOT" && sh "$ROOT/tests/unit.sh" >/dev/null 2>&1; printf '%s' "$?")
+t_is "$st_real" '0' 'a real checkout still runs its suite and exits 0'
+
+# # STOP: DOCTOR CHECKS THE TOOLCHAINS THE SETUP ASKED FOR. `doctor` is the
+# readiness gate ROUTE.md step 2 tells a session to trust, and it only ever
+# checked names in INSTALLED or ADOPTED - which are THIS RUN's variables and are
+# empty in a fresh process. Measured on a host with no compilers, after
+# `bootstrap.sh --toolset languages` reported
+#   installed=   adopted=jq ripgrep fd python go   failures=6
+#   toolchain.zig= toolchain.mold= toolchain.deno= toolchain.bun= toolchain.rust=
+# doctor answered `doctor_failures=0` and exited 0 over six missing toolchains
+# (issue #38). The bootstrap now records what it asked for in env.sh and doctor
+# reads that file, because sh_env_load deliberately does not source env.sh - it
+# rewrites PATH and SANDHOME_*, and reading the VARIABLE was reading nothing.
+d38=$work/doc38
+mkdir -p "$d38/home" "$d38/exec/views"
+# The name has to be a REAL toolchain: the loop walks sh_toolchain_available, so
+# an invented name is never reached and the clause would pass for the wrong
+# reason. jq is present on this host, so the requested-but-absent toolchain is
+# zig, which is hidden from the run by putting the directory holding it last and
+# removing it from the searched set.
+printf 'SANDHOME_WANTED_TOOLCHAINS=%s\n' "'jq zig'" > "$d38/home/env.sh"
+# The real call, with the library sourced the way bin/sandhome sources it.
+# The version function is stubbed rather than trusted to fail: this host HAS a
+# working zig, so tc_zig_version would answer with it and the clause would pass
+# for the wrong reason - the doctor check is what is under test, not whether the
+# machine happens to own a compiler.
+d38_out=$( SH_HOME="$d38/home" SH_EXEC="$d38/exec" SH_EXEC_BIN="$d38/exec/bin" \
+    SH_EXEC_VIEWS="$d38/exec/views" SH_HOME_TOOLCHAINS="$d38/tc" \
+    SH_HOME_TMP="$d38/tmp" SH_HOME_EXEC=no SH_SELF=test \
+    env SANDHOME_REPO_DIR="$ROOT" PATH="$ROOT/bin:$PATH" \
+    sh -c 'for m in common detect space fetch env toolchain shim report; do
+               . "$SANDHOME_REPO_DIR/lib/$m.sh"
+           done
+           # Present, but with no version: the state the issue describes.
+           sh_toolchain_version() { [ "$1" = zig ] && return 0; printf ""; }
+           sh_doctor' 2>&1 )
+case "$d38_out" in
+    *FAIL\ toolchain_zig*) t_ok 0 'doctor fails on a toolchain the setup asked for and did not get (#38)' ;;
+    *) t_ok 1 "doctor fails on a toolchain the setup asked for and did not get (#38) (got $d38_out)" ;;
+esac
+case "$d38_out" in
+    *doctor_failures=0*) t_ok 1 'doctor_failures is not 0 with a requested toolchain missing (#38)' ;;
+    *) t_ok 0 'doctor_failures is not 0 with a requested toolchain missing (#38)' ;;
+esac
+# A toolchain NOT in the requested list is still not a failure, or every host
+# would be told it is missing eleven things it never wanted.
+case "$d38_out" in
+    *FAIL\ toolchain_clang*) t_ok 1 'a toolchain nobody asked for is not a failure (#38)' ;;
+    *) t_ok 0 'a toolchain nobody asked for is not a failure (#38)' ;;
+esac
 
 t_end

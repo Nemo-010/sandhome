@@ -273,8 +273,8 @@ sh_toolset_names() {
         minimal)   printf 'jq\n' ;;
         cli)       printf 'jq ripgrep fd\n' ;;
         developer) printf 'jq ripgrep fd python node\n' ;;
-        languages) printf 'jq ripgrep fd python node rust go\n' ;;
-        agent)     printf 'jq ripgrep fd python node rust go\n' ;;
+        languages) printf 'jq ripgrep fd python node rust go zig deno bun mold\n' ;;
+        agent)     printf 'jq ripgrep fd python node rust go zig deno bun mold\n' ;;
         *)         return 1 ;;
     esac
 }
@@ -379,8 +379,11 @@ sh_bootstrap_path_line() {
         return 0
     fi
     sh_bpl_line="export PATH=\"$SH_EXEC_BIN:\$PATH\""
-    sh_append_login "$sh_bpl_line" "$SH_EXEC_BIN"
-    sh_append_rc "$sh_bpl_line" "$SH_EXEC_BIN"
+    # The prefix is what makes this line replaceable: without it a re-run that
+    # moves the exec root appends a second PATH block and leaves the superseded
+    # root first on PATH, where it still wins (issue #41).
+    sh_append_login "$sh_bpl_line" "$SH_EXEC_BIN" 'export PATH="'
+    sh_append_rc "$sh_bpl_line" "$SH_EXEC_BIN" 'export PATH="'
     return 0
 }
 
@@ -455,6 +458,13 @@ sandhome_bootstrap_main() {
     for sh_mb_name in $sh_mb_wanted; do
         sh_toolchain_ensure "$sh_mb_name" || true
     done
+    # What was ASKED for, recorded so `sandhome doctor` can check it later. The
+    # names are what the run wanted, not what it managed: a toolchain that
+    # failed to install is exactly the one the readiness gate has to see, and
+    # the failure is already counted in SH_FAILURES, so the bootstrap exits
+    # non-zero on its own (#38).
+    SH_WANTED_TOOLCHAINS=$sh_mb_wanted
+    export SH_WANTED_TOOLCHAINS
 
     if [ "$SH_SHIMS" != none ]; then
         sh_shim_build_all "$SH_REPO_DIR/shims"
