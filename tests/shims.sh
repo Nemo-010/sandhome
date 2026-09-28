@@ -217,9 +217,13 @@ if command -v cc >/dev/null 2>&1 && [ ! -e "$nocc_bin/cc" ] && [ ! -e "$nocc_bin
         SANDHOME_REPO_DIR="$ROOT" sh "$ROOT/bootstrap.sh" --toolset minimal \
         --no-profile --no-path-line --no-shell 2>"$tmp/nocc-err.txt")
     nocc_rc=$?
-    # What THIS machine needs, read the same way the child reads it.
+    # What THIS machine needs, read from the DETECTORS and not from SH_PTY/
+    # SH_PASSWD: this file force-sets those variables for its own clauses, so
+    # sh_shim_need would answer about the forcing, not the machine. The
+    # subprocess's own sh_detect_all answers from the real machine, and the
+    # branch below must see the same machine it saw.
     nocc_needs_shims=no
-    if [ "$(sh_shim_need fakepty)" = yes ] || [ "$(sh_shim_need fakepwd)" = yes ]; then
+    if [ "$(sh_detect_pty)" = no ] || [ "$(sh_detect_passwd)" = no ]; then
         nocc_needs_shims=yes
     fi
     if [ "$nocc_needs_shims" = yes ]; then
