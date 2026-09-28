@@ -386,20 +386,24 @@ sh_total_mb() {
 }
 
 # sh_space_status [DIR] -> one word naming how much room is left in DIR:
-# ok, low, critical, full, or unknown. `low` and `critical` are the two the
-# agent must hear about, and they are decided on BOTH absolute megabytes and
-# percentage, because either alone is wrong on some machine:
+# ok, low, critical, full, or unknown.
 #
-#   - 40MB free on a 256MB tmpfs is critical (16%) and would pass a
-#     "under 100MB is low" rule on percentage alone being the only test.
-#   - 40MB free on a 4TB disk is fine and would fail an absolute-only rule at
-#     100MB.
+# # STOP: THE THRESHOLDS ARE DECIDED ON MAGABYTES BELOW 1GB AND ON BOTH A SHARE
+# AND A FLOOR ABOVE IT, AND BOTH HALVES OF THAT ARE NECESSARY. Each was measured
+# on this host, and in both directions:
 #
-# So a root is low when it is under SANDHOME_LOW_EXEC_MB in absolute terms AND
-# under SANDHOME_LOW_EXEC_PCT of its total, or under either threshold when the
-# total is unknown. A root is critical when free space is under
-# SANDHOME_CRIT_MB, or the percentage is under 5, or nothing can be written at
-# all.
+#   - a share alone is nonsense at scale. This host's 419GB disk sat at 6.6% free
+#     with 393GB still on it; a share-only rule called that `low` and failed
+#     `doctor` on a freshly built home that had 27GB free.
+#   - megabytes alone is nonsense on a small root. 10% of a 207MB tmpfs is 20MB,
+#     so a share rule calls it "fine at 17%" and the next build is refused with
+#     "no space left on device".
+#
+# So: a root under SANDHOME_PCT_MEANINGFUL_MB (1GB) is judged on megabytes
+# alone; above it, `low` needs the share under SANDHOME_LOW_EXEC_PCT (10) AND
+# the free space under SANDHOME_LOW_EXEC_MB (100), and `critical` needs the share
+# under 5% AND the free space under SANDHOME_CRIT_MB (32). 40MB of 4TB is
+# 0.001% free and is correctly `low`: there is nothing there to build with.
 #
 # # STOP: THIS EXISTS BECAUSE THE FAILURE IS SILENT UNTIL A BUILD DIES, AND
 # SOMETIMES NOT EVEN THEN. Measured on this host, exec root /dev/shm at 245MB:
@@ -515,23 +519,43 @@ sh_space_status() {
 # The advice is a command, not a description. "the exec root is full" leaves a
 # consumer with nothing to type; the whole point of hearing about it early is
 # that there is still time to act on it.
+#
+# # STOP: IT SAYS IT ONCE PER PROCESS. Every toolchain that installs writes a
+# fragment, and each write calls this, so a `--toolset agent` run on a low root
+# produced five identical lines - measured, and the same line five times over.
+# A repeated warning is not a louder warning, it is noise that trains the reader
+# to scroll past the one line that mattered. The state is cached per process and
+# the second caller is silent; a new process, and therefore a new command, says
+# it again.
 sh_space_advise() {
     sh_sa_dir=${1:-${SH_EXEC:-/tmp}}
     sh_sa_status=$(sh_space_status "$sh_sa_dir")
     case "$sh_sa_status" in
         ok|unknown) return 0 ;;
     esac
+    case " ${SH_SPACE_ADVISED:-} " in
+        *" $sh_sa_status "*) return 0 ;;
+    esac
+    SH_SPACE_ADVISED="${SH_SPACE_ADVISED:-} $sh_sa_status"
     sh_sa_free=$(sh_free_mb "$sh_sa_dir" 2>/dev/null)
     case "$sh_sa_free" in ''|*[!0-9]*) sh_sa_free='?' ;; esac
+    # # STOP: THE ADVICE NAMES WHAT ACTUALLY HOLDS THE SPACE, IN THE ORDER THAT
+    # WORKS. `gc` is named second, not first, because on a root that is full of
+    # build output it reclaims nothing: measured here, `sandhome gc --dry-run`
+    # reported "nothing was removed" on a root where the space was in a rustc
+    # object files and a Go build cache the CONSUMER created. gc's own caches
+    # (`cache/`, `tmp/`, `go-bin/`) were 0 bytes. Telling someone to run gc first
+    # on a full root wastes the one moment they have, and then they run the real
+    # fix anyway.
     case "$sh_sa_status" in
         full)
-            sh_warn "$sh_sa_dir is FULL (0MB free). Builds and installs that write there will fail with 'no space left on device'. 'sandhome gc' reclaims sandhome's own caches; if that is not enough, re-run the setup with '--exec DIR' on a roomy exec-capable path, or set SANDHOME_EXEC to one."
+            sh_warn "$sh_sa_dir is FULL (0MB free). Builds and installs that write there fail with 'no space left on device'. The space is usually build output you own - a target/ directory, a GOCACHE, a staged tarball - so removing that is the first thing to try; 'du -sh $sh_sa_dir/* | sort -h | tail' names it. 'sandhome gc' then reclaims sandhome's own caches. If that is not enough, re-run the setup with '--exec DIR' on a roomy exec-capable path, or set SANDHOME_EXEC to one."
             ;;
         critical)
-            sh_warn "$sh_sa_dir has only ${sh_sa_free}MB free, which is not enough for a build. Set SANDHOME_EXEC to a roomy exec-capable path now (the exec root holds GOCACHE, GOBIN, CARGO_*, NPM_* and every build artifact), or run 'sandhome gc'. 'sandhome space --probe' lists candidates with their free space."
+            sh_warn "$sh_sa_dir has only ${sh_sa_free}MB free, which will not hold a build. The exec root carries GOCACHE, GOBIN, CARGO_TARGET_DIR, NPM_CONFIG_PREFIX and every build artifact, so it fills with YOUR output first: 'du -sh $sh_sa_dir/* | sort -h | tail' names what is holding it, and removing that is the first thing to try. 'sandhome gc' reclaims sandhome's own caches. To move everything: re-run the setup with '--exec DIR' naming a roomy exec-capable path. 'sandhome space --probe' lists the candidates with their free space."
             ;;
         low)
-            sh_warn "$sh_sa_dir has ${sh_sa_free}MB free, which is low for builds. If the next thing is a cross-target or release build it will run out; 'sandhome space --probe' lists roomier candidates and 'sandhome gc' reclaims sandhome's own caches."
+            sh_warn "$sh_sa_dir has ${sh_sa_free}MB free, which is low for builds. A cross-target or release build will run out. 'du -sh $sh_sa_dir/* | sort -h | tail' names what is holding it; 'sandhome space --probe' lists roomier candidates and 'sandhome gc' reclaims sandhome's own caches."
             ;;
     esac
     return 0

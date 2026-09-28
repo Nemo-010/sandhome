@@ -585,6 +585,52 @@ adv_ok=$(SH_TEST_FREE=200 SH_TEST_TOTAL=207 sh -c '
     sh_total_mb() { printf "%s" "$SH_TEST_TOTAL"; }
     sh_space_advise /anywhere' "$ROOT" 2>&1)
 t_is "$adv_ok" '' 'a healthy root produces no space advice at all'
+# It says it ONCE per process. Every toolchain that installs writes a fragment
+# and each write calls the adviser, so a --toolset agent run on a low root
+# produced the same line five times over. A repeated warning is not a louder
+# warning, it is noise that trains the reader to scroll past the one that
+# mattered.
+adv_rep=$(SH_TEST_FREE=36 SH_TEST_TOTAL=207 sh -c '
+    . "$0/lib/common.sh"; . "$0/lib/space.sh"
+    sh_free_mb() { printf "%s" "$SH_TEST_FREE"; }
+    sh_total_mb() { printf "%s" "$SH_TEST_TOTAL"; }
+    i=0
+    while [ $i -lt 5 ]; do sh_space_advise /anywhere; i=$((i+1)); done' "$ROOT" 2>&1)
+adv_lines=$(printf '%s\n' "$adv_rep" | grep -c 'MB free')
+t_is "$adv_lines" '1' 'a repeated low root is advised once per process, not once per call'
+# And a new process says it again, because a new command is a new chance to act.
+adv_again=$(SH_TEST_FREE=36 SH_TEST_TOTAL=207 sh -c '
+    . "$0/lib/common.sh"; . "$0/lib/space.sh"
+    sh_free_mb() { printf "%s" "$SH_TEST_FREE"; }
+    sh_total_mb() { printf "%s" "$SH_TEST_TOTAL"; }
+    sh_space_advise /anywhere' "$ROOT" 2>&1)
+case "$adv_again" in
+    *'MB free'*) t_ok 0 'a new process advises again about the same root (#60)' ;;
+    *) t_ok 1 'a new process advises again about the same root (#60)' ;;
+esac
+# A state change is NOT suppressed: low then critical must both be said, because
+# the second one is the one that means a build is about to fail.
+printf 36 > "$tmp/freefile"
+SH_TEST_FREEFILE="$tmp/freefile"; export SH_TEST_FREEFILE
+adv_both=$(sh -c '
+    . "$0/lib/common.sh"; . "$0/lib/space.sh"
+    # The free count is read from a FILE, not from an argument or a counter.
+    # sh_free_mb is called with no arguments, so a stub reading "$1" sees
+    # nothing; and it is called TWICE per advice (once for the state, once for
+    # the number in the message), so a counter flips the value halfway through a
+    # single call and reports a state that was never measured. A file is read as
+    # many times as it likes and changes only when the test changes it.
+    sh_free_mb()  { cat "$SH_TEST_FREEFILE"; }
+    sh_total_mb() { printf 207; }
+    sh_space_advise /anywhere
+    printf 5 > "$SH_TEST_FREEFILE"
+    sh_space_advise /anywhere' "$ROOT" 2>&1)
+# Counted on the substring BOTH messages carry, not on wording from one of them:
+# a pattern naming "low for builds" finds the first line and misses the
+# critical one, which reads "...has only 5MB free, which is not enough for a
+# build". Counting advice lines is the claim; the wording is free to change.
+adv_both_lines=$(printf '%s\n' "$adv_both" | grep -c 'MB free')
+t_is "$adv_both_lines" '2' 'a state change from low to critical is advised again (#60)'
 
 # --- class I: doctor fails on a draining root -------------------------------
 # # STOP: `low` IS A FAILURE AND NOT A NOTE, BECAUSE doctor IS THE GATE. ROUTE.md
@@ -662,6 +708,15 @@ case "$doc_ok_fail_n" in
         else
             t_ok 1 "a healthy root fails doctor fewer times than a low one (#60) ($doc_ok_fail_n vs $doc_fail_n)"
         fi ;;
+esac
+# An UNREADABLE root is a finding and not a pass. `df` failing on the exec root
+# means nothing can be measured about the one place every build artifact has to
+# land, and a silent pass on the thing that was not measured is the exact shape
+# of the defect this change exists to remove.
+doc_unk=$(SH_TEST_FREE=x SH_TEST_TOTAL=207 sh "$tmp/doc.sh" "$ROOT" x "$doc_home" 2>&1)
+case "$doc_unk" in
+    *'FAIL exec_space=unknown'*) t_ok 0 'doctor fails when the exec root cannot be measured (#60)' ;;
+    *) t_ok 1 "doctor fails when the exec root cannot be measured (#60) (got: $(printf '%s' "$doc_unk" | grep exec_space))" ;;
 esac
 # A full root is worse than low and is named as such.
 doc_full=$(SH_TEST_FREE=0 SH_TEST_TOTAL=207 sh "$tmp/doc.sh" "$ROOT" x "$doc_home" 2>&1)

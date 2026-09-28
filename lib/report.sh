@@ -245,12 +245,27 @@ sh_doctor() {
     # A note is read and dismissed; a non-zero exit is read.
     sh_doc_space=$(sh_space_status "${SH_EXEC:-/tmp}" 2>/dev/null)
     case "$sh_doc_space" in
-        ok|unknown) ;;
+        ok) ;;
+        unknown)
+            # # STOP: AN UNREADABLE ROOT IS A FINDING, NOT A PASS. `df` failing on
+            # the exec root means nothing can be measured about the one place
+            # every build artifact has to land, and the tree's own rule is that a
+            # question the machine will not answer is reported rather than
+            # assumed ("a read-only plan refuses by name rather than dying",
+            # "an empty answer rather than a wrong one"). Treating it as ok is the
+            # exact shape of the defect this change exists to remove: a silent
+            # pass on the thing that was not measured.
+            printf 'FAIL exec_space=unknown (df could not measure %s; builds may fail with "no space left on device". Run "sandhome space --probe" to see the candidates)\n' "${SH_EXEC:-/tmp}"
+            sh_doc_fail=$((sh_doc_fail + 1)) ;;
         *)
             sh_doc_free=$(sh_free_mb "${SH_EXEC:-/tmp}" 2>/dev/null)
             case "$sh_doc_free" in ''|*[!0-9]*) sh_doc_free='?' ;; esac
-            printf 'FAIL exec_space=%s (%sMB free; builds and installs will fail. Run "sandhome space --probe" for candidates, "sandhome gc" to reclaim, or re-run setup with --exec DIR)\n' \
-                "$sh_doc_space" "$sh_doc_free"
+            # `du` before `gc`, for the reason the adviser carries: on a root
+            # full of build output `gc` reclaims nothing, and it was measured
+            # that way here. The one line names the biggest thing on the root
+            # and the space it is worth.
+            printf 'FAIL exec_space=%s (%sMB free; builds and installs will fail. "du -sh %s/* | sort -h | tail" names what holds it, "sandhome gc" reclaims the caches sandhome owns, and re-running setup with --exec DIR moves everything. See "sandhome space --probe" for candidates)\n' \
+                "$sh_doc_space" "$sh_doc_free" "${SH_EXEC:-/tmp}"
             sh_doc_fail=$((sh_doc_fail + 1)) ;;
     esac
     printf 'doctor_failures=%s\n' "$sh_doc_fail"
