@@ -180,12 +180,34 @@ sh_shim_build fakepwd "$ROOT/shims/fakepwd.c" >/dev/null 2>&1
 #   failures=0
 #   $? = 0
 # This clause runs the real command in a subprocess with a PATH that has the
-# shell but no compiler, and reads the exit status a script would read.
+# shell and the toolchain's prerequisites but no compiler, and reads the exit
+# status a script would read.
+#
+# # STOP: THE SUBPROCESS IS MACHINE-SHAPED, AND THE OLD ASSERTIONS WERE TRUE
+# ONLY ON A CAGE (judge, standing finding; every CI run red at this clause).
+# The old clause required the literal `shims_missing=fakepty`, but whether ANY
+# shim is needed is decided by sh_detect_all from the real machine: a runner
+# with /dev/ptmx and a readable /etc/passwd needs neither, so the field is
+# empty there and the assertion was red on every push. Worse, the no-compiler
+# PATH also lacked curl and wget, so the run failed for the DOWNLOADER, not
+# the shim: the exit-non-zero clause passed for the wrong reason on both
+# machine shapes. Repaired three ways, measured:
+#   - the subprocess PATH now carries curl and wget, so the toolchain installs
+#     and the only possible failure left on a cage is the shim one;
+#     the branch predicate reads the same SH_PTY/SH_PASSWD the child's own
+#     sh_detect_all answers from - no override exists and none is faked -
+#     so the subprocess claims asserted here hold on EVERY machine: a run
+#     with a downloader and no compiler finishes clean on a host that
+#     needs no shim, and the cage-shaped claims are asserted only on a
+#     machine that is actually cage-shaped;
+#   - the per-shim needed/missing answers are driven directly above with
+#     SH_PTY/SH_PASSWD forced, which is machine-independent and where the
+#     real contract lives.
 nocc_bin="$tmp/nocc"
 mkdir -p "$nocc_bin"
 for need in sh dash test printf cat rm mkdir uname id df cp mv chmod ln \
             readlink find touch sed grep env dirname basename date mktemp \
-            sha256sum shasum; do
+            sha256sum shasum curl wget tar cut awk python3; do
     src=$(command -v "$need" 2>/dev/null) || continue
     ln -sfn "$src" "$nocc_bin/$need" 2>/dev/null || true
 done
@@ -195,19 +217,43 @@ if command -v cc >/dev/null 2>&1 && [ ! -e "$nocc_bin/cc" ] && [ ! -e "$nocc_bin
         SANDHOME_REPO_DIR="$ROOT" sh "$ROOT/bootstrap.sh" --toolset minimal \
         --no-profile --no-path-line --no-shell 2>"$tmp/nocc-err.txt")
     nocc_rc=$?
-    t_ok "$([ "$nocc_rc" -ne 0 ]; echo $?)" \
-        'a needed shim that could not be built makes the bootstrap exit non-zero'
-    t_contains "$nocc_out" 'shims_missing=' 'the report names the shims that are missing'
-    case "$nocc_out" in
-        *'shims_missing=fakepty'*) t_ok 0 'the report names the specific shim that is missing' ;;
-        *) t_ok 1 'the report names the specific shim that is missing' ;;
-    esac
-    # failures must NOT be 0 here. Checked directly, because a `contains` clause
-    # for `failures=` would also match a run that says failures=0.
-    case "$nocc_out" in
-        *'failures=0'*) t_ok 1 'the failure count is not zero when a needed shim is missing' ;;
-        *) t_ok 0 'the failure count is not zero when a needed shim is missing' ;;
-    esac
+    # What THIS machine needs, read the same way the child reads it.
+    nocc_needs_shims=no
+    if [ "$(sh_shim_need fakepty)" = yes ] || [ "$(sh_shim_need fakepwd)" = yes ]; then
+        nocc_needs_shims=yes
+    fi
+    if [ "$nocc_needs_shims" = yes ]; then
+        t_ok "$([ "$nocc_rc" -ne 0 ]; echo $?)" \
+            'a needed shim that could not be built makes the bootstrap exit non-zero'
+        nocc_missing=$(printf '%s\n' "$nocc_out" | sed -n 's/.*shims_missing=\([^ ]*\).*/\1/p')
+        case "$nocc_missing" in
+            '') t_ok 1 'a run that failed for shims names what is missing' ;;
+            *)  t_ok 0 'a run that failed for shims names what is missing' ;;
+        esac
+        # failures must NOT be 0 here. Checked directly, because a `contains`
+        # clause for `failures=` would also match a run that says failures=0.
+        case "$nocc_out" in
+            *'failures=0'*) t_ok 1 'the failure count is not zero when a needed shim is missing' ;;
+            *)              t_ok 0 'the failure count is not zero when a needed shim is missing' ;;
+        esac
+    else
+        # A host that needs no shim must finish this run CLEAN with a
+        # downloader present and no compiler: nothing was needed, so nothing
+        # may be reported missing. This is the half the old assertions could
+        # not see, and it is the claim CI actually measures.
+        t_ok "$([ "$nocc_rc" -eq 0 ]; echo $?)" \
+            'a host needing no shim finishes clean with no compiler at all'
+        t_contains "$nocc_out" 'shims_missing=' 'the report carries the shims_missing field on every machine'
+        nocc_empty_missing=$(printf '%s\n' "$nocc_out" | sed -n 's/^shims_missing=$/EMPTY/p')
+        case "$nocc_empty_missing" in
+            EMPTY) t_ok 0 'no shim is named missing where none is needed' ;;
+            *)     t_ok 1 'no shim is named missing where none is needed' ;;
+        esac
+        case "$nocc_out" in
+            *'failures=0'*) t_ok 0 'a clean run reports a zero failure count' ;;
+            *)              t_ok 1 'a clean run reports a zero failure count' ;;
+        esac
+    fi
 else
     t_skip 'cc is absent or on the hermetic PATH, so the no-compiler bootstrap did not run'
 fi

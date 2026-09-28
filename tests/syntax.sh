@@ -41,6 +41,12 @@ rm -f /tmp/sandhome-syntax.err
 # installing the missing tools cannot require them first. sh_dirname in
 # lib/common.sh is the shell-only equivalent. This scans code lines, not
 # comments, so a comment naming dirname does not fail.
+# SCOPE, stated so a future edit does not assume it is wider: the rule lives in
+# AGENTS.md rule 4 for "the library", so lib/*.sh and the pre-library
+# bootstrap.sh are scanned. bin/sandhome, tools/*.sh and shell/errandsh load
+# the library before doing anything and carry no dirname today; if one ever
+# grows a dirname call, extend the loop rather than assuming the guard is
+# already there.
 for f in "$ROOT"/lib/*.sh "$ROOT"/bootstrap.sh; do
     [ -f "$f" ] || continue
     rel=${f#"$ROOT"/}

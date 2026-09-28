@@ -168,22 +168,36 @@ sh_trim() {
 
 # sh_dirname PATH -> the parent directory of PATH, without the dirname
 # binary, which minimal userlands lack. A bare filename answers `.`, like
-# dirname; a trailing slash is ignored; `/` stays `/`. This is the one place
+# dirname; trailing slashes are stripped; `/` stays `/`. This is the one place
 # the expansion lives so no other lib file reaches for dirname again.
-# STOP: `${x%/*}` ALONE IS NOT dirname: it leaves a bare filename unchanged
-# where dirname answers `.`. Measured: `${x%/*}` on `.sandhome-build.123` is
-# the input, dirname is `.`. The case below restores the `.` so callers get
-# dirname semantics from the shell alone (issue #16).
+# STOP: TWO EXPANSIONS ALONE ARE NOT dirname, MEASURED BOTH WAYS. `${x%/*}`
+# leaves a bare filename unchanged where dirname answers `.` (measured:
+# `${x%/*}` on `.sandhome-build.123` is the input), and a single trailing-slash
+# strip leaves doubled internal slashes where dirname collapses them (measured:
+# `dirname -- a//b` is `a`, `${x%/*}` on `a//b` is `a/`). The loops below do
+# what dirname does: strip EVERY trailing slash, then drop the last component
+# and strip the slashes it exposed (issue #16, and the judge's `a//b` finding).
 sh_dirname() {
     sh_dn_p=$1
     case "$sh_dn_p" in
         '') printf '.'; return 0 ;;
     esac
-    sh_dn_p=${sh_dn_p%/}
+    while :; do
+        case "$sh_dn_p" in
+            */) sh_dn_p=${sh_dn_p%/} ;;
+            *) break ;;
+        esac
+    done
     case "$sh_dn_p" in
         '') printf '/'; return 0 ;;
         */*)
             sh_dn_d=${sh_dn_p%/*}
+            while :; do
+                case "$sh_dn_d" in
+                    */) sh_dn_d=${sh_dn_d%/} ;;
+                    *) break ;;
+                esac
+            done
             [ -n "$sh_dn_d" ] || sh_dn_d='/'
             printf '%s' "$sh_dn_d"
             return 0 ;;

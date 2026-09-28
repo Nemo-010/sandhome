@@ -10,8 +10,15 @@
 # sh_tool_runs NAME [ARGS...] -> 0 when NAME resolves AND runs. `command -v`
 # answers about PATH, not about whether the binary works: a BusyBox wget
 # resolves and then rejects GNU flags, a function shadows a tool, a broken
-# symlink resolves and then fails. Every capability probe in this file goes
-# through here (issues #3, #9): presence is claimed only after execution.
+# symlink resolves and then fails. Capability probes in this file go through
+# here (issues #3, #9), with TWO named exceptions, both deliberate:
+#   sh_downloader_ok fetch -> `sh_have fetch`: BSD fetch has no stable probe
+#     flag, so resolution is the probe and the fetch itself is the test.
+#   sh_curl_dns_exit -> opens with `sh_have curl`: a presence test before a
+#     measured exit code, not a substitute for one; the DoH gate then runs the
+#     real probe.
+# A new capability probe belongs here unless it has a reason this good, stated
+# beside it.
 sh_tool_runs() {
     sh_tr_name=$1
     shift
@@ -33,6 +40,26 @@ sh_wget_flavor() {
         *'GNU Wget'*) printf 'gnu'; return 0 ;;
     esac
     printf 'unknown'
+}
+
+# sh_wget_fetch URL DEST FLAVOR -> 0 when the wget whose flavor is FLAVOR
+# fetched URL. The flavor decides the argv, which is the whole point of
+# detecting it (issue #3): GNU wget and BusyBox/toybox wget share `-q -O`,
+# but a BusyBox build rejects `--tries`/`--timeout`, and a version whose
+# --help names nothing (the `unknown` answer, e.g. a shadow that prints
+# nothing) gets the lowest-common-denominator spelling and no retries, so
+# a present-but-strict wget is never handed a flag it must reject.
+sh_wget_fetch() {
+    sh_wgf_url=$1
+    sh_wgf_dest=$2
+    case "$3" in
+        gnu)
+            wget -q --tries=3 --timeout=30 -O "$sh_wgf_dest" "$sh_wgf_url" 2>/dev/null
+            ;;
+        *)
+            wget -q -O "$sh_wgf_dest" "$sh_wgf_url" 2>/dev/null
+            ;;
+    esac
 }
 
 # sh_downloader_ok NAME -> 0 when NAME can be used for a download here.
@@ -116,11 +143,22 @@ sh_curl_dns_exit() {
     return 0
 }
 
-# sh_resolver_failed_twice -> 0 only when curl answers exit 6 twice in a row
-# against a known host. One exit 6 is a coincidence not yet noticed; a
-# resolver answering for any known host means 'not our problem' and refuses.
+# sh_resolver_failed_twice [CANARY_URL] -> 0 only when curl answers exit 6
+# twice in a row against a known host. One exit 6 is a coincidence not yet
+# noticed; a resolver answering for any known host means 'not our problem' and
+# refuses. The canary is the URL that just failed when the caller hands one
+# in (sh_fetch_via_doh passes its URL), so the two probes spend their time on
+# the host that matters and prove the thing that failed; a canary like github
+# on a cage where github is unreachable answered 'network dead', not 'DNS
+# dead', and the gate then refused a retry that would have worked. Override:
+# SANDHOME_DOH_CANARY. Each probe is bounded by sh_curl_dns_exit's timeouts.
+# The canary default is a real variable with a real default, and NOT a nested
+# expression, so the generated reference can read it (the extractor greps a
+# `:=` assignment; a default buried in ${1:-${VAR:-...}} parsed as unset and
+# the table lied).
+: "${SANDHOME_DOH_CANARY:=https://github.com}"
 sh_resolver_failed_twice() {
-    sh_rf_canary=${SANDHOME_DOH_CANARY:-https://github.com}
+    sh_rf_canary=${1:-$SANDHOME_DOH_CANARY}
     sh_rf_first=$(sh_curl_dns_exit "$sh_rf_canary")
     [ "$sh_rf_first" = 6 ] || return 1
     sh_rf_second=$(sh_curl_dns_exit "$sh_rf_canary")
@@ -145,7 +183,7 @@ sh_fetch_via_doh() {
     if ! sh_doh_pinned "$SANDHOME_DOH_URL"; then
         sh_warn "SANDHOME_DOH_URL names a host ($(sh_doh_host_of "$SANDHOME_DOH_URL")), which still needs DNS; prefer an IP literal such as https://1.1.1.1/dns-query"
     fi
-    if ! sh_resolver_failed_twice; then
+    if ! sh_resolver_failed_twice "$sh_fd_url"; then
         return 1
     fi
     if curl -fSL --retry 2 --retry-delay 2 --doh-url "$SANDHOME_DOH_URL" \
@@ -178,15 +216,13 @@ sh_fetch() {
     fi
     if sh_downloader_ok wget; then
         sh_f_flavor=$(sh_wget_flavor)
-        case "$sh_f_flavor" in
-            busybox|toybox) sh_f_wget_ok=0
-                wget -q -O "$sh_f_dest" "$sh_f_url" 2>/dev/null && sh_f_wget_ok=1 ;; 
-            *) sh_f_wget_ok=0
-                wget -q -O "$sh_f_dest" "$sh_f_url" 2>/dev/null && sh_f_wget_ok=1 ;;
-        esac
-        if [ "$sh_f_wget_ok" = 1 ] && [ -s "$sh_f_dest" ]; then
-            sh_step "Downloaded from: $sh_f_url with wget ($sh_f_flavor)"
-            return 0
+        # STOP: THE FLAVOR DECIDES THE ARGV. A first version had a `case` whose
+        # arms were byte-for-byte identical, so the tree detected the flavor,
+        # printed it, and did not act on it - the defect the issue was filed
+        # about, wearing the costume of a fix. sh_wget_fetch owns the spelling;
+        # see its comment for why each arm differs.
+        if sh_wget_fetch "$sh_f_url" "$sh_f_dest" "$sh_f_flavor"; then
+            [ -s "$sh_f_dest" ] && { sh_step "Downloaded from: $sh_f_url with wget ($sh_f_flavor)"; return 0; }
         fi
         sh_warn "wget ($sh_f_flavor) could not fetch $sh_f_url; trying the next downloader"
     fi
@@ -526,20 +562,17 @@ sh_pin_from() {
 # ------------------------------------------------- manifest shapes --
 # Validate every field of a downloaded manifest by shape and drop the record
 # if any one fails (issue #10, TcpQuality runTcpQuality-rootfs.sh shape): a
-# non-empty name, a 64-char all-hex digest, an all-digit size. The length is
-# counted and the class is matched WITHOUT an interval quantifier: the
-# reference's own PR #13 is titled 'make rootfs manifest parsing portable'
-# because `{64}` is not portable across awks, and a validator written with
-# one implementation's regex is itself the portability bug.
+# non-empty name and a 64-char all-hex digest. The reference also validates an
+# all-digit size; sandhome's manifests (go.dev JSON, nodejs.org SHASUMS256.txt)
+# carry no size field, so that third validator would have no caller here and
+# one was not written: a validator that exists only to be tested is a guard
+# that cannot fail. Add one beside these if a module ever parses a size.
+# The length is counted and the class is matched WITHOUT an interval
+# quantifier: the reference's own PR #13 is titled 'make rootfs manifest
+# parsing portable' because `{64}` is not portable across awks, and a
+# validator written with one implementation's regex is itself the portability
+# bug.
 sh_is_nonempty() { [ -n "${1:-}" ]; }
-
-sh_is_digits() {
-    case "${1:-}" in
-        '') return 1 ;;
-        *[!0-9]*) return 1 ;;
-        *) return 0 ;;
-    esac
-}
 
 sh_is_hex64() {
     sh_hx=${1:-}
@@ -601,6 +634,16 @@ sh_expected_wellformed() {
 sh_fetch_verified() {
     sh_fv_url=$1
     sh_fv_dest=$2
+    # STOP: THE DIGEST TOOL IS RESOLVED BEFORE THE BYTES MOVE (issues #4, #5).
+    # `SANDHOME_REQUIRE_DIGEST=1` used to refuse only AFTER the download had
+    # run, so a machine with no sha256 tool paid the whole transfer and then
+    # failed - the LemonBench shape, failing part-way through instead of
+    # naming the prerequisite up front. One lookup here, before anything
+    # expensive; the preflight discipline of issue #5, one line of it.
+    if [ "${SANDHOME_REQUIRE_DIGEST:-0}" = 1 ] && [ -z "$(sh_sha256_which)" ]; then
+        sh_fail "SANDHOME_REQUIRE_DIGEST is set and no sha256 tool is present; refusing $sh_fv_url before downloading it"
+        return 1
+    fi
     # # STOP: EVERY OPERAND IS BRACED, BECAUSE `set -u` IS A RUNTIME ABORT AND NOT
     # A LINT WARNING. Three shapes of this line were live at once. `X=the
     # release` with an unquoted value is word-split by dash into a command:

@@ -179,6 +179,15 @@ sh_toolchain_order() {
 # a measurement. A downloader that cannot fetch and an exec root that cannot
 # run are both refused up front with the install line attached, so the
 # failure reads as a prerequisite and not as a transport error.
+#
+# The exec half, read precisely (the judge's finding 5-A): the exec VIEW is
+# the thing that must run, because the installer writes binaries where the
+# view links from. The clause below is a fallback for the arm where the view
+# is unset or itself cannot run - then the ROOT is probed as a second
+# opinion. When the view is set and good, the clause is deliberately skipped:
+# the view was chosen because it execs, so re-probing the root would be a
+# no-op reading as a second opinion. The message names the path that was
+# actually probed, not the root the reader might assume.
 sh_toolchain_preflight() {
     sh_tpf_name=$1
     if ! sh_downloader_ok curl && ! sh_downloader_ok wget && ! sh_downloader_ok fetch; then
@@ -190,9 +199,10 @@ sh_toolchain_preflight() {
         fi
         return 1
     fi
-    if [ -n "${SH_EXEC:-}" ] && ! sh_exec_probe "${SH_EXEC_BIN:-$SH_EXEC}" 2>/dev/null; then
+    sh_tpf_probed=${SH_EXEC_BIN:-$SH_EXEC}
+    if [ -n "${SH_EXEC:-}" ] && ! sh_exec_probe "$sh_tpf_probed" 2>/dev/null; then
         if ! sh_exec_probe "$SH_EXEC" 2>/dev/null; then
-            sh_fail "toolchain $sh_tpf_name needs an exec-capable root and $SH_EXEC will not run a file"
+            sh_fail "toolchain $sh_tpf_name needs an exec-capable root and $sh_tpf_probed will not run a file (probed: $sh_tpf_probed)"
             return 1
         fi
     fi

@@ -51,7 +51,7 @@ One pin per download, resolved in this order. The first match wins.
 | order | source | example |
 | --- | --- | --- |
 | 1 | `SANDHOME_SHA256_<NAME>`, the toolchain name upper-cased | `SANDHOME_SHA256_RIPGREP` |
-| 2 | `SANDHOME_SHA256_<ASSET>`, the URL's last path segment, upper-cased, extension stripped, hyphens turned into underscores | `SANDHOME_SHA256_JQ_LINUX_AMD64` |
+| 2 | `SANDHOME_SHA256_<ASSET>`, the URL's last path segment, upper-cased, its LAST extension stripped, hyphens turned into underscores | `SANDHOME_SHA256_JQ_LINUX_AMD64` |
 | 3 | the value the **publisher** published beside the bytes | go.dev `dl/?mode=json`, nodejs.org `SHASUMS256.txt` |
 | 4 | `SANDHOME_SHA256`, the bare value | a default for one-download runs |
 

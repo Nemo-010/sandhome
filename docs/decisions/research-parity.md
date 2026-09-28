@@ -15,7 +15,7 @@ pasted anywhere below or in the tree.
 
 | reference | mechanism | where it lives |
 | --- | --- | --- |
-| `hackerschoice/hackshell` (#3) | capability probe: run `wget --help`, pick GNU vs BusyBox spelling by literal, every fallback under one function name | `sh_tool_runs`, `sh_wget_flavor`, `sh_downloader_ok`, fallthrough `sh_fetch` in `lib/fetch.sh`; minimal twin `sh_fr_runs`/`sh_fr_fetch` in `bootstrap.sh` |
+| `hackerschoice/hackshell` (#3) | capability probe: run `wget --help`, pick GNU vs BusyBox spelling by literal AND fetch with the matching argv, every fallback under one function name | `sh_tool_runs`, `sh_wget_flavor`, `sh_wget_fetch`, `sh_downloader_ok`, fallthrough `sh_fetch` in `lib/fetch.sh`; minimal twin `sh_fr_runs`/`sh_fr_fetch` in `bootstrap.sh` |
 | `oneclickvirt/ecs` (#6) | DoH bootstrap gated on a confirmed resolver failure; endpoint a variable, fallback off unless asked | `sh_fetch_via_doh` and gate in `lib/fetch.sh`; `SANDHOME_DOH_URL`, `bootstrap.sh --doh-url` |
 | `ibsgss/TcpQuality` (#10) | shape-validate every manifest field, drop the record on any failure; check before unpacking; third-party bytes state version, source and digest | `sh_is_hex64`/`sh_is_digits`/`sh_is_nonempty` in `lib/fetch.sh`; validated in `tools/go.sh` and `tools/node.sh`; `NOTICE` |
 | `masonr/yet-another-bench-script` (#8) | default a nullable field before formatting it | defaults in `lib/report.sh` |

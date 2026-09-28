@@ -29,11 +29,28 @@ DOCS="$ROOT/AGENTS.md
       $ROOT/skills/errandsh/SKILL.md
       $ROOT/skills/sealed-sandbox/SKILL.md"
 
+# THE DECISION PAGES ARE DOCUMENTATION TOO, AND THEY CLAIM FILES, FLAGS,
+# VARIABLES AND SUBCOMMANDS LIKE EVERY OTHER PAGE (issues #2, #11, #15). They
+# were once read only by the foreign-reference check below, so a table cell
+# naming a function that had moved, or a variable nothing reads, got no signal
+# - measured by planting four false claims in docs/decisions/research-parity.md
+# and watching four of five pass. Every per-document loop below iterates
+# $DOCS plus the decisions glob, so the pages are held to the same standard as
+# the documents that route to them.
+decision_docs() {
+    for _dd in "$ROOT"/docs/decisions/*.md; do
+        [ -f "$_dd" ] && printf '%s\n' "$_dd"
+    done
+}
+
 t_begin docs
 
 # every document the reader may act on must itself exist
 missing=''
 for doc in $DOCS; do
+    [ -r "$doc" ] || missing="$missing ${doc##*/}"
+done
+for doc in $(decision_docs); do
     [ -r "$doc" ] || missing="$missing ${doc##*/}"
 done
 t_is "$missing" '' 'every document exists'
@@ -47,7 +64,7 @@ t_is "$missing" '' 'every document exists'
 # tree's directories and is not there is a defect, and that is the case this
 # check exists for: a document naming a file that was deleted.
 bad_paths=''
-for doc in $DOCS; do
+for doc in $DOCS $(decision_docs); do
     [ -r "$doc" ] || continue
     for tok in $(tr '`' '\n' < "$doc" 2>/dev/null | grep '/' 2>/dev/null); do
         # Strip a trailing slash and anything after the first space or quote.
@@ -108,7 +125,7 @@ code_flags=$(
     } 2>/dev/null | sort -u
 )
 bad_flags=''
-for doc in $DOCS; do
+for doc in $DOCS $(decision_docs); do
     [ -r "$doc" ] || continue
     # A flag claim in a document is a `--word` immediately followed by a space
     # and then a word, which is how a reader is told to type it: `--toolset NAME`,
@@ -129,7 +146,7 @@ t_is "$bad_flags" '' 'every flag a document names is accepted by an argument par
 # --- 3: every SANDHOME_/ERRANDSH_ variable a document names must be real ----
 # Real means the identifier appears somewhere in the shell sources.
 bad_vars=''
-for doc in $DOCS; do
+for doc in $DOCS $(decision_docs); do
     [ -r "$doc" ] || continue
     for var in $(tr '`' '\n' < "$doc" | grep -E '^(SANDHOME|ERRANDSH)_[A-Z0-9_]+$' 2>/dev/null | sort -u); do
         if grep -rlq "$var" "$ROOT"/lib "$ROOT"/tools "$ROOT"/bootstrap.sh \
@@ -155,7 +172,7 @@ code_cmds=$(sed -n '/^case "${1:-help}" in/,/^esac/p' "$ROOT/bin/sandhome" 2>/de
     sed -n 's/^ *\([a-z][a-z|-]*\)) .*/\1/p' |
     tr '|' '\n' | grep '^[a-z][a-z-]*$' | sort -u)
 bad_cmds=''
-for doc in $DOCS; do
+for doc in $DOCS $(decision_docs); do
     [ -r "$doc" ] || continue
     for cmd in $(grep -o '^sandhome [a-z][a-z-]*' "$doc" 2>/dev/null |
                  awk '{print $2}' | sort -u); do
@@ -198,7 +215,7 @@ rm -f "$ref_tmp" 2>/dev/null
 # that names a file in prose, without backticks, in a form the token scan
 # above would miss.
 bad_refs=''
-for doc in $DOCS; do
+for doc in $DOCS $(decision_docs); do
     [ -r "$doc" ] || continue
     for ref in $(grep -oE '(bin|lib|tools|tests|docs|skills|shims|shell|\.github)/[a-zA-Z0-9_./-]*\.(md|sh|py|c|patch|yml)' "$doc" 2>/dev/null |
                  sort -u); do
@@ -212,7 +229,7 @@ t_is "$bad_refs" '' 'every file reference a document makes exists'
 # claims to have is worse than one that never mentioned the file. The check is
 # over the whole tree, so a reference added to a decision page is caught too.
 foreign=''
-for doc in $DOCS "$ROOT"/docs/decisions/*.md; do
+for doc in $DOCS $(decision_docs); do
     [ -r "$doc" ] || continue
     for repo in podbox tailscale podbox-ssh sandssh; do
         if grep -qi "$repo" "$doc" 2>/dev/null; then

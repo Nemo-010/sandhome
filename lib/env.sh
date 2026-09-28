@@ -178,6 +178,11 @@ sh_pref_get() {
     sh_pg_val=''
     sh_pg_found=0
     while IFS= read -r sh_pg_line || [ -n "$sh_pg_line" ]; do
+        # A hand-edited prefs.sh may carry CRLF endings; strip the carriage
+        # return the same way read does not (issue #17, judge finding 17-A),
+        # or the value reads back with a literal \r attached.
+        sh_pg_cr=$(printf '\r')
+        sh_pg_line=${sh_pg_line%"$sh_pg_cr"}
         case "$sh_pg_line" in
             "export $sh_pg_name="*)
                 sh_pg_val=${sh_pg_line#"export $sh_pg_name="}
@@ -192,6 +197,14 @@ sh_pref_get() {
     [ "$sh_pg_found" = 1 ] || return 1
     # The stored form is a single-quoted shell word; re-read it the way a
     # shell would rather than stripping quotes by hand.
+    # TRUST, stated plainly (judge finding 17-B): the value below is data read
+    # off disk and spliced into a command line. It is safe for every value
+    # sh_pref_set writes, because those are single-quoted by sh_sq_quote. A
+    # HAND-WRITTEN unquoted line like `NAME=x; rm -rf ~` WOULD be executed by
+    # this shell read; prefs.sh sits under $SH_HOME at 0644, so that is a
+    # person editing their own file, not a privilege boundary - but it is the
+    # one place in this tree where a file value becomes a command. Do not call
+    # sh_pref_get on a prefs.sh you did not write.
     sh_pg_out=$(sh -c "printf '%s' $sh_pg_val" 2>/dev/null) || return 1
     printf '%s' "$sh_pg_out"
     return 0
