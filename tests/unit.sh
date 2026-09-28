@@ -126,6 +126,40 @@ t_is "$(sh_sq_quote "/a'b/c")" "'/a'\\''b/c'" 'sq_quote escapes an apostrophe'
 q=$(sh_sq_quote "/a'b c")
 t_is "$(sh -c "printf '%s' $q")" "/a'b c" 'the quoted form reads back byte for byte'
 
+# sh_dirname without dirname (issue #16). dirname semantics for bare names:
+# `${x%/*}` alone leaves them unchanged where dirname answers `.`.
+t_is "$(sh_dirname /a/b/c)" '/a/b' 'dirname of a nested path is its parent'
+t_is "$(sh_dirname /a/b/.shim-build.123)" '/a/b' 'dirname of the shim error path is its parent'
+t_is "$(sh_dirname .sandhome-build.123)" '.' 'dirname of a bare filename is dot'
+t_is "$(sh_dirname /)" '/' 'dirname of root stays root'
+t_is "$(sh_dirname /a)" '/' 'dirname of a top-level entry is root'
+# The shim build must succeed with no dirname on PATH: the fallback used to
+# degrade the mkdir target to `.` and swallow it with 2>/dev/null || true.
+nd_bin="$tmp/nodirname-bin"
+mkdir -p "$nd_bin"
+for nd_t in sh dash cc gcc as ld chmod cp mv rm mkdir cat uname id; do
+    if command -v "$nd_t" >/dev/null 2>&1; then
+        ln -sf "$(command -v "$nd_t")" "$nd_bin/$nd_t" 2>/dev/null || true
+    fi
+done
+if [ -x "$nd_bin/cc" ] || [ -x "$nd_bin/gcc" ]; then
+    cat > "$tmp/nd-run.sh" <<EOF
+. "$ROOT/lib/common.sh"
+. "$ROOT/lib/shim.sh"
+mkdir -p "\$SH_HOME_TMP"
+sh_shim_build fakepty "$ROOT/shims/fakepty.c"
+EOF
+    nd_out=$(PATH="$nd_bin" SH_HOME="$tmp/ndhome" SH_HOME_TMP="$tmp/ndhome/tmp" SH_PTY=no SH_PASSWD=yes sh "$tmp/nd-run.sh" 2>&1)
+    nd_rc=$?
+    t_is "$nd_rc" 0 'shim build succeeds with dirname off PATH'
+    case "$nd_out" in
+        *'built '*) t_ok 0 'shim build reports the built object with dirname off PATH' ;;
+        *) t_ok 1 "shim build reports the built object with dirname off PATH ($nd_out)" ;;
+    esac
+else
+    t_skip 'no compiler to drive the dirname-less shim build'
+fi
+
 # sh_lex_normalize: the mirrored-symlink rule rests on it, so a wrong answer here
 # is a symlink pointing at the wrong file in every exec view.
 t_is "$(sh_lex_normalize /a/b/../c)" '/a/c' 'lex_normalize resolves a parent'

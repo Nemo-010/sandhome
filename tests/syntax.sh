@@ -36,4 +36,24 @@ for f in "$ROOT"/bootstrap.sh "$ROOT"/bin/sandhome "$ROOT"/lib/*.sh \
     fi
 done
 rm -f /tmp/sandhome-syntax.err
+
+# The library may not use dirname (issue #16): a bootstrap whose job is
+# installing the missing tools cannot require them first. sh_dirname in
+# lib/common.sh is the shell-only equivalent. This scans code lines, not
+# comments, so a comment naming dirname does not fail.
+for f in "$ROOT"/lib/*.sh "$ROOT"/bootstrap.sh; do
+    [ -f "$f" ] || continue
+    rel=${f#"$ROOT"/}
+    if grep -v '^[[:space:]]*#' "$f" 2>/dev/null | grep -qE '(^|[^a-zA-Z0-9_.])dirname([^a-zA-Z0-9_.]|$)' 2>/dev/null; then
+        t_ok 1 "$rel invokes dirname on a code line; use sh_dirname from lib/common.sh"
+    else
+        t_ok 0 "$rel carries no dirname dependency"
+    fi
+done
+# The guard above must be able to fail: a planted dirname line is reported.
+if printf 'x=$(dirname -- "$y")\n' | grep -qE '(^|[^a-zA-Z0-9_.])dirname([^a-zA-Z0-9_.]|$)' 2>/dev/null; then
+    t_ok 0 'the dirname guard catches a planted dirname invocation'
+else
+    t_ok 1 'the dirname guard catches a planted dirname invocation'
+fi
 t_end

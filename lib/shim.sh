@@ -50,7 +50,9 @@ sh_shim_build() {
     # and printed, and a build that failed for a reason outside this tree says so
     # rather than naming this tree.
     sh_sb_err=${SH_HOME_TMP:-$SH_HOME/tmp}/.shim-build.$$
-    mkdir -p "$(dirname -- "$sh_sb_err" 2>/dev/null || printf '%s' .)" 2>/dev/null || true
+    # No dirname: the library may not require it (issue #16); sh_dirname is
+    # the shell-only equivalent with dirname semantics for bare names.
+    mkdir -p "$(sh_dirname "$sh_sb_err")" 2>/dev/null || true
     if "$sh_sb_cc" -shared -fPIC -O2 -o "$sh_sb_out" "$sh_sb_src" 2>"$sh_sb_err"; then
         rm -f "$sh_sb_err" 2>/dev/null
         sh_step "built $sh_sb_out"

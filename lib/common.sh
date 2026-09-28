@@ -166,6 +166,31 @@ sh_trim() {
     printf '%s' "$sh_tr_out"
 }
 
+# sh_dirname PATH -> the parent directory of PATH, without the dirname
+# binary, which minimal userlands lack. A bare filename answers `.`, like
+# dirname; a trailing slash is ignored; `/` stays `/`. This is the one place
+# the expansion lives so no other lib file reaches for dirname again.
+# STOP: `${x%/*}` ALONE IS NOT dirname: it leaves a bare filename unchanged
+# where dirname answers `.`. Measured: `${x%/*}` on `.sandhome-build.123` is
+# the input, dirname is `.`. The case below restores the `.` so callers get
+# dirname semantics from the shell alone (issue #16).
+sh_dirname() {
+    sh_dn_p=$1
+    case "$sh_dn_p" in
+        '') printf '.'; return 0 ;;
+    esac
+    sh_dn_p=${sh_dn_p%/}
+    case "$sh_dn_p" in
+        '') printf '/'; return 0 ;;
+        */*)
+            sh_dn_d=${sh_dn_p%/*}
+            [ -n "$sh_dn_d" ] || sh_dn_d='/'
+            printf '%s' "$sh_dn_d"
+            return 0 ;;
+        *) printf '.'; return 0 ;;
+    esac
+}
+
 # sh_sq_quote STRING -> STRING wrapped for safe re-reading by a shell. A single
 # quote cannot appear inside single quotes, so the quote is closed, escaped and
 # reopened. Used for every path written into env.sh and profile.sh; a home with
