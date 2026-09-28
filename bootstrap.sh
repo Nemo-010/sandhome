@@ -130,20 +130,50 @@ sh_bootstrap_refetch() {
 # none of the three failed with "could not fetch" and no hint that the missing
 # program was the reason. "apt-get install curl" is the whole fix, and a
 # bootstrap that cannot say so is a bootstrap that wastes a session.
+sh_fr_runs() {
+    sh_fr_bin=$1
+    shift
+    command -v "$sh_fr_bin" >/dev/null 2>&1 || return 1
+    "$sh_fr_bin" "$@" >/dev/null 2>&1
+    return $?
+}
+
 sh_fr_which() {
-    if command -v curl >/dev/null 2>&1;  then printf 'curl';  return 0; fi
-    if command -v wget >/dev/null 2>&1;  then printf 'wget';  return 0; fi
+    if sh_fr_runs curl --version; then printf 'curl';  return 0; fi
+    if sh_fr_runs wget --help;   then printf 'wget';  return 0; fi
     if command -v fetch >/dev/null 2>&1; then printf 'fetch'; return 0; fi
     printf ''
 }
 
+# STOP: A FAILED ATTEMPT FALLS THROUGH TO THE NEXT TOOL (issue #3). The old
+# form chose one tool and returned its status, so a curl that exists but
+# fails never tried wget, and the self-fetch died where a fallback would
+# have succeeded. Each failure names its tool; success names its route.
 sh_fr_fetch() {
-    sh_fr_tool=$(sh_fr_which)
-    case "$sh_fr_tool" in
-        curl)  curl -fSL --retry 3 --retry-delay 2 -o "$2" "$1"; return $? ;;
-        wget)  wget -q -O "$2" "$1"; return $? ;;
-        fetch) fetch -q -o "$2" "$1"; return $? ;;
-    esac
+    if sh_fr_runs curl --version; then
+        if curl -fSL --retry 3 --retry-delay 2 -o "$2" "$1" 2>/dev/null && [ -s "$2" ]; then
+            sh_fr_tool=curl
+            printf 'bootstrap: fetched with curl from %s\n' "$1" >&2
+            return 0
+        fi
+        printf 'bootstrap: curl could not fetch %s; trying the next downloader\n' "$1" >&2
+    fi
+    if sh_fr_runs wget --help; then
+        if wget -q -O "$2" "$1" 2>/dev/null && [ -s "$2" ]; then
+            sh_fr_tool=wget
+            printf 'bootstrap: fetched with wget from %s\n' "$1" >&2
+            return 0
+        fi
+        printf 'bootstrap: wget could not fetch %s; trying the next downloader\n' "$1" >&2
+    fi
+    if command -v fetch >/dev/null 2>&1; then
+        if fetch -q -o "$2" "$1" 2>/dev/null && [ -s "$2" ]; then
+            sh_fr_tool=fetch
+            printf 'bootstrap: fetched with fetch from %s\n' "$1" >&2
+            return 0
+        fi
+        printf 'bootstrap: fetch could not fetch %s\n' "$1" >&2
+    fi
     printf 'bootstrap: [-] no curl, wget or fetch on PATH, so nothing can be downloaded\n' >&2
     printf 'bootstrap:     install one of them first: apt-get install curl, apk add curl,\n' >&2
     printf 'bootstrap:     dnf install curl, or pacman -S curl\n' >&2

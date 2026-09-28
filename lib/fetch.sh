@@ -7,23 +7,120 @@
 # truncates a download; `SANDHOME_SHA256` adds the stronger pinned check back for
 # a caller who holds the value.
 
+# sh_tool_runs NAME [ARGS...] -> 0 when NAME resolves AND runs. `command -v`
+# answers about PATH, not about whether the binary works: a BusyBox wget
+# resolves and then rejects GNU flags, a function shadows a tool, a broken
+# symlink resolves and then fails. Every capability probe in this file goes
+# through here (issues #3, #9): presence is claimed only after execution.
+sh_tool_runs() {
+    sh_tr_name=$1
+    shift
+    sh_have "$sh_tr_name" || return 1
+    "$sh_tr_name" "$@" >/dev/null 2>&1
+    return $?
+}
+
+# sh_wget_flavor -> gnu, busybox, toybox or unknown. Reads `wget --help` on
+# stdout+stderr and picks the spelling by which literal appears (issue #3,
+# hackshell hs_init_dl shape): GNU vs BusyBox take different option
+# spellings, and trusting one spelling for all three is how a present
+# downloader fails every download it is given.
+sh_wget_flavor() {
+    sh_wf_help=$(wget --help 2>&1) || { printf 'unknown'; return 0; }
+    case "$sh_wf_help" in
+        *BusyBox*) printf 'busybox'; return 0 ;;
+        *toybox*) printf 'toybox'; return 0 ;;
+        *'GNU Wget'*) printf 'gnu'; return 0 ;;
+    esac
+    printf 'unknown'
+}
+
+# sh_downloader_ok NAME -> 0 when NAME can be used for a download here.
+# curl must answer --version (a shadow that prints nothing is not curl);
+# wget must answer --help (which also feeds sh_wget_flavor); BSD fetch has
+# no stable probe flag, so resolution is the probe and the fetch itself is
+# the test. Callers never branch on names: sh_fetch tries each in turn.
+sh_downloader_ok() {
+    case "$1" in
+        curl) sh_tool_runs curl --version ;;
+        wget) sh_tool_runs wget --help ;;
+        fetch) sh_have fetch ;;
+        *) return 1 ;;
+    esac
+}
+
+# sh_downloader_hint -> one install line for this machine's provider, or
+# nothing when the provider is unknown. A bootstrap that cannot say
+# "apt-get install curl" wastes the session it was meant to save (issue #7:
+# probe for the provider, then name what provides the prerequisite).
+sh_downloader_hint() {
+    sh_dh_p=${SH_PROVIDER:-}
+    if [ -z "$sh_dh_p" ] && command -v sh_detect_provider >/dev/null 2>&1; then
+        sh_dh_p=$(sh_detect_provider 2>/dev/null)
+    fi
+    case "$sh_dh_p" in
+        apk) printf 'apk add curl' ;;
+        apt) printf 'apt-get install curl' ;;
+        dnf) printf 'dnf install curl' ;;
+        yum) printf 'yum install curl' ;;
+        pacman) printf 'pacman -S curl' ;;
+        zypper) printf 'zypper install curl' ;;
+        xbps) printf 'xbps-install -S curl' ;;
+        emerge) printf 'emerge -a net-misc/curl' ;;
+        tdnf) printf 'tdnf install curl' ;;
+        pkg) printf 'pkg install curl' ;;
+        pkg_add) printf 'pkg_add curl' ;;
+        pkgin) printf 'pkgin install curl' ;;
+        *) printf '' ;;
+    esac
+}
+
 # sh_fetch URL DEST -> 0 on a complete download. curl, then wget, then BSD fetch.
+#
+# STOP: EVERY FALLBACK IS TRIED, AND A FAILED ATTEMPT FALLS THROUGH LOUDLY.
+# The old form ran one tool and returned its status, so a machine whose curl
+# exists but fails (no resolver, TLS refusal, proxy 403) never tried wget,
+# and a BusyBox wget that rejects the flags it was passed failed the only
+# attempt it got. Each attempt below is a capability probe that ran, and a
+# failure names the tool and moves on (issues #3, #13). The success line names
+# the route the bytes came from, because a later failure is diagnosed against
+# it (issue #13, nt_install.sh shape).
 sh_fetch() {
     sh_f_url=$1
     sh_f_dest=$2
-    if sh_have curl; then
-        curl -fSL --retry 3 --retry-delay 2 -o "$sh_f_dest" "$sh_f_url"
-        return $?
+    if sh_downloader_ok curl; then
+        if curl -fSL --retry 3 --retry-delay 2 -o "$sh_f_dest" "$sh_f_url" 2>/dev/null; then
+            [ -s "$sh_f_dest" ] && { sh_step "Downloaded from: $sh_f_url with curl"; return 0; }
+        fi
+        sh_warn "curl could not fetch $sh_f_url; trying the next downloader"
     fi
-    if sh_have wget; then
-        wget -q -O "$sh_f_dest" "$sh_f_url"
-        return $?
+    if sh_downloader_ok wget; then
+        sh_f_flavor=$(sh_wget_flavor)
+        case "$sh_f_flavor" in
+            busybox|toybox) sh_f_wget_ok=0
+                wget -q -O "$sh_f_dest" "$sh_f_url" 2>/dev/null && sh_f_wget_ok=1 ;; 
+            *) sh_f_wget_ok=0
+                wget -q -O "$sh_f_dest" "$sh_f_url" 2>/dev/null && sh_f_wget_ok=1 ;;
+        esac
+        if [ "$sh_f_wget_ok" = 1 ] && [ -s "$sh_f_dest" ]; then
+            sh_step "Downloaded from: $sh_f_url with wget ($sh_f_flavor)"
+            return 0
+        fi
+        sh_warn "wget ($sh_f_flavor) could not fetch $sh_f_url; trying the next downloader"
     fi
-    if sh_have fetch; then
-        fetch -q -o "$sh_f_dest" "$sh_f_url"
-        return $?
+    if sh_downloader_ok fetch; then
+        if fetch -q -o "$sh_f_dest" "$sh_f_url" 2>/dev/null && [ -s "$sh_f_dest" ]; then
+            sh_step "Downloaded from: $sh_f_url with fetch"
+            return 0
+        fi
+        sh_warn "fetch could not fetch $sh_f_url"
     fi
-    sh_warn 'no curl, wget or fetch is present, so nothing can be downloaded'
+    sh_f_hint=$(sh_downloader_hint)
+    if [ -n "$sh_f_hint" ]; then
+        sh_warn "no downloader could fetch $sh_f_url (tried curl, wget, fetch); install one first: $sh_f_hint"
+    else
+        sh_warn "no curl, wget or fetch is present, so nothing can be downloaded"
+    fi
     return 1
 }
 

@@ -173,6 +173,32 @@ sh_toolchain_order() {
     return 0
 }
 
+# sh_toolchain_preflight NAME -> 0 when an install of NAME may start here.
+# The dependency preflight shape (issue #5, LemonBench DepScan): probe and
+# name what is missing BEFORE the run, rather than failing part-way through
+# a measurement. A downloader that cannot fetch and an exec root that cannot
+# run are both refused up front with the install line attached, so the
+# failure reads as a prerequisite and not as a transport error.
+sh_toolchain_preflight() {
+    sh_tpf_name=$1
+    if ! sh_downloader_ok curl && ! sh_downloader_ok wget && ! sh_downloader_ok fetch; then
+        sh_tpf_hint=$(sh_downloader_hint)
+        if [ -n "$sh_tpf_hint" ]; then
+            sh_fail "toolchain $sh_tpf_name needs a downloader and none probes here; install one first: $sh_tpf_hint"
+        else
+            sh_fail "toolchain $sh_tpf_name needs a downloader and none of curl, wget or fetch probes here"
+        fi
+        return 1
+    fi
+    if [ -n "${SH_EXEC:-}" ] && ! sh_exec_probe "${SH_EXEC_BIN:-$SH_EXEC}" 2>/dev/null; then
+        if ! sh_exec_probe "$SH_EXEC" 2>/dev/null; then
+            sh_fail "toolchain $sh_tpf_name needs an exec-capable root and $SH_EXEC will not run a file"
+            return 1
+        fi
+    fi
+    return 0
+}
+
 # NOTE: THE ADOPTED MODULE'S OWN BINS ARE PUT ON PATH, AND THE POST-PROMOTE
 # PROBE RUNS FOR AN ADOPTION TOO. Two clauses, one reason. `TC_<name>_BINS` used
 # to be linked into the exec bin only on the install path, so a toolchain that
@@ -201,6 +227,7 @@ sh_toolchain_install_one() {
         sh_say "toolchain $sh_te_name: a working copy is already here; adopting it"
         ADOPTED="$ADOPTED $sh_te_name"
     else
+        sh_toolchain_preflight "$sh_te_name" || return 1
         sh_say "toolchain $sh_te_name: not present; installing into $SH_HOME_TOOLCHAINS/$sh_te_name"
         if ! "tc_${sh_te_name}_install"; then
             sh_fail "toolchain $sh_te_name could not be installed"

@@ -385,6 +385,7 @@ if [ -n "$REAL_SHA" ]; then
     # like a failure of the thing under test and is not one.
     {
         printf '%s\n' '#!/bin/sh'
+        printf '%s\n' 'if [ "${1:-}" = "--version" ]; then echo "curl stub"; exit 0; fi'
         printf '%s\n' 'while [ "$#" -gt 0 ] && [ "$1" != "-o" ]; do shift; done'
         printf '%s\n' '[ "$1" = "-o" ] || exit 1'
         printf '%s\n' 'shift'
@@ -426,6 +427,119 @@ if [ -n "$REAL_SHA" ]; then
 else
     t_skip 'no sha256 tool to check a digest with'
 fi
+
+# -------------------------------------------------- downloader probes --
+# Issues #3 (capability probe, not PATH), #7 (provider-named prerequisite),
+# #9 (probe by running, not by resolving). A downloader that resolves and
+# then rejects its flags is the defect; the probe runs --version/--help.
+mkdir -p "$tmp/dl"
+cat > "$tmp/dl/curl" <<'STUB'
+#!/bin/sh
+if [ "${1:-}" = "--version" ]; then echo "curl stub"; exit 0; fi
+while [ "$#" -gt 0 ] && [ "$1" != "-o" ]; do shift; done
+[ "$1" = "-o" ] || exit 1
+shift
+sh_stub_dest=$1
+shift
+sh_stub_src=$1
+case "$sh_stub_src" in file://*) sh_stub_src=${sh_stub_src#file://} ;; esac
+cp "$sh_stub_src" "$sh_stub_dest"
+STUB
+chmod +x "$tmp/dl/curl"
+cat > "$tmp/dl/broken" <<'STUB'
+#!/bin/sh
+exit 1
+STUB
+chmod +x "$tmp/dl/broken"
+if ( PATH="$tmp/dl:$PATH" sh_tool_runs curl --version ) 2>/dev/null; then
+    t_ok 0 'a downloader that answers --version probes as usable'
+else
+    t_ok 1 'a downloader that answers --version probes as usable'
+fi
+if ( PATH="$tmp/dl:$PATH" sh_tool_runs broken --version ) 2>/dev/null; then
+    t_ok 1 'a binary that fails its probe is not a usable downloader'
+else
+    t_ok 0 'a binary that fails its probe is not a usable downloader'
+fi
+# Flavor follows the literal in --help output.
+cat > "$tmp/dl/wget" <<'STUB'
+#!/bin/sh
+if [ "${1:-}" = "--help" ]; then echo "BusyBox v1.36 wget"; exit 0; fi
+exit 0
+STUB
+chmod +x "$tmp/dl/wget"
+t_is "$(PATH="$tmp/dl:$PATH" sh_wget_flavor)" 'busybox' 'wget --help naming BusyBox probes as busybox'
+cat > "$tmp/dl/wget" <<'STUB'
+#!/bin/sh
+if [ "${1:-}" = "--help" ]; then echo "GNU Wget 1.21"; exit 0; fi
+exit 0
+STUB
+chmod +x "$tmp/dl/wget"
+t_is "$(PATH="$tmp/dl:$PATH" sh_wget_flavor)" 'gnu' 'wget --help naming GNU probes as gnu'
+# Fallthrough: a curl that exists but fails must not block wget. The failing
+# curl comes first on PATH; the working wget copies a file:// fixture.
+printf 'fallthrough-bytes\n' > "$tmp/dl/src.txt"
+cat > "$tmp/dl/curl" <<'STUB'
+#!/bin/sh
+if [ "${1:-}" = "--version" ]; then echo "curl stub"; exit 0; fi
+exit 1
+STUB
+chmod +x "$tmp/dl/curl"
+cat > "$tmp/dl/wget" <<'STUB'
+#!/bin/sh
+if [ "${1:-}" = "--help" ]; then echo "GNU Wget 1.21"; exit 0; fi
+while [ "$#" -gt 0 ] && [ "$1" != "-O" ]; do shift; done
+[ "$1" = "-O" ] || exit 1
+shift
+dest=$1
+shift
+src=$1
+case "$src" in file://*) src=${src#file://} ;; esac
+cp "$src" "$dest"
+STUB
+chmod +x "$tmp/dl/wget"
+rm -f "$tmp/dl/got.txt"
+if PATH="$tmp/dl:$PATH" sh_fetch "file://$tmp/dl/src.txt" "$tmp/dl/got.txt" 2>/dev/null; then
+    if [ -r "$tmp/dl/got.txt" ]; then
+        t_ok 0 'sh_fetch falls through a failing curl to a working wget'
+    else
+        t_ok 1 'sh_fetch falls through a failing curl to a working wget (no bytes)'
+    fi
+else
+    t_ok 1 'sh_fetch falls through a failing curl to a working wget (non-zero)'
+fi
+# Success names its route (issue #13): the line is what a later failure is
+# diagnosed against.
+route_out=$(PATH="$tmp/dl:$PATH" sh_fetch "file://$tmp/dl/src.txt" "$tmp/dl/got2.txt" 2>&1)
+case "$route_out" in
+    *'Downloaded from: '*) t_ok 0 'a successful fetch names the route it came from' ;;
+    *) t_ok 1 "a successful fetch names the route it came from ($route_out)" ;;
+esac
+# The provider hint names the install (issue #7) instead of failing part-way.
+SH_PROVIDER=apt
+t_is "$(sh_downloader_hint)" 'apt-get install curl' 'the downloader hint names the apt install line'
+SH_PROVIDER=bogus-provider
+t_is "$(sh_downloader_hint)" '' 'an unknown provider yields no hint rather than a wrong one'
+sh_detect_all >/dev/null 2>&1 || true
+# Preflight (issue #5): with no downloader the install is refused up front
+# with the provider line, rather than failing part-way through a download.
+mkdir -p "$tmp/no-dl"
+for nd_tool in sh dash mkdir rm cat; do
+    if command -v "$nd_tool" >/dev/null 2>&1; then
+        ln -sf "$(command -v "$nd_tool")" "$tmp/no-dl/$nd_tool" 2>/dev/null || true
+    fi
+done
+if PATH="$tmp/no-dl" SH_PROVIDER=apt sh_toolchain_preflight jq 2>/dev/null; then
+    t_ok 1 'preflight refuses an install with no downloader'
+else
+    t_ok 0 'preflight refuses an install with no downloader'
+fi
+pf_out=$(PATH="$tmp/no-dl" SH_PROVIDER=apt SH_EXEC= SH_EXEC_BIN= sh_toolchain_preflight jq 2>&1)
+case "$pf_out" in
+    *'apt-get install curl'*) t_ok 0 'the preflight refusal names the provider install line' ;;
+    *) t_ok 1 "the preflight refusal names the provider install line ($pf_out)" ;;
+esac
+sh_detect_all >/dev/null 2>&1 || true
 
 # ------------------------------------------------------------------ os id --
 # # STOP: os-release IS READ FROM BOTH PLACES, AND /usr/lib IS NOT A THOUGHT.
