@@ -71,6 +71,7 @@ sh bootstrap.sh [options]
 | `--no-shell` | do not install `errandsh` |
 | `--no-profile` / `--no-path-line` | leave the login files alone |
 | `--dry-run` / `--json` | preview, or one JSON report |
+| `--doh-url URL` | DNS-over-HTTPS resolver for a confirmed no-resolver cage (see `SANDHOME_DOH_URL` in the reference). Off unless set. |
 
 The run: detects the machine, plans the roots, adopts or installs each toolchain,
 builds the shims this machine actually needs, writes `$SANDHOME_HOME/env.sh`,

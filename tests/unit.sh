@@ -811,6 +811,8 @@ sh_detect_all >/dev/null 2>&1 || true
 t_ok "$( [ -n "$(sh_do_read_id /usr/lib/os-release 2>/dev/null)" ] && echo 0 || echo 1 )" \
     'the ID in /usr/lib/os-release is readable when /etc/os-release is absent'
 t_is "$(sh_do_read_id "$tmp/no-such-release")" '' 'a missing os-release reads as nothing'
+printf 'ID=alpine\n' > "$tmp/alpine-rel"
+t_is "$(sh_do_read_id "$tmp/alpine-rel")" 'alpine' 'the specific distribution is probed, not a generic linux (issue #14)'
 printf 'ID=quoted-value\nPATH=/tmp/evil\nLD_PRELOAD=/tmp/evil.so\nIFS=:\n' > "$tmp/rel"
 t_is "$(sh_do_read_id "$tmp/rel")" 'quoted-value' 'ID is read with its quotes removed'
 # The file is DATA and is not sourced, so a distribution whose os-release

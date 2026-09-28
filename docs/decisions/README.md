@@ -12,3 +12,4 @@ describes.
 | [`posix-sh-only.md`](posix-sh-only.md) | POSIX `sh`, no `local`, and a deliberately tiny dependency set |
 | [`fetching-and-digests.md`](fetching-and-digests.md) | one download path, digests read from the release, and the schema traps in the version chains |
 | [`pinning.md`](pinning.md) | one pin per download; a published digest outranks a caller's default, and a POSIX sh variable name cannot hold a hyphen |
+| [`research-parity.md`](research-parity.md) | what the thirteen-reference sweep taught and where each adopted, documented or refused line went |

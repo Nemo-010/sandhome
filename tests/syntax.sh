@@ -105,4 +105,31 @@ if grep -v '^[[:space:]]*#' "$ROOT"/lib/profile.sh 2>/dev/null | \
 else
     t_ok 0 'lib/profile.sh never prompts at shell start'
 fi
+
+# No committed ELF objects (issue #12 counter-example): in-tree binaries with
+# no version manifest are the thing NOTICE refuses. A vendored binary fails
+# here before it can gain a caller. Without python3 the clause reports it
+# could not run rather than passing blind.
+if command -v python3 >/dev/null 2>&1; then
+    sh_elf_bad=$(SH_SANDHOME_ROOT=$ROOT python3 -c '
+import os
+bad = []
+root = os.environ["SH_SANDHOME_ROOT"]
+for dirpath, dirnames, filenames in os.walk(root):
+    if ".git" in dirnames:
+        dirnames.remove(".git")
+    for fn in filenames:
+        fpath = os.path.join(dirpath, fn)
+        try:
+            with open(fpath, "rb") as fh:
+                if fh.read(4) == b"\x7fELF":
+                    bad.append(os.path.relpath(fpath, root))
+        except OSError:
+            pass
+print(" ".join(sorted(bad)))
+' 2>/dev/null)
+    t_is "$sh_elf_bad" '' 'the tree ships no committed ELF binaries'
+else
+    t_skip 'no python3 to scan for committed ELF binaries'
+fi
 t_end
