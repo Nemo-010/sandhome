@@ -381,6 +381,21 @@ sh_run_bounded 10 false
 t_is "$?" 1 'a bounded run that fails answers its failure, not a timeout'
 sh_run_bounded 2 sleep 30
 t_is "$?" 124 'a bounded run that hangs answers 124 after the timeout'
+# Without sleep there is no clock: the run goes bare instead of misfiring
+# the killer instantly (which read every healthy probe as hung). A PATH
+# with only sh exercises the fallback with a real answer.
+sh_nosleep_bin="$tmp/nosleep-bin"
+mkdir -p "$sh_nosleep_bin"
+sh_nosleep_src=$(command -v sh 2>/dev/null)
+case "$sh_nosleep_src" in
+    /*) ln -sfn "$sh_nosleep_src" "$sh_nosleep_bin/sh" 2>/dev/null || true ;;
+esac
+if [ -x "$sh_nosleep_bin/sh" ]; then
+    sh_nosleep_out=$(PATH="$sh_nosleep_bin" "$sh_nosleep_bin/sh" -c '. "$1/lib/common.sh"; SH_SELF=t; sh_run_bounded 5 sh -c "exit 3"; printf "%s" "$?"' sh "$ROOT" 2>/dev/null)
+    t_is "$sh_nosleep_out" '3' 'without sleep a run answers its own status instead of timing out'
+else
+    t_skip 'cannot build a sleep-less PATH here, so the no-clock fallback did not run'
+fi
 # The timeout kills the whole tree, not just the direct child: a command
 # that orphans a spinning pipe-holder would otherwise wedge the caller's
 # $(...) forever on a pipe whose writer never exits (measured: an

@@ -124,7 +124,7 @@ herm_bin=$work/herm-bin
 mkdir -p "$herm_bin"
 for need in sh dash curl tar sha256sum shasum openssl python3 node wget fetch \
             uname id df cp mv rm mkdir chmod ln cat grep readlink touch find \
-            env dirname basename date mktemp; do
+            env dirname basename date mktemp sleep; do
     src=$(command -v "$need" 2>/dev/null) || continue
     ln -sfn "$src" "$herm_bin/$need" 2>/dev/null || true
 done
@@ -434,13 +434,27 @@ if [ -r "$cmd_home/env.sh" ]; then
         *) t_ok 1 "the eval form finds the checkout and reports it (got $bare)" ;;
     esac
 
-    # The error a real consumer sees when there is genuinely no checkout must
-    # name the variable that resolves one.
+    # The installed copy carries its library with it (issue #88), so a bare
+    # environment with an impossible HOME still runs: the baked path
+    # resolves, and version answers instead of the old missing-library
+    # error. The error path itself is still covered below with an unbaked
+    # copy, where no source resolves and the message must name the variable.
     nomsg=$(env -i HOME=/nonexistent-home-xyz PATH="$cmd_exec/bin:/usr/bin:/bin" \
             sh -c 'sandhome version' </dev/null 2>&1)
     case "$nomsg" in
+        'sandhome/1') t_ok 0 'a baked copy runs with no HOME and no environment' ;;
+        *) t_ok 1 "a baked copy runs with no HOME and no environment (got $nomsg)" ;;
+    esac
+    # Unbaked: the checkout binary copied where no repo, home, or baked path
+    # resolves. Then the error must name the variable that resolves one.
+    mkdir -p "$work/norepo" 2>/dev/null
+    cp "$ROOT/bin/sandhome" "$work/norepo/sandhome" 2>/dev/null
+    chmod 0755 "$work/norepo/sandhome" 2>/dev/null || true
+    nobaked=$(env -i HOME=/nonexistent-home-xyz PATH="$work/norepo:/usr/bin:/bin" \
+            sh -c 'sandhome version' </dev/null 2>&1)
+    case "$nobaked" in
         *SANDHOME_REPO_DIR*) t_ok 0 'the missing-library error names SANDHOME_REPO_DIR' ;;
-        *) t_ok 1 "the missing-library error names SANDHOME_REPO_DIR (got $nomsg)" ;;
+        *) t_ok 1 "the missing-library error names SANDHOME_REPO_DIR (got $nobaked)" ;;
     esac
 else
     t_skip 'no home to check the installed command against'

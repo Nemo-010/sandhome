@@ -40,6 +40,12 @@ sh_run_wait_pid() {
     sh_rwp_secs=$1
     sh_rwp_pid=$2
     sh_rwp_group=${3:-0}
+    # Same no-clock degradation as sh_run_bounded: without sleep the killer
+    # cannot exist, so wait bare rather than misfiring instantly.
+    if ! sh_have sleep; then
+        wait "$sh_rwp_pid" 2>/dev/null
+        return $?
+    fi
     ( sleep "$sh_rwp_secs" 2>/dev/null </dev/null >/dev/null 2>&1
       if [ "$sh_rwp_group" = 1 ]; then
           # No `--`: dash kill rejects it, and bare -$pid names the group
@@ -77,6 +83,15 @@ sh_run_bounded() {
     case "$sh_rb_secs" in
         ''|*[!0-9]*) sh_rb_secs=30 ;;
     esac
+    # Without sleep there is no clock to enforce anything with: run bare
+    # rather than misfiring the killer instantly (measured: a hermetic PATH
+    # without sleep turned every probe into a timeout and failed installs
+    # that were healthy). An unbounded probe on a sleep-less box is the old
+    # behavior, honestly kept where the alternative is a false hang verdict.
+    if ! sh_have sleep; then
+        "$@"
+        return $?
+    fi
     "$@" &
     sh_run_wait_pid "$sh_rb_secs" "$!" 0
     return $?
