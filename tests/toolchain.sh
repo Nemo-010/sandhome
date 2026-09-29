@@ -1217,6 +1217,9 @@ SANDHOME_REPO_DIR="$ROOT" SANDHOME_HOME="$sh_ad_home" SANDHOME_EXEC="$sh_ad_exec
     sh "$ROOT/bin/sandhome" add 'Bad-Name' --url https://x.example/b.tar.gz >/dev/null 2>&1
 t_is "$?" 2 'add refuses a NAME outside the module shape'
 SANDHOME_REPO_DIR="$ROOT" SANDHOME_HOME="$sh_ad_home" SANDHOME_EXEC="$sh_ad_exec" \
+    sh "$ROOT/bin/sandhome" add quotetool --url https://x.example/q.tar.gz --bin bin/q --desc "it's quoted" >/dev/null 2>&1
+t_is "$?" 2 'add refuses metacharacters bound for the generated file'
+SANDHOME_REPO_DIR="$ROOT" SANDHOME_HOME="$sh_ad_home" SANDHOME_EXEC="$sh_ad_exec" \
     sh "$ROOT/bin/sandhome" add single --url https://x.example/single >/dev/null 2>&1
 t_is "$?" 1 'add without --scaffold-only tries to install (fails here with no network for x.example)'
 

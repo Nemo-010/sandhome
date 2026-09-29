@@ -72,7 +72,10 @@ tc_shellcheck_install() {
     fi
     rm -f "$sh_sc_stage/.shellcheck.$$.tar.xz" 2>/dev/null
     sh_sc_bin=''
-    for sh_sc_e in "$sh_sc_stage/$sh_sc_dirname/shellcheck"; do
+    # Unquoted directory part: a quoted glob runs once and matches nothing;
+    # the directory name is machine-generated above, never user input.
+    # shellcheck disable=SC2086
+    for sh_sc_e in "$sh_sc_stage"/$sh_sc_dirname/shellcheck; do
         [ -x "$sh_sc_e" ] || [ -f "$sh_sc_e" ] || continue
         sh_sc_bin=$sh_sc_e
         break

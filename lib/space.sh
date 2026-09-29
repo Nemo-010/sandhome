@@ -692,7 +692,7 @@ sh_view_copy_kb() {
         return 0
     fi
     sh_vck_total=0
-    sh_vck_queue="${SH_HOME_TMP:-${TMPDIR:-/tmp}}/.viewcopy.$$"
+    sh_vck_queue=$(sh_tmp_file "${SH_HOME_TMP:-${TMPDIR:-/tmp}}" viewcopy)
     printf '%s\n' "$sh_vck_src" > "$sh_vck_queue" 2>/dev/null || {
         printf ''
         return 0
@@ -753,7 +753,7 @@ sh_view_current() {
     sh_vc_dst=$2
     [ -d "$sh_vc_src" ] || return 1
     [ -d "$sh_vc_dst" ] || return 1
-    sh_vc_queue="${SH_HOME_TMP:-${TMPDIR:-/tmp}}/.viewcur.$$"
+    sh_vc_queue=$(sh_tmp_file "${SH_HOME_TMP:-${TMPDIR:-/tmp}}" viewcur)
     printf '%s\n' "$sh_vc_src" > "$sh_vc_queue" 2>/dev/null || return 1
     sh_vc_ok=0
     while IFS= read -r sh_vc_d; do
@@ -900,7 +900,7 @@ sh_promote_tree() {
     mkdir -p "$sh_pt_dst" 2>/dev/null || return 1
     sh_pt_tmp=${SH_HOME_TMP:-${TMPDIR:-/tmp}}
     mkdir -p "$sh_pt_tmp" 2>/dev/null || return 1
-    sh_pt_queue="$sh_pt_tmp/.promote.$$"
+    sh_pt_queue=$(sh_tmp_file "$sh_pt_tmp" promote)
     printf '%s\t%s\n' "$sh_pt_src" "$sh_pt_dst" > "$sh_pt_queue" 2>/dev/null || return 1
     while IFS="$SH_TAB" read -r sh_pt_s sh_pt_d; do
         [ -n "$sh_pt_s" ] || continue
@@ -1522,7 +1522,7 @@ sh_view_prune() {
         printf '0'
         return 0
     fi
-    sh_vp_queue="${SH_HOME_TMP:-${TMPDIR:-/tmp}}/.viewprune.$$"
+    sh_vp_queue=$(sh_tmp_file "${SH_HOME_TMP:-${TMPDIR:-/tmp}}" viewprune)
     printf '%s\n' "$sh_vp_view" > "$sh_vp_queue" 2>/dev/null || {
         printf '0'
         return 0

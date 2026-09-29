@@ -818,6 +818,13 @@ cmd_add() {
         https://*|http://*) ;;
         *) sh_die "add --url '$sh_ad_url' must be http(s)" ;;
     esac
+    # The values below are interpolated into a generated shell file, so shell
+    # metacharacters in them become code. Refuse the set rather than escaping
+    # it: a URL, a relative bin path and a one-line description have no
+    # legitimate use for quotes, dollars, backticks or backslashes.
+    case "$sh_ad_url$sh_ad_bin$sh_ad_desc" in
+        *\'*|*\"*|*\$*|*\`*|*\\*) sh_die 'add --url/--bin/--desc carry no quotes, dollars, backticks or backslashes' ;;
+    esac
     if [ -n "$sh_ad_sha" ] && ! sh_is_hex64 "$sh_ad_sha"; then
         sh_die "add --sha256 '$sh_ad_sha' is not 64 hex characters"
     fi

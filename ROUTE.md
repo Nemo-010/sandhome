@@ -122,7 +122,9 @@ checks the toolchains the setup ASKED FOR, not merely the ones it managed: the
 requested list is recorded in `env.sh` as `SANDHOME_WANTED_TOOLCHAINS`, so a
 `--toolset languages` run that could not install `zig`, `mold` or `rust` is
 reported as six named failures rather than a green gate. Treat a non-zero exit
-as the task not being ready.
+as the task not being ready. `sandhome status` (and `status --json`) answers
+the same readiness in one line -- roots, view, toolchains present, next
+command -- and is what a harness calls first.
 
 ```sh
 sandhome toolchains

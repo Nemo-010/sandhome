@@ -213,6 +213,21 @@ sh_trim() {
 # `dirname -- a//b` is `a`, `${x%/*}` on `a//b` is `a/`). The loops below do
 # what dirname does: strip EVERY trailing slash, then drop the last component
 # and strip the slashes it exposed (issue #16, and the judge's `a//b` finding).
+# sh_tmp_file DIR PREFIX -> print a fresh temp path under DIR. mktemp when
+# it answers (unique even across same-process background jobs, which share
+# $$ and would otherwise truncate each other's queue files mid-walk --
+# measured: eight concurrent mirrors of one view left it empty); the $$
+# fallback otherwise, which is unique across processes but not within one.
+# The file is created by mktemp and merely named by the fallback; callers
+# write it the way they always did.
+sh_tmp_file() {
+    sh_tf_f=$(mktemp "$1/$2.XXXXXX" 2>/dev/null) && {
+        printf '%s' "$sh_tf_f"
+        return 0
+    }
+    printf '%s/.%s.%s' "$1" "$2" "$$"
+    return 0
+}
 sh_dirname() {
     sh_dn_p=$1
     case "$sh_dn_p" in
