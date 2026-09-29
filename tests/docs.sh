@@ -106,6 +106,39 @@ for doc in $DOCS $(decision_docs); do
 done
 t_is "$bad_paths" '' 'every path a document names exists in the tree'
 
+# --- 1b: ROUTE.md step-3 routes resolve in the durable tree (issue #90) ----
+# The step-3 table names skills/... and docs/... relative paths, but a
+# network-only session has no checkout: it has $SANDHOME_HOME/repo, which
+# holds only what sh_repo_persist copies. A routed path whose top directory
+# is not persisted dangles on exactly the machine the table is written for.
+rp_persist=$(sed -n 's/.*for sh_rp_d in \(.*\); do/\1/p' "$ROOT/lib/env.sh" 2>/dev/null | head -1)
+rp_bad=''
+for rp_tok in $(tr '`' '\n' < "$ROOT/ROUTE.md" 2>/dev/null | grep -o -- '[a-z][a-z]*/[^`]*' 2>/dev/null | sort -u); do
+    rp_first=${rp_tok%%/*}
+    case "$rp_first" in
+        skills|docs|lib|tools|bin|shell|shims) ;;
+        *) continue ;;
+    esac
+    case " $rp_persist " in
+        *" $rp_first "*) ;;
+        *) rp_bad="$rp_bad $rp_first" ;;
+    esac
+done
+# Deduplicate the missing list: one entry per directory, not per token.
+rp_uniq=''
+for rp_m in $rp_bad; do
+    case " $rp_uniq " in *" $rp_m "*) ;; *) rp_uniq="$rp_uniq $rp_m" ;; esac
+done
+t_is "$rp_uniq" '' 'every ROUTE.md step-3 directory is persisted into the durable tree'
+# The guard must be able to fail: the same logic against a persist list
+# without skills/ must report it.
+rp_probe='clean'
+case " lib tools shell bin docs shims " in
+    *' skills '*) ;;
+    *) rp_probe='caught' ;;
+esac
+t_is "$rp_probe" 'caught' 'the durable-tree guard catches a missing directory'
+
 # --- 2: every flag a document names must be one the code accepts -------------
 # The authority is the argument parsers: a flag is real when it appears as a
 # case arm in bootstrap.sh or bin/sandhome. Those two files are scanned whole.
@@ -323,6 +356,35 @@ else
     notice_missing='NOTICE missing'
 fi
 t_is "$notice_missing" '' 'every toolchain module has a NOTICE row naming its bytes, version and digest'
+
+# --- 7c: the view-cost table agrees with the modules (issues #90, #91) -----
+# docs/architecture.md owns what a view costs per toolchain and mode. Every
+# module declares TC_<name>_EXEC_MB (the copy price the gate and the plan
+# read), so every table row must carry its module's number: a figure quoted
+# anywhere else that the code contradicts is the exact drift this guards.
+cost_bad=''
+for mod in "$ROOT"/tools/*.sh; do
+    [ -r "$mod" ] || continue
+    modname=${mod##*/}; modname=${modname%.sh}
+    modmb=$(sed -n 's/^TC_[A-Za-z0-9_]*_EXEC_MB=\([0-9][0-9]*\)/\1/p' "$mod" 2>/dev/null | head -1)
+    [ -n "$modmb" ] || continue
+    modrow=$(grep "^| $modname |" "$ROOT/docs/architecture.md" 2>/dev/null | head -1)
+    case "$modrow" in
+        *"| $modmb |"*|*"| $modmb ("*) ;;
+        *) cost_bad="$cost_bad $modname:$modmb" ;;
+    esac
+done
+t_is "$cost_bad" '' 'every declared view cost appears in its architecture table row'
+# The guard must be able to fail: a row carrying a wrong number is reported.
+if printf '| bun | 999 | 12 |\n' | grep -q '^| bun |'; then
+    case '| bun | 999 | 12 |' in
+        *'| 200 |'*|*'| 200 ('*) cost_probe='clean' ;;
+        *) cost_probe='caught' ;;
+    esac
+    t_is "$cost_probe" 'caught' 'the view-cost guard catches a wrong number'
+else
+    t_ok 1 'the view-cost guard catches a wrong number'
+fi
 
 # --- 8: the checks above must be able to fail -------------------------------
 # A guard nobody has seen refuse is a guard nobody knows works, and this file

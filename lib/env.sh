@@ -244,7 +244,10 @@ sh_repo_persist() {
                 return 0
             fi
             mkdir -p "$sh_rp_durable" 2>/dev/null || return 0
-            for sh_rp_d in lib tools shell bin docs shims; do
+            # skills/ rides along so the step-3 table keeps resolving: its
+            # rows name skills/... and docs/... relative paths, and a durable
+            # tree without skills/ makes every such route dangle (issue #90).
+            for sh_rp_d in lib tools shell bin docs shims skills; do
                 if [ -e "$SH_REPO_DIR/$sh_rp_d" ]; then
                     rm -rf "$sh_rp_durable/$sh_rp_d" 2>/dev/null
                     cp -r "$SH_REPO_DIR/$sh_rp_d" "$sh_rp_durable/$sh_rp_d" 2>/dev/null || \

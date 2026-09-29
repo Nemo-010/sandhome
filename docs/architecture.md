@@ -36,8 +36,9 @@ measured fix rather than a preference:
 
 ### Launch mode: run from memory instead of copying
 
-Copying every executable costs ~100MB per toolchain on the exec root (rust)
-and ~270MB (clang). Where the machine allows it the view holds 20KB launcher
+Copying every executable costs real room on the exec root (rust's declared
+copy figure is 150MB, clang's 3000MB). Where the machine allows it the view
+holds 20KB launcher
 copies of one helper instead: `shims/memexec.c` (`sandhome-memexec` on the
 exec bin) copies the payload bytes into an anonymous `memfd` and executes
 them from the file descriptor, falling back to `fexecve` where `/proc` is
@@ -47,6 +48,36 @@ here is written from scratch for this tree. Measured on a noexec home:
 direct exec fails `EACCES`, ELF, dynamic ELF and `#!` scripts all run from
 the fd, and the rust view shrinks from ~100MB of copies to ~17MB (launchers
 plus the few real copies below).
+
+### What a view costs, per toolchain and mode
+
+This table owns the figures; prose elsewhere links here instead of quoting
+its own. `copy` is the module's declared `TC_<name>_EXEC_MB`, the price the
+install gate and the feasibility plan actually read; `launch` is the
+`tc_<name>_exec_mb` figure where the module computes one, else the same
+declared number. A guarded check in `tests/docs.sh` requires every declared
+number to appear in its row, so the table and the modules cannot drift.
+
+| toolchain | copy view, MB | launch view, MB |
+| --- | --- | --- |
+| bun | 200 | 12 |
+| clang | 3000 | 32 |
+| deno | 150 | 8 |
+| fd | 16 | 16 |
+| gh | 16 | 16 |
+| go | 150 | 12 |
+| jq | 8 | 8 |
+| mold | 60 | 8 |
+| ninja | 8 | 8 |
+| node | 200 | 16 |
+| python | 30 | 30 (launch unmeasured; priced as copy until it is) |
+| qemuuser | 12 | 12 |
+| ripgrep | 32 | 32 |
+| rust | 150 | 25 |
+| shellcheck | 8 | 8 |
+| shfmt | 8 | 8 |
+| yq | 8 | 8 |
+| zig | 200 | 200 (a real copy: its install-dir lookup fails from a memfd) |
 
 A launcher copy maps itself back to its home payload at runtime (the
 `views/<name>` to `toolchains/<name>` convention, argv unchanged), so

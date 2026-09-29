@@ -30,11 +30,14 @@ the page to read before adding a toolchain to it.
 
   **When no roomy exec-capable root exists, nothing points at one (issue #59).**
   `sandhome space` names the ceiling once: `max_exec_free_mb` is the most free
-  megabytes on any exec-capable candidate, and `exec_ceiling=small` means no
-  candidate clears 900MB (the rust view; clang wants more). `--exec DIR` then
-  has no target, and `sandhome gc` reclaims caches only, never views. A re-run
-  of the setup on such a host names the constraint before writing anything
-  rather than failing mid-view.
+  megabytes on any exec-capable candidate. A small ceiling restricts the
+  *view*, not the toolchain: payloads live on the home and only executables
+  mirror onto the exec root, so rust and clang install and compile on roots
+  far smaller than their payloads (measured with 296MB free of 488MB).
+  What does not fit is a view bigger than the root; the per-toolchain view
+  costs are in `docs/architecture.md`, and an install that cannot fit names
+  its measured need against the measured free space instead of failing
+  mid-view. `gc` reclaims caches only, never views.
 
   **Harness scratch-quota kills bypass the df-based space gate (issue #63).**
   `doctor`, `space` and `report` read `df`, and no quota knob (`tmpSize`,
@@ -145,13 +148,18 @@ sh bootstrap.sh [options]
 
 The five toolsets, and the difference between them is the compilers:
 
-| toolset | carries |
-| --- | --- |
-| `minimal` | `jq` |
-| `cli` | `jq ripgrep fd` |
-| `developer` | `jq ripgrep fd python node` |
-| `languages` | `developer` plus `rust go zig deno bun mold` |
-| `agent` | the same as `languages` |
+| toolset | carries | copy-view MB (declared sum) |
+| --- | --- | --- |
+| `minimal` | `jq` | 8 |
+| `cli` | `jq ripgrep fd` | 56 |
+| `developer` | `jq ripgrep fd python node` | 286 |
+| `languages` | `developer` plus `rust go zig deno bun mold` | 1196 |
+| `agent` | the same as `languages` | 1196 |
+
+The sums are the declared copy-mode figures added up; launch mode costs less
+per the per-toolchain table in `docs/architecture.md`, which owns every
+figure here. `--dry-run` prices the actual request against the actual root
+before spending anything.
 
 `clang` is the one toolchain in no toolset, and is asked for by name:
 `sandhome install clang` or `bootstrap.sh --with clang`. Its download is above
@@ -269,8 +277,9 @@ version parsers here are covered offline. See
 ### Downloads larger than the file-size limit
 
 A sandbox can pin a per-file cap (`ulimit -f`, RLIMIT_FSIZE) that no process can
-raise  -  measured here at exactly 1,000,000,000 bytes, where `curl` died with
-`File size limit exceeded` on a 1.9GB asset. A single file above the cap is
+raise  -  measured on one host at 1,000,000,000 bytes, where `curl` died with
+`File size limit exceeded` on a 1.9GB asset. The figure is that host's reading,
+not a constant: any pinned cap behaves the same way. A single file above the cap is
 unreachable by construction, and resuming appends to a file already at the cap.
 `sandhome` never makes one: when `Content-Length` exceeds the cap, `sh_fetch_stream`
 fetches numbered ranges  -  each under the cap  -  and `sh_stream_untar` unpacks a
