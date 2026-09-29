@@ -303,6 +303,76 @@ if [ -r "$doc_home/env.sh" ]; then
         SANDHOME_LOW_EXEC_MB=0 SANDHOME_CRIT_MB=0 \
         sh "$ROOT/bin/sandhome" doctor >/dev/null 2>&1
     t_is "$?" 0 'doctor exits 0 on a sound home'
+    # THE INSTALLED COPY CARRIES ITS LIBRARY (issue #88). A process with no
+    # inherited environment starts from the exec copy alone; the exact
+    # invocation from the issue must gate rather than fail to start. Greenness
+    # itself is ambient (/tmp room is a host fact, issue #108), so what is
+    # asserted is the gate shape: exit 0/1 with a failures count, never the
+    # exit-2 cannot-find-the-library of the old behavior.
+    t_ok "$([ "$(grep -c '^SH_BAKED_REPO_DIR=.' "$doc_exec/bin/sandhome" 2>/dev/null)" = 1 ]; echo $?)" \
+        'the installed copy bakes exactly one repo path'
+    doc_noenv_out=$(env -i "$doc_exec/bin/sandhome" doctor 2>/dev/null)
+    doc_noenv_rc=$?
+    doc_noenv_tail=$(printf '%s\n' "$doc_noenv_out" | tail -n 1)
+    case "$doc_noenv_rc" in
+        0|1)
+            case "$doc_noenv_tail" in
+                doctor_failures=*) t_ok 0 'env -i <exec-bin>/sandhome doctor gates (exit 0/1 with a count)' ;;
+                *) t_ok 1 "env -i <exec-bin>/sandhome doctor gates (got tail: $doc_noenv_tail)" ;;
+            esac ;;
+        *) t_ok 1 "env -i <exec-bin>/sandhome doctor gates (got rc=$doc_noenv_rc)" ;;
+    esac
+    env -i "$doc_exec/bin/sandhome" exec jq --version >/dev/null 2>&1
+    t_is "$?" 0 'env -i <exec-bin>/sandhome exec runs a tool with the right environment'
+    # RESUME REHYDRATES WITHOUT FETCHING (issue #88). Wipe the exec copy and
+    # the views the way a tmpfs restart does, then resume must rebuild and
+    # gate green with no network beyond what repair needs (nothing here).
+    rm -rf "$doc_exec/bin" "$doc_exec/views"
+    SANDHOME_REPO_DIR="$ROOT" SANDHOME_HOME="$doc_home" SANDHOME_EXEC="$doc_exec" \
+        SANDHOME_LOW_EXEC_MB=0 SANDHOME_CRIT_MB=0 \
+        sh "$ROOT/bin/sandhome" resume >/dev/null 2>&1
+    t_is "$?" 0 'resume rebuilds a wiped exec root and gates green'
+    SANDHOME_REPO_DIR="$ROOT" SANDHOME_HOME="$doc_home" SANDHOME_EXEC="$doc_exec" \
+        SANDHOME_LOW_EXEC_MB=0 SANDHOME_CRIT_MB=0 \
+        sh "$ROOT/bin/sandhome" doctor >/dev/null 2>&1
+    t_is "$?" 0 'doctor is green after resume'
+    # STATUS IS THE ONE-LINE GATE (issue #88), prose and JSON, with the exit
+    # code of doctor in both forms.
+    doc_status=$(SANDHOME_REPO_DIR="$ROOT" SANDHOME_HOME="$doc_home" SANDHOME_EXEC="$doc_exec" \
+        SANDHOME_LOW_EXEC_MB=0 SANDHOME_CRIT_MB=0 \
+        sh "$ROOT/bin/sandhome" status 2>/dev/null)
+    case "$doc_status" in
+        'ready=yes home='*' exec='*' toolchains='*) t_ok 0 'status prints one readiness line' ;;
+        *) t_ok 1 "status prints one readiness line (got: $doc_status)" ;;
+    esac
+    doc_sjson=$(SANDHOME_REPO_DIR="$ROOT" SANDHOME_HOME="$doc_home" SANDHOME_EXEC="$doc_exec" \
+        SANDHOME_LOW_EXEC_MB=0 SANDHOME_CRIT_MB=0 \
+        sh "$ROOT/bin/sandhome" status --json 2>/dev/null)
+    case "$doc_sjson" in
+        *'"ready":"yes"'*'"build_root"'*'"next_action"'*) t_ok 0 'status --json carries readiness plus workdir/build fields' ;;
+        *) t_ok 1 "status --json carries readiness plus workdir/build fields (got: $doc_sjson)" ;;
+    esac
+    if command -v python3 >/dev/null 2>&1; then
+        if printf '%s' "$doc_sjson" | python3 -m json.tool >/dev/null 2>&1; then
+            t_ok 0 'status --json parses'
+        else
+            t_ok 1 "status --json parses (got: $doc_sjson)"
+        fi
+        doc_djson=$(SANDHOME_REPO_DIR="$ROOT" SANDHOME_HOME="$doc_home" SANDHOME_EXEC="$doc_exec" \
+            SANDHOME_LOW_EXEC_MB=0 SANDHOME_CRIT_MB=0 \
+            sh "$ROOT/bin/sandhome" doctor --json 2>/dev/null)
+        if printf '%s' "$doc_djson" | python3 -m json.tool >/dev/null 2>&1; then
+            t_ok 0 'doctor --json parses'
+        else
+            t_ok 1 "doctor --json parses (got: $doc_djson)"
+        fi
+        case "$doc_djson" in
+            *'"failures":0'*) t_ok 0 'doctor --json reports zero failures on a sound home' ;;
+            *) t_ok 1 "doctor --json reports zero failures on a sound home (got: $doc_djson)" ;;
+        esac
+    else
+        t_skip 'no python3 to parse the status/doctor JSON with'
+    fi
     # Break one invariant and it must name it and fail.
     rm -f "$doc_home/env.sh"
     broken=$(SANDHOME_REPO_DIR="$ROOT" SANDHOME_HOME="$doc_home" SANDHOME_EXEC="$doc_exec" \

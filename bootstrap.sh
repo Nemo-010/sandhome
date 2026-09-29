@@ -397,6 +397,36 @@ sh_bootstrap_install_command() {
     }
     chmod 0755 "$SH_EXEC_BIN/sandhome" 2>/dev/null || true
     sh_step "installed $SH_EXEC_BIN/sandhome"
+    # Bake the durable checkout path into the installed copy: a process with
+    # no HOME and no inherited environment finds its library from itself
+    # (issue #88). A shell read-loop, because this file cannot require sed
+    # or grep; a path with a quote in it is refused rather than half-baked.
+    # Exactly one baked line must result, or the copy is left unbaked.
+    case "$SH_REPO_DIR" in
+        *\'*) sh_warn "not baking the repo path ($SH_REPO_DIR carries a quote)" ;;
+        *)
+            sh_bic_tmp="$SH_EXEC_BIN/.sandhome.cmd.$$"
+            sh_bic_n=0
+            sh_bic_ok=0
+            {
+                while IFS= read -r sh_bic_l || [ -n "$sh_bic_l" ]; do
+                    case "$sh_bic_l" in
+                        SH_BAKED_REPO_DIR=*)
+                            printf "SH_BAKED_REPO_DIR='%s'\n" "$SH_REPO_DIR"
+                            sh_bic_n=$((sh_bic_n + 1)) ;;
+                        *) printf '%s\n' "$sh_bic_l" ;;
+                    esac
+                done < "$SH_EXEC_BIN/sandhome"
+            } > "$sh_bic_tmp" 2>/dev/null && [ "$sh_bic_n" = 1 ] && \
+                mv -f "$sh_bic_tmp" "$SH_EXEC_BIN/sandhome" 2>/dev/null && \
+                chmod 0755 "$SH_EXEC_BIN/sandhome" 2>/dev/null && sh_bic_ok=1
+            rm -f "$sh_bic_tmp" 2>/dev/null
+            if [ "$sh_bic_ok" = 1 ]; then
+                sh_step "baked $SH_REPO_DIR into $SH_EXEC_BIN/sandhome"
+            else
+                sh_warn "could not bake the repo path; no-HOME launches fall back to HOME lookup"
+            fi ;;
+    esac
     return 0
 }
 

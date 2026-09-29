@@ -5,6 +5,14 @@ set -u
 
 SH_SELF=sandhome
 
+# SANDHOME-BAKED-REPO: replaced at install with the durable checkout path.
+# The installed copy on the exec root carries where its library lives, so a
+# process with no HOME and no inherited environment (`env -i /tmp/bin/sandhome
+# doctor`) still starts. A stale value fails the readability check below
+# and every later source is tried in turn, so a moved tree degrades to the
+# old behavior instead of a wrong library.
+SH_BAKED_REPO_DIR=''
+
 # Resolve the repository directory: the environment wins, then this script's own
 # path. A script read from a pipe has no path, and that case is refused rather
 # than guessed, because sourcing the wrong library is worse than not starting.
@@ -17,6 +25,8 @@ if [ -n "${SANDHOME_REPO_DIR:-}" ]; then
     sh_repo=$SANDHOME_REPO_DIR
 elif [ -n "${SH_REPO_DIR:-}" ]; then
     sh_repo=$SH_REPO_DIR
+elif [ -n "$SH_BAKED_REPO_DIR" ] && [ -r "$SH_BAKED_REPO_DIR/lib/common.sh" ]; then
+    sh_repo=$SH_BAKED_REPO_DIR
 else
     case "$0" in
         */*) sh_repo=$(CDPATH='' cd -- "${0%/*}/.." && pwd) ;;
@@ -158,6 +168,9 @@ usage() {
 usage: sandhome COMMAND [args]
 
   doctor                 probe the environment and report what is missing
+  doctor --json          the same gate as one JSON object
+  status [--json]        one-line readiness: roots, view, toolchains, next
+  resume                 rebuild the views after a tmpfs restart, then doctor
   env                    print the environment, for `eval "$(sandhome env)"`
   path                   print the exec-view bin directory
   space [--probe]        where the two roots are, and every candidate tried
@@ -253,10 +266,27 @@ cmd_help() {
         ''|help) usage; return 0 ;;
         doctor)
             cat <<'HELP'
-usage: sandhome doctor
+usage: sandhome doctor [--json]
 Probe the environment and report what is missing. One line per invariant,
 ending in doctor_failures=N. Exits non-zero when N is not zero. Repairs
-nothing; the bootstrap and install do that.
+nothing; the bootstrap and install do that. --json prints one object
+(failures, failed[], checks{}) for a harness to branch on.
+HELP
+            return 0 ;;
+        status)
+            cat <<'HELP'
+usage: sandhome status [--json]
+The one-command readiness answer: exit 0/1 like doctor, but one line naming
+the roots, the view, the toolchains present, and the next command. --json
+carries the same plus workdir and build fields.
+HELP
+            return 0 ;;
+        resume)
+            cat <<'HELP'
+usage: sandhome resume
+Rehydrate after a tmpfs restart without fetching: re-plan the roots, rebuild
+every recorded view, then run doctor and exit with its code. The full
+bootstrap stays for a machine whose env.sh is gone.
 HELP
             return 0 ;;
         install|ensure)
@@ -877,6 +907,120 @@ cmd_add() {
     sh_toolchain_ensure "$sh_ad_name" || return 1
     return 0
 }
+# cmd_doctor [--json] -> the readiness gate, prose or JSON. Exit 0/1, never
+# the count. --json prints one object (failures, failed[], checks{}) for a
+# harness to branch on (issue #88).
+cmd_doctor() {
+    sh_cd_json=0
+    for sh_cd_arg in "$@"; do
+        case "$sh_cd_arg" in
+            --json) sh_cd_json=1 ;;
+            -h|--help) cmd_help doctor; return 0 ;;
+            -*) sh_die "doctor does not take '$sh_cd_arg'; run 'sandhome help doctor' for the form it takes" ;;
+            *) sh_die "doctor takes no names; run 'sandhome help doctor' for the form it takes" ;;
+        esac
+    done
+    sh_env_load
+    if [ "$sh_cd_json" = 1 ]; then
+        SH_DOCTOR_JSON=1
+        export SH_DOCTOR_JSON
+    fi
+    sh_doctor || exit 1
+}
+
+# cmd_status [--json] -> the one-command readiness answer (issue #88): exit
+# 0/1 like doctor, but one line naming the roots, the view, the toolchains
+# present, and the next command -- the line a harness calls first and
+# ROUTE.md names. --json carries the same plus workdir/build fields.
+cmd_status() {
+    sh_cs_json=0
+    for sh_cs_arg in "$@"; do
+        case "$sh_cs_arg" in
+            --json) sh_cs_json=1 ;;
+            -h|--help) cmd_help status; return 0 ;;
+            -*) sh_die "status does not take '$sh_cs_arg'; run 'sandhome help status' for the form it takes" ;;
+            *) sh_die "status takes no names; run 'sandhome help status' for the form it takes" ;;
+        esac
+    done
+    sh_env_load
+    sh_cs_doc=$(SH_DOCTOR_JSON=1 sh_doctor 2>/dev/null)
+    sh_cs_rc=$?
+    # The count out of the JSON without sed: status is the first command a
+    # bare harness runs, and the library may not require sed. Single-quoted
+    # literal plus [!0-9]: the double-quoted form mis-strips on some shells,
+    # and [^...] is not portable negation.
+    sh_cs_fail=${sh_cs_doc#*'"failures"':}
+    sh_cs_fail=${sh_cs_fail%%[!0-9]*}
+    case "$sh_cs_fail" in
+        ''|*[!0-9]*) sh_cs_fail=1 ;;
+    esac
+    sh_cs_present=0
+    sh_cs_total=0
+    for sh_cs_t in $(sh_toolchain_available); do
+        [ -n "$sh_cs_t" ] || continue
+        sh_cs_total=$((sh_cs_total + 1))
+        if sh_toolchain_probe "$sh_cs_t"; then
+            sh_cs_present=$((sh_cs_present + 1))
+        fi
+    done
+    sh_cs_wd=${PWD:-.}
+    sh_cs_wd_noexec=no
+    sh_exec_probe "$sh_cs_wd" 2>/dev/null || sh_cs_wd_noexec=yes
+    if [ "$sh_cs_rc" = 0 ]; then
+        sh_cs_ready=yes
+        sh_cs_next="build under ${SH_EXEC:-.}"
+    else
+        sh_cs_ready=no
+        sh_cs_next="run 'sandhome doctor' for the failing invariant"
+    fi
+    if [ "$sh_cs_json" = 1 ]; then
+        printf '{"ready":"%s","failures":%s,"home":"%s","exec":"%s","exec_space":"%s","view":"%s","toolchains_present":%s,"toolchains_total":%s,"workdir":"%s","workdir_noexec":"%s","build_root":"%s","next_action":"%s"}\n' \
+            "$sh_cs_ready" "$sh_cs_fail" \
+            "$(sh_json_escape "${SH_HOME:-unknown}")" "$(sh_json_escape "${SH_EXEC:-unknown}")" \
+            "$(sh_json_escape "$(sh_space_status "${SH_EXEC:-/tmp}" 2>/dev/null)")" \
+            "$(sh_json_escape "$(sh_report_view 2>/dev/null)")" \
+            "$sh_cs_present" "$sh_cs_total" \
+            "$(sh_json_escape "$sh_cs_wd")" "$sh_cs_wd_noexec" \
+            "$(sh_json_escape "${SH_EXEC:-unknown}")" "$(sh_json_escape "$sh_cs_next")"
+        return "$sh_cs_rc"
+    fi
+    printf 'ready=%s home=%s exec=%s exec_space=%s view=%s toolchains=%s/%s workdir_noexec=%s next=%s\n' \
+        "$sh_cs_ready" "${SH_HOME:-unknown}" "${SH_EXEC:-unknown}" \
+        "$(sh_space_status "${SH_EXEC:-/tmp}" 2>/dev/null)" "$(sh_report_view 2>/dev/null)" \
+        "$sh_cs_present" "$sh_cs_total" "$sh_cs_wd_noexec" "$sh_cs_next"
+    return "$sh_cs_rc"
+}
+
+# cmd_resume -> rehydrate after a tmpfs restart without fetching (issue #88):
+# re-plan the roots (the exec root may be gone), rebuild every recorded view,
+# then run doctor and exit with its code. The full bootstrap stays for a
+# machine whose env.sh is gone; resume is for a session that watched its
+# view exist.
+cmd_resume() {
+    for sh_rs_arg in "$@"; do
+        case "$sh_rs_arg" in
+            -h|--help) cmd_help resume; return 0 ;;
+            -*) sh_die "resume does not take '$sh_rs_arg'; run 'sandhome help resume' for the form it takes" ;;
+            *) sh_die "resume takes no names; run 'sandhome help resume' for the form it takes" ;;
+        esac
+    done
+    sh_env_load
+    if [ ! -r "$SH_HOME/env.sh" ]; then
+        sh_die 'no recorded environment here; run the setup instead of resuming it'
+    fi
+    sh_space_plan || return 2
+    : "${SANDHOME_HOME:=$SH_HOME}"
+    : "${SANDHOME_EXEC:=$SH_EXEC}"
+    export SANDHOME_HOME SANDHOME_EXEC
+    sh_memexec_ensure
+    sh_exec_install_launchers
+    # Repair, not install: payloads that survived rebuild their views with
+    # no download, and genuinely missing toolchains fail loudly in doctor.
+    cmd_repair || sh_warn 'resume could not rebuild every view; doctor names what is missing'
+    sh_say 'resumed; running the readiness gate'
+    cmd_doctor || return 1
+    return 0
+}
 # cmd_project NAME [--python|--node] [--no-link] -> a project that runs on
 # a noexec work tree (issue #74). The working tree refuses execve, so every
 # naive setup half-works: `uv venv .venv` builds scripts with a shebang
@@ -1173,14 +1317,16 @@ cmd_test() {
 case "${2:-}" in
     -h|--help)
         case "${1:-}" in
-            doctor|env|path|space|toolchains|install|ensure|repair|shims|shell|pty|exec|report|gc|prune|add|project|test|selftest|version|help)
+            doctor|env|path|space|status|resume|toolchains|install|ensure|repair|shims|shell|pty|exec|report|gc|prune|add|project|test|selftest|version|help)
                 cmd_help "${1:-help}"
                 exit 0 ;;
         esac ;;
 esac
 
 case "${1:-help}" in
-    doctor)      sh_env_load; sh_doctor || exit 1 ;;
+    doctor)      shift; cmd_doctor "$@" ;;
+    status)      shift; cmd_status "$@" ;;
+    resume)      shift; cmd_resume "$@" ;;
     env)         cmd_env ;;
     path)        cmd_path ;;
     space)       shift; cmd_space "$@" ;;

@@ -43,8 +43,16 @@ curl -fsSL https://raw.githubusercontent.com/talaria0101/sandhome/main/bootstrap
 
 . "$HOME/.local/share/sandhome/env.sh"     # in this shell
 sandhome doctor                            # exits 0 when sound
+sandhome status                            # one-line readiness: roots, view, toolchains, next
 sandhome toolchains                        # what is here, and how it reaches PATH
 ```
+
+A process with no inherited environment starts from the installed copy,
+which carries its library with it: `env -i /tmp/bin/sandhome doctor` works
+with no `HOME` and no `PATH`, and `env -i /tmp/bin/sandhome exec CMD...`
+runs anything with the right environment. After a tmpfs restart wiped the
+exec root, `sandhome resume` rebuilds every recorded view without fetching
+and exits with doctor's code.
 
 Toolsets: `minimal` (jq), `cli` (+ ripgrep, fd), `developer` (+ python, node;
 the default), `languages` and `agent` (both + rust, go). Add one with
@@ -69,6 +77,7 @@ report distinguishes it (`installed=` vs `adopted=`).
 
 ```sh
 sandhome toolchains           # name, status, version, and how it reaches PATH
+sandhome toolchains --json    # the same as an array (name, desc, bins, status, version, origin, view)
 sandhome install rust go      # adopt or install, then write the env
 ```
 

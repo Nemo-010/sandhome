@@ -232,14 +232,26 @@ export SH_PTY SH_PASSWD SH_PTRACE
 sh_shim_build fakepty "$ROOT/shims/fakepty.c" >/dev/null 2>&1
 sh_shim_build fakepwd "$ROOT/shims/fakepwd.c" >/dev/null 2>&1
 sh_shim_build antiptrace "$ROOT/shims/antiptrace.c" >/dev/null 2>&1
-t_is "$(sh_shim_present)" 'fakepty fakepwd antiptrace' 'the present-shim reader names every object on disk'
+for sh_ts_s in fakedrm fakeinput fakexenv fakedisplay; do
+    sh_shim_build "$sh_ts_s" "$ROOT/shims/$sh_ts_s.c" >/dev/null 2>&1
+done
+t_is "$(sh_shim_present)" 'fakepty fakepwd antiptrace fakedrm fakeinput fakexenv fakedisplay' 'the present-shim reader names every object on disk'
 rm -f "$(sh_shims_dir)/fakepty.so"
-t_is "$(sh_shim_present)" 'fakepwd antiptrace' 'removing one object is reflected by the reader'
+t_is "$(sh_shim_present)" 'fakepwd antiptrace fakedrm fakeinput fakexenv fakedisplay' 'removing one object is reflected by the reader'
 rm -f "$(sh_shims_dir)/fakepwd.so"
-t_is "$(sh_shim_present)" 'antiptrace' 'the reader tracks removals one at a time'
-rm -f "$(sh_shims_dir)/antiptrace.so"
+t_is "$(sh_shim_present)" 'antiptrace fakedrm fakeinput fakexenv fakedisplay' 'the reader tracks removals one at a time'
+rm -f "$(sh_shims_dir)/antiptrace.so" "$(sh_shims_dir)/fakedrm.so" "$(sh_shims_dir)/fakeinput.so" "$(sh_shims_dir)/fakexenv.so" "$(sh_shims_dir)/fakedisplay.so"
 t_is "$(sh_shim_present)" '' 'the present-shim reader names nothing when nothing is there'
-t_is "$(sh_shim_needed_missing)" 'fakepty fakepwd antiptrace' 'the needed-and-missing reader names each shim'
+# The headless needs read the real machine (/dev/dri, /dev/input, DISPLAY),
+# so the full missing list only holds where the machine lacks all of them;
+# anywhere else the clause reports it could not run rather than asserting a
+# shape that is not this host's.
+if [ ! -e /dev/dri ] && [ ! -e /dev/input ] && [ ! -e /dev/uinput ] && \
+   [ -z "${DISPLAY:-}" ] && [ -z "${WAYLAND_DISPLAY:-}" ]; then
+    t_is "$(sh_shim_needed_missing)" 'fakepty fakepwd antiptrace fakedrm fakeinput fakexenv fakedisplay' 'the needed-and-missing reader names each shim'
+else
+    t_skip 'this host has dri, input or a display, so the full missing list is not its shape'
+fi
 # With nothing present and both needed, the report must say so rather than
 # reporting an empty list, which reads as "none were ever needed".
 t_contains "$(sh_shim_report)" 'fakepty_built=no' 'a missing shim is reported as not built'
@@ -248,13 +260,24 @@ t_contains "$(sh_shim_report)" 'fakepty_built=no' 'a missing shim is reported as
 # that needs two and has neither, and only the second is a problem. The two
 # fields exist so neither is read as the other.
 SH_PTY=yes; SH_PASSWD=yes; SH_PTRACE=yes
-t_is "$(sh_shim_needed_missing)" '' 'a machine with a pty and a passwd database needs no shim'
+# The headless needs still read the machine here, so emptiness only holds
+# where the host has dri, input and a display; the headed clause above is
+# the one that asserts the full list.
+if [ -e /dev/dri ] || [ -e /dev/input ] || [ -e /dev/uinput ] || \
+   [ -n "${DISPLAY:-}" ] || [ -n "${WAYLAND_DISPLAY:-}" ]; then
+    t_is "$(sh_shim_needed_missing)" '' 'a headed machine needs no shim at all'
+else
+    t_is "$(sh_shim_needed_missing)" 'fakedrm fakeinput fakexenv fakedisplay' 'only the headless needs remain when pty/passwd/ptrace are fine'
+fi
 t_is "$(sh_shim_present)" '' 'and has none present, which is the right answer'
 SH_PTY=no; SH_PASSWD=no; SH_PTRACE=no
 # Rebuilt for the LD_PRELOAD clauses below.
 sh_shim_build fakepty "$ROOT/shims/fakepty.c" >/dev/null 2>&1
 sh_shim_build fakepwd "$ROOT/shims/fakepwd.c" >/dev/null 2>&1
 sh_shim_build antiptrace "$ROOT/shims/antiptrace.c" >/dev/null 2>&1
+for sh_ts_s in fakedrm fakeinput fakexenv fakedisplay; do
+    sh_shim_build "$sh_ts_s" "$ROOT/shims/$sh_ts_s.c" >/dev/null 2>&1
+done
 
 # The BOOTSTRAP COUNTS A NEEDED SHIM IT COULD NOT BUILD, AND SAYS SO. It used to
 # warn once on stderr and finish with `failures=0` and exit 0, because
@@ -623,6 +646,94 @@ SH_PTRACE=yes; t_is "$(sh_shim_need antiptrace)" 'no' 'a host with ptrace does n
 SH_PTRACE=no;  t_is "$(sh_shim_need antiptrace)" 'yes' 'a host without ptrace needs antiptrace'
 SH_PTRACE=partial; t_is "$(sh_shim_need antiptrace)" 'yes' 'a host with a partly-denied ptrace needs antiptrace too'
 SH_PTRACE=unknown; t_is "$(sh_shim_need antiptrace)" 'no' 'an unprobed host is not assumed broken'
+
+# The headless shims: enumeration opens succeed where nothing exists, and
+# display probes answer. One probe program with handwritten declarations (no
+# X/Wayland headers, same as the shims), resolved through dlsym so the
+# binary links with no display libraries. Assignments are sequential
+# statements: printf argument order is unspecified, and reading a probe
+# out-param inside the same printf that calls the probe is how a passing
+# shim once reported its own success as a failure.
+cat > "$tmp/headless.c" <<'EOF'
+#define _GNU_SOURCE
+#include <stdio.h>
+#include <dlfcn.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/stat.h>
+int main(void){
+    int fd, r, ma, ev, er;
+    void *d, *w, *rg;
+    void *(*xopen)(const char *);
+    int (*xscreens)(void *);
+    int (*xext)(void *, const char *, int *, int *, int *);
+    void *(*wlconn)(const char *);
+    void *(*wlreg)(void *);
+    struct stat st;
+    fd = open("/dev/dri/card0", O_RDONLY);
+    printf("dri-open=%d\n", fd); if (fd >= 0) close(fd);
+    fd = open("/dev/input/event0", O_RDONLY);
+    printf("input-open=%d\n", fd); if (fd >= 0) close(fd);
+    r = stat("/dev/dri/card0", &st);
+    printf("dri-stat=%d\n", r);
+    xopen = (void *(*)(const char *))dlsym(RTLD_DEFAULT, "XOpenDisplay");
+    xscreens = (int (*)(void *))dlsym(RTLD_DEFAULT, "XScreenCount");
+    xext = (int (*)(void *, const char *, int *, int *, int *))dlsym(RTLD_DEFAULT, "XQueryExtension");
+    wlconn = (void *(*)(const char *))dlsym(RTLD_DEFAULT, "wl_display_connect");
+    wlreg = (void *(*)(void *))dlsym(RTLD_DEFAULT, "wl_display_get_registry");
+    printf("syms=%d%d%d%d%d\n", !!xopen, !!xscreens, !!xext, !!wlconn, !!wlreg);
+    d = xopen ? xopen((const char *)0) : (void *)0;
+    printf("xopen=%s\n", d ? "nonnull" : "null");
+    if (d && xscreens) { r = xscreens(d); printf("screens=%d\n", r); }
+    if (d && xext) { ma = -1; ev = -1; er = -1; r = xext(d, "XTEST", &ma, &ev, &er); printf("xext=%d major=%d\n", r, ma); }
+    w = wlconn ? wlconn((const char *)0) : (void *)0;
+    printf("wlconnect=%s\n", w ? "nonnull" : "null");
+    if (w && wlreg) { rg = wlreg(w); printf("wlreg=%s\n", rg ? "nonnull" : "null"); }
+    return 0;
+}
+EOF
+cc -O2 -o "$tmp/headless" "$tmp/headless.c" -ldl 2>/dev/null || \
+    gcc -O2 -o "$tmp/headless" "$tmp/headless.c" -ldl 2>/dev/null
+t_ok "$([ -x "$tmp/headless" ]; echo $?)" 'the headless probe compiles with no display libraries'
+if [ ! -e /dev/dri ] && [ ! -e /dev/input ] && [ ! -e /dev/uinput ]; then
+    hs_out=$(LD_PRELOAD="$(sh_shims_dir)/fakedrm.so $(sh_shims_dir)/fakeinput.so $(sh_shims_dir)/fakexenv.so $(sh_shims_dir)/fakedisplay.so" "$tmp/headless" 2>/dev/null)
+    case "$hs_out" in
+        *'dri-open=-1'*) t_ok 1 "fakedrm opens /dev/dri/card0 (got: $hs_out)" ;;
+        *) t_ok 0 'fakedrm opens /dev/dri/card0' ;;
+    esac
+    case "$hs_out" in
+        *'input-open=-1'*) t_ok 1 "fakeinput opens /dev/input/event0 (got: $hs_out)" ;;
+        *) t_ok 0 'fakeinput opens /dev/input/event0' ;;
+    esac
+    t_contains "$hs_out" 'dri-stat=0' 'fakedrm stats /dev/dri/card0'
+    t_contains "$hs_out" 'xopen=nonnull' 'fakexenv answers XOpenDisplay'
+    t_contains "$hs_out" 'screens=1' 'fakexenv reports one screen'
+    t_contains "$hs_out" 'xext=1 major=128' 'fakexenv answers extension queries at a fixed base'
+    t_contains "$hs_out" 'wlconnect=nonnull' 'fakedisplay answers wl_display_connect'
+    t_contains "$hs_out" 'wlreg=nonnull' 'fakedisplay answers wl_display_get_registry'
+    # Each scope switch restores the host answer for its own shim only.
+    hs_off=$(SANDHOME_FAKEDRM=0 LD_PRELOAD="$(sh_shims_dir)/fakedrm.so" "$tmp/headless" 2>/dev/null)
+    t_contains "$hs_off" 'dri-open=-1' 'SANDHOME_FAKEDRM=0 restores the host refusal'
+else
+    t_skip 'this host has dri or input devices, so the headless smoke clauses did not run'
+fi
+# Need-gating reads the machine: absent devices and unset displays need the
+# shims, present ones do not. The display variables are saved and restored
+# around the clauses: an assignment prefix on a function call persists in
+# POSIX sh, and leaking an emptied DISPLAY into the rest of the file would
+# fake every later display question.
+t_is "$(sh_shim_need fakedrm)" "$([ -e /dev/dri ] && printf no || printf yes)" 'fakedrm is needed exactly where /dev/dri is absent'
+t_is "$(sh_shim_need fakeinput)" "$([ -e /dev/input ] || [ -e /dev/uinput ] && printf no || printf yes)" 'fakeinput is needed exactly where input devices are absent'
+sh_hs_disp=${DISPLAY:-__sandhome_unset}; sh_hs_way=${WAYLAND_DISPLAY:-__sandhome_unset}
+DISPLAY=''; WAYLAND_DISPLAY=''; export DISPLAY WAYLAND_DISPLAY
+t_is "$(sh_shim_need fakexenv)" 'yes' 'fakexenv is needed with no DISPLAY'
+t_is "$(sh_shim_need fakedisplay)" 'yes' 'fakedisplay is needed with no Wayland socket'
+DISPLAY=':0'; export DISPLAY
+t_is "$(sh_shim_need fakexenv)" 'no' 'fakexenv steps aside for a set DISPLAY'
+WAYLAND_DISPLAY='wayland-0'; export WAYLAND_DISPLAY
+t_is "$(sh_shim_need fakedisplay)" 'no' 'fakedisplay steps aside for a set socket'
+if [ "$sh_hs_disp" = __sandhome_unset ]; then unset DISPLAY; else DISPLAY=$sh_hs_disp; export DISPLAY; fi
+if [ "$sh_hs_way" = __sandhome_unset ]; then unset WAYLAND_DISPLAY; else WAYLAND_DISPLAY=$sh_hs_way; export WAYLAND_DISPLAY; fi
 
 
 t_end

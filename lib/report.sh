@@ -136,6 +136,22 @@ sh_report_json() {
         "$(sh_json_escape "$(sh_lead "$(sh_shim_needed_missing 2>/dev/null)")")" \
         "$(sh_json_escape "$(sh_report_view 2>/dev/null)")" \
         "$(sh_json_escape "$(sh_report_memexec 2>/dev/null)")"
+    # The fields an agent needs before writing its first file (issue #88):
+    # whether the current directory runs binaries, where build output must
+    # go, and what to do next. next_action reads the exec-space state only;
+    # readiness itself is doctor's job, not the report's.
+    sh_rj_wd=${PWD:-.}
+    sh_rj_wd_noexec=no
+    sh_exec_probe "$sh_rj_wd" 2>/dev/null || sh_rj_wd_noexec=yes
+    sh_rj_space=$(sh_space_status "${SH_EXEC:-/tmp}" 2>/dev/null)
+    case "$sh_rj_space" in
+        ok) sh_rj_next="build under ${SH_EXEC:-.}" ;;
+        unknown) sh_rj_next="run 'sandhome space --probe': the exec root cannot be measured" ;;
+        *) sh_rj_next="run 'sandhome gc', then re-run the setup with '--exec DIR' on a roomy exec-capable path" ;;
+    esac
+    printf ',"workdir":"%s","workdir_noexec":"%s","build_root":"%s","next_action":"%s"' \
+        "$(sh_json_escape "$sh_rj_wd")" "$sh_rj_wd_noexec" \
+        "$(sh_json_escape "${SH_EXEC:-unknown}")" "$(sh_json_escape "$sh_rj_next")"
     printf ',"failures":%s}\n' "$sh_rj_fail"
 }
 
@@ -156,14 +172,35 @@ sh_report_json() {
 # shim that is present but was built for the wrong libc is named.
 sh_doctor() {
     sh_doc_fail=0
+    # SH_DOCTOR_JSON=1 collects machine-readable members instead of prose:
+    # each check appends "name":"got" to SH_DOCTOR_MEMBERS and each miss
+    # appends its name to SH_DOCTOR_FAILED; the tail wraps the object.
+    # Prose notes (workdir hints, restart hints) are human text: in JSON mode
+    # they go to stderr, and their facts live in report --json fields instead.
+    if [ "${SH_DOCTOR_JSON:-0}" = 1 ]; then
+        SH_DOCTOR_MEMBERS=''
+        SH_DOCTOR_FAILED=''
+        export SH_DOCTOR_MEMBERS SH_DOCTOR_FAILED
+    fi
     sh_doctor_check() {
         sh_dc_name=$1
         sh_dc_got=$2
         sh_dc_want=$3
         if [ "$sh_dc_got" = "$sh_dc_want" ]; then
-            printf 'ok   %s=%s\n' "$sh_dc_name" "$sh_dc_got"
+            if [ "${SH_DOCTOR_JSON:-0}" = 1 ]; then
+                SH_DOCTOR_MEMBERS="$SH_DOCTOR_MEMBERS,\"$sh_dc_name\":\"$(sh_json_escape "$sh_dc_got")\""
+                export SH_DOCTOR_MEMBERS
+            else
+                printf 'ok   %s=%s\n' "$sh_dc_name" "$sh_dc_got"
+            fi
         else
-            printf 'FAIL %s=%s (wanted %s)\n' "$sh_dc_name" "$sh_dc_got" "$sh_dc_want"
+            if [ "${SH_DOCTOR_JSON:-0}" = 1 ]; then
+                SH_DOCTOR_MEMBERS="$SH_DOCTOR_MEMBERS,\"$sh_dc_name\":\"$(sh_json_escape "$sh_dc_got")\""
+                SH_DOCTOR_FAILED="$SH_DOCTOR_FAILED,\"$sh_dc_name\""
+                export SH_DOCTOR_MEMBERS SH_DOCTOR_FAILED
+            else
+                printf 'FAIL %s=%s (wanted %s)\n' "$sh_dc_name" "$sh_dc_got" "$sh_dc_want"
+            fi
             sh_doc_fail=$((sh_doc_fail + 1))
         fi
     }
@@ -189,7 +226,9 @@ sh_doctor() {
     # on the exec root with its venv inside it (where its shebangs resolve)
     # and links ./NAME back to it.
     sh_doc_cwd=${PWD:-.}
-    if ! sh_exec_probe "$sh_doc_cwd" 2>/dev/null; then
+    # Notes stay prose-only: in JSON mode they are skipped, and their facts
+    # (workdir noexec, cleared exec root) live in report --json fields.
+    if [ "${SH_DOCTOR_JSON:-0}" != 1 ] && ! sh_exec_probe "$sh_doc_cwd" 2>/dev/null; then
         printf 'note   workdir=%s is noexec; build and run output under %s\n' "$sh_doc_cwd" "${SH_EXEC:-.}"
         printf 'note   a .venv or node_modules here half-works: python -m runs, but every\n'
         printf 'note     console script has a shebang into this tree and exits "bad\n'
@@ -202,7 +241,7 @@ sh_doctor() {
     # #62). Re-running the setup rebuilds the view on its own (measured: 5s,
     # doctor 0, no follow-up), and `install <name>` re-runs the adopt path that
     # broke 8 views in 8 rounds (#49, #43).
-    if [ ! -x "$SH_EXEC_BIN/sandhome" ] && [ -r "$SH_HOME/repo/bin/sandhome" ]; then
+    if [ "${SH_DOCTOR_JSON:-0}" != 1 ] && [ ! -x "$SH_EXEC_BIN/sandhome" ] && [ -r "$SH_HOME/repo/bin/sandhome" ]; then
         printf 'note   exec root was cleared (tmpfs restart); re-run the setup, then run sandhome repair only if doctor still fails\n'
     fi
     # A needed shim that is not there is a failure even when the machine looks
@@ -226,6 +265,14 @@ sh_doctor() {
         sh_doctor_check antiptrace_built \
             "$([ -f "$sh_doc_shim_dir/antiptrace.so" ] && printf yes || printf no)" yes
     fi
+    # The headless shims share one rule instead of four blocks: needed here,
+    # or built by an earlier run, means present is required.
+    for sh_doc_shim in fakedrm fakeinput fakexenv fakedisplay; do
+        if [ "$(sh_shim_need "$sh_doc_shim")" = yes ] || [ -f "$sh_doc_shim_dir/$sh_doc_shim.so" ]; then
+            sh_doctor_check "${sh_doc_shim}_built" \
+                "$([ -f "$sh_doc_shim_dir/$sh_doc_shim.so" ] && printf yes || printf no)" yes
+        fi
+    done
     # The exec view must exist, and every toolchain that was installed must
     # still answer. `report` prints a version per toolchain; doctor turns the
     # empty ones into failures, because a version that is empty is a toolchain
@@ -355,7 +402,13 @@ sh_doctor() {
             # "an empty answer rather than a wrong one"). Treating it as ok is the
             # exact shape of the defect this change exists to remove: a silent
             # pass on the thing that was not measured.
-            printf 'FAIL exec_space=unknown (df could not measure %s; builds may fail with "no space left on device". Run "sandhome space --probe" to see the candidates)\n' "${SH_EXEC:-/tmp}"
+            if [ "${SH_DOCTOR_JSON:-0}" = 1 ]; then
+                SH_DOCTOR_MEMBERS="$SH_DOCTOR_MEMBERS,\"exec_space\":\"unknown\""
+                SH_DOCTOR_FAILED="$SH_DOCTOR_FAILED,\"exec_space\""
+                export SH_DOCTOR_MEMBERS SH_DOCTOR_FAILED
+            else
+                printf 'FAIL exec_space=unknown (df could not measure %s; builds may fail with "no space left on device". Run "sandhome space --probe" to see the candidates)\n' "${SH_EXEC:-/tmp}"
+            fi
             sh_doc_fail=$((sh_doc_fail + 1)) ;;
         *)
             sh_doc_free=$(sh_free_mb "${SH_EXEC:-/tmp}" 2>/dev/null)
@@ -364,11 +417,22 @@ sh_doctor() {
             # full of build output `gc` reclaims nothing, and it was measured
             # that way here. The one line names the biggest thing on the root
             # and the space it is worth.
-            printf 'FAIL exec_space=%s (%sMB free; builds and installs will fail. "du -sh %s/* | sort -h | tail" names what holds it, "sandhome gc" reclaims the caches sandhome owns, and re-running setup with --exec DIR moves everything. See "sandhome space --probe" for candidates)\n' \
-                "$sh_doc_space" "$sh_doc_free" "${SH_EXEC:-/tmp}"
+            if [ "${SH_DOCTOR_JSON:-0}" = 1 ]; then
+                SH_DOCTOR_MEMBERS="$SH_DOCTOR_MEMBERS,\"exec_space\":\"$sh_doc_space\""
+                SH_DOCTOR_FAILED="$SH_DOCTOR_FAILED,\"exec_space\""
+                export SH_DOCTOR_MEMBERS SH_DOCTOR_FAILED
+            else
+                printf 'FAIL exec_space=%s (%sMB free; builds and installs will fail. "du -sh %s/* | sort -h | tail" names what holds it, "sandhome gc" reclaims the caches sandhome owns, and re-running setup with --exec DIR moves everything. See "sandhome space --probe" for candidates)\n' \
+                    "$sh_doc_space" "$sh_doc_free" "${SH_EXEC:-/tmp}"
+            fi
             sh_doc_fail=$((sh_doc_fail + 1)) ;;
     esac
-    printf 'doctor_failures=%s\n' "$sh_doc_fail"
+    if [ "${SH_DOCTOR_JSON:-0}" = 1 ]; then
+        printf '{"failures":%s,"failed":[%s],"checks":{%s}}\n' \
+            "$sh_doc_fail" "${SH_DOCTOR_FAILED#,}" "${SH_DOCTOR_MEMBERS#,}"
+    else
+        printf 'doctor_failures=%s\n' "$sh_doc_fail"
+    fi
     unset -f sh_doctor_check
     [ "$sh_doc_fail" -gt 0 ] && return 1
     return 0

@@ -10,6 +10,9 @@ below is extracted from the code that implements it.
 usage: sandhome COMMAND [args]
 
   doctor                 probe the environment and report what is missing
+  doctor --json          the same gate as one JSON object
+  status [--json]        one-line readiness: roots, view, toolchains, next
+  resume                 rebuild the views after a tmpfs restart, then doctor
   env                    print the environment, for `eval "$(sandhome env)"`
   path                   print the exec-view bin directory
   space [--probe]        where the two roots are, and every candidate tried

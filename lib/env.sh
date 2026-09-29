@@ -98,6 +98,18 @@ sh_env_body() {
         printf 'export SANDHOME_WANTED_TOOLCHAINS\n'
     fi
     printf 'export PATH\n'
+    # XDG_RUNTIME_DIR first: every headless GL/EGL/Wayland/pipewire tool
+    # errors when it is unset, and the setup knows exactly where writable
+    # scratch is (issue #95). Set only when no valid one exists, so an
+    # operator's real runtime is never shadowed; ensured with 0700, which
+    # the spec requires and several toolkits enforce.
+    printf 'if [ -z "${XDG_RUNTIME_DIR:-}" ] || [ ! -d "$XDG_RUNTIME_DIR" ]; then\n'
+    printf '  XDG_RUNTIME_DIR="$SANDHOME_EXEC/xdg-runtime"\n'
+    printf '  export XDG_RUNTIME_DIR\n'
+    printf 'fi\n'
+    printf 'if [ -n "${XDG_RUNTIME_DIR:-}" ]; then\n'
+    printf '  mkdir -p "$XDG_RUNTIME_DIR" 2>/dev/null && chmod 0700 "$XDG_RUNTIME_DIR" 2>/dev/null || true\n'
+    printf 'fi\n'
     printf 'if [ -d "$SANDHOME_HOME/env.d" ]; then\n'
     printf '  for _sh_env_f in "$SANDHOME_HOME"/env.d/*.sh; do\n'
     printf '    [ -r "$_sh_env_f" ] && . "$_sh_env_f"\n'

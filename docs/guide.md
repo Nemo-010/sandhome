@@ -387,6 +387,46 @@ sandhome pty top                             # a terminal for one command
 database  -  an ssh server refuses an unknown account with `Permission denied
 (publickey)`, which reads as a key problem and is not one.
 
+### Headless hardware and GUI tests
+
+Three layers, in the order to reach for them. `env.sh` exports
+`XDG_RUNTIME_DIR` on the exec scratch (0700) when no valid one exists, which
+removes the first error of every headless GL/EGL/Wayland tool.
+
+First, the toolkits' own null drivers -- no shim, and preferred wherever one
+exists:
+
+| stack | lever | values |
+| --- | --- | --- |
+| SDL2 video | `SDL_VIDEODRIVER` | `dummy`, `offscreen` |
+| SDL2 audio | `SDL_AUDIODRIVER` | `dummy` |
+| Mesa GL | `LIBGL_ALWAYS_SOFTWARE` | `1` (real software rasterisation where `swrast`/`llvmpipe` is present -- actual pixels, better than any fake) |
+| EGL | `EGL_PLATFORM` | `surfaceless`, `device` |
+| Qt | `QT_QPA_PLATFORM` | `offscreen`, `minimal`, `vnc` |
+
+Second, the enumeration shims, for surfaces with no null mode. They make
+initialisation stop failing at the open or the probe; none of them renders:
+
+| shim | answers | scope switch |
+| --- | --- | --- |
+| `fakedrm` | opens/stats under `/dev/dri`, `/sys/class/drm` | `SANDHOME_FAKEDRM=0` |
+| `fakeinput` | opens/stats under `/dev/input`, `/dev/uinput` | `SANDHOME_FAKEINPUT=0` |
+| `fakexenv` | `XOpenDisplay` and client probes (one screen, fixed extension base) | `SANDHOME_FAKEXENV=0` |
+| `fakedisplay` | `wl_display_connect`, registry | `SANDHOME_FAKEDISPLAY=0` |
+
+Each is built only when the machine needs it (no `/dev/dri`, no input
+devices, no `DISPLAY`/`WAYLAND_DISPLAY`) and loads with `SANDHOME_SHIMS=1`
+like the rest. Not built: audio shims (`SDL_AUDIODRIVER=dummy` covers SDL;
+raw ALSA callers have no lever, but faking samples is a different category
+from faking enumeration), sysfs sensors, and deterministic RNG -- each is a
+project of its own, not a probe answer.
+
+Third, the hard limits, stated so no test pretends past them: no display
+server can exist here (bind is denied, so no in-cage Xvfb -- a client-side
+fake is the only X/Wayland option, and it cannot draw), no FUSE (every
+AppImage runs via `--appimage-extract-and-run`), and no real GPU (only
+enumeration; pixels come from software rasterisation or not at all).
+
 ## 6. errandsh
 
 `sandhome shell` runs `shell/errandsh`, a POSIX-sh line discipline that gives a

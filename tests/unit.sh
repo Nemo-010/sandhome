@@ -189,6 +189,19 @@ printf 'SH_PROFILE_OK=yes\n' > "$SH_HOME/profile.sh"
 t_is "$(sh -c "$(sh_profile_source_line)
 printf '%s' \"\$SH_PROFILE_OK\"")" 'yes' 'the profile source line reads a profile from a path with an apostrophe'
 
+# XDG_RUNTIME_DIR is set by the fragment only when no valid one exists, and
+# the directory is ensured 0700 (issue #95). An operator's real runtime is
+# never shadowed.
+SH_HOME="/tmp/sandhome-xdg-home"; SH_EXEC='/tmp/sandhome-xdg-exec'
+xdg_body=$(sh_env_body)
+t_is "$(env -u XDG_RUNTIME_DIR sh -c "$xdg_body
+printf '%s' \"\$XDG_RUNTIME_DIR\"")" '/tmp/sandhome-xdg-exec/xdg-runtime' 'an unset XDG_RUNTIME_DIR points at the exec scratch'
+t_is "$(XDG_RUNTIME_DIR=/tmp sh -c "$xdg_body
+printf '%s' \"\$XDG_RUNTIME_DIR\"")" '/tmp' 'a valid XDG_RUNTIME_DIR is kept'
+t_is "$(XDG_RUNTIME_DIR=/nonexistent-xdg-dir sh -c "$xdg_body
+printf '%s' \"\$XDG_RUNTIME_DIR\"")" '/tmp/sandhome-xdg-exec/xdg-runtime' 'a dangling XDG_RUNTIME_DIR is replaced'
+rm -rf /tmp/sandhome-xdg-exec
+
 # The version parsers, run against local files so they are tested offline. Both
 # were wrong once in the same direction: the first line was taken where the
 # format does not put the answer on the first line.

@@ -22,7 +22,7 @@ sh_shims_dir() { printf '%s/shims' "$SH_HOME"; }
 # reporting a machine as fully shimmed while a needed shim was absent -- exactly
 # the silent-green shape lib/shim.sh already documents for the build. One list,
 # read by all three, so the next shim is added in one place or not at all.
-sh_shim_names() { printf 'fakepty fakepwd antiptrace'; }
+sh_shim_names() { printf 'fakepty fakepwd antiptrace fakedrm fakeinput fakexenv fakedisplay'; }
 
 # sh_shim_need NAME -> yes when the machine lacks what the shim supplies.
 sh_shim_need() {
@@ -34,6 +34,19 @@ sh_shim_need() {
         # and exits. `partial` counts as needed: something answered EPERM for a
         # request it should not have, and the shim can only help.
         antiptrace) case "${SH_PTRACE:-unknown}" in no|partial) printf 'yes' ;; *) printf 'no' ;; esac ;;
+        # fakedrm answers GPU enumeration opens where /dev/dri does not exist;
+        # fakeinput answers input opens where /dev/input does not exist. Both
+        # read the filesystem directly: presence is the need, and no probe
+        # infrastructure is required to ask whether a path exists.
+        fakedrm)    if [ -e /dev/dri ]; then printf 'no'; else printf 'yes'; fi ;;
+        fakeinput)  if [ -e /dev/input ] || [ -e /dev/uinput ]; then printf 'no'; else printf 'yes'; fi ;;
+        # fakexenv/fakedisplay answer client display probes where no server
+        # can exist (bind is denied, so no in-cage Xvfb). Needed when neither
+        # a DISPLAY nor a Wayland socket is set: a set one means something
+        # answered already, real or not, and this shim is not the one to
+        # second-guess it.
+        fakexenv)   if [ -n "${DISPLAY:-}" ]; then printf 'no'; else printf 'yes'; fi ;;
+        fakedisplay) if [ -n "${WAYLAND_DISPLAY:-}" ]; then printf 'no'; else printf 'yes'; fi ;;
         *)          printf 'no' ;;
     esac
 }
@@ -145,6 +158,10 @@ sh_sba_what() {
         fakepty)    printf 'a pty' ;;
         fakepwd)    printf 'a passwd database' ;;
         antiptrace) printf 'a working ptrace syscall' ;;
+        fakedrm)    printf 'a GPU to enumerate' ;;
+        fakeinput)  printf 'input devices to open' ;;
+        fakexenv)   printf 'an X display to probe' ;;
+        fakedisplay) printf 'a Wayland display to probe' ;;
         *)          printf 'what it needs' ;;
     esac
 }
@@ -225,12 +242,21 @@ sh_shim_report() {
     sh_sr_pty=no;  sh_sr_fakepwd=no
     [ -f "$sh_sr_dir/fakepty.so" ] && sh_sr_pty=yes
     [ -f "$sh_sr_dir/fakepwd.so" ] && sh_sr_fakepwd=yes
-    printf 'pty=%s fakepty_built=%s passwd=%s fakepwd_built=%s passwd_file=%s dir=%s preload=%s\n' \
+    sh_sr_antiptrace=no; sh_sr_fakedrm=no; sh_sr_fakeinput=no
+    sh_sr_fakexenv=no;   sh_sr_fakedisplay=no
+    [ -f "$sh_sr_dir/antiptrace.so" ] && sh_sr_antiptrace=yes
+    [ -f "$sh_sr_dir/fakedrm.so" ] && sh_sr_fakedrm=yes
+    [ -f "$sh_sr_dir/fakeinput.so" ] && sh_sr_fakeinput=yes
+    [ -f "$sh_sr_dir/fakexenv.so" ] && sh_sr_fakexenv=yes
+    [ -f "$sh_sr_dir/fakedisplay.so" ] && sh_sr_fakedisplay=yes
+    printf 'pty=%s fakepty_built=%s passwd=%s fakepwd_built=%s passwd_file=%s dir=%s preload=%s antiptrace_built=%s fakedrm_built=%s fakeinput_built=%s fakexenv_built=%s fakedisplay_built=%s\n' \
         "${SH_PTY:-unknown}" "$sh_sr_pty" \
         "${SH_PASSWD:-unknown}" "$sh_sr_fakepwd" \
         "$([ -r "$sh_sr_dir/passwd" ] && printf '%s' "$sh_sr_dir/passwd" || printf none)" \
         "$sh_sr_dir" \
-        "${SANDHOME_SHIMS:+on}${SANDHOME_SHIMS:-off}"
+        "${SANDHOME_SHIMS:+on}${SANDHOME_SHIMS:-off}" \
+        "$sh_sr_antiptrace" "$sh_sr_fakedrm" "$sh_sr_fakeinput" \
+        "$sh_sr_fakexenv" "$sh_sr_fakedisplay"
 }
 
 # sh_shim_present -> the shims that are present in $SH_HOME/shims, space
