@@ -1135,6 +1135,82 @@ case "$rld_out" in
     *'host=dir'*) t_ok 0 'a target that runs something keeps its mirrored copy (#115)' ;;
     *) t_ok 1 "a target that runs something keeps its mirrored copy (#115) (got $rld_out)" ;;
 esac
+# A TARGET ADDED TO THE HOME WITH NO VIEW ENTRY AT ALL IS LINKED IN. The
+# first loop only converts view dirs that already exist; a raw `rustup target
+# add NEW` after the promote has no view dir to convert, so without the
+# second loop the next build still fails E0463. The home-only triple must
+# appear in the view as a link without a repair.
+rld2_script="$work/rld2.sh"
+cat > "$rld2_script" <<'RLD'
+set -u
+. "$1/lib/common.sh"
+. "$1/lib/space.sh"
+. "$1/tools/rust.sh"
+view=$2
+home=$3
+tc=$view/rustup/toolchains/stable
+hc=$home/rustup/toolchains/stable
+mkdir -p "$tc/lib/rustlib/host" "$hc/lib/rustlib/host" \
+         "$hc/lib/rustlib/riscv64gc-unknown-linux-gnu/lib"
+printf 'rlib\n' > "$hc/lib/rustlib/riscv64gc-unknown-linux-gnu/lib/libstd.rlib"
+tc_rust_link_data_targets "$view" "$home"
+[ -L "$tc/lib/rustlib/riscv64gc-unknown-linux-gnu" ] && printf 'linked' || printf 'absent'
+RLD
+rld2_out=$(sh "$rld2_script" "$ROOT" "$work/rld2-view" "$work/rld2-home" 2>/dev/null)
+case "$rld2_out" in
+    *linked*) t_ok 0 'a home-only target with no view entry is linked in (#115)' ;;
+    *) t_ok 1 "a home-only target with no view entry is linked in (#115) (got $rld2_out)" ;;
+esac
+# A QEMU GUEST THAT IS REQUESTED BUT ABSENT FAILS THE PROBE, SO ENSURE
+# FETCHES IT. The old probe warned and answered present when the host ran,
+# so `install qemuuser --extra aarch64` on a host-only tree skipped the
+# install and left the guest missing (issue #117).
+sh_qprobe_out=$(SH_LIB_DIR="$ROOT/lib" SH_REPO_DIR="$ROOT" SANDHOME_QEMUUSER_EXTRA=aarch64 sh -c '
+    . "$1/lib/common.sh"
+    . "$1/lib/space.sh"
+    . "$1/lib/toolchain.sh"
+    . "$1/tools/qemuuser.sh" >/dev/null 2>&1
+    if tc_qemuuser_probe >/dev/null 2>&1; then printf present; else printf absent; fi
+' sh "$ROOT" 2>/dev/null)
+case "$sh_qprobe_out" in
+    *absent*) t_ok 0 'a requested-but-absent qemu guest fails the probe (#117)' ;;
+    *) t_ok 1 "a requested-but-absent qemu guest fails the probe (#117) (got $sh_qprobe_out)" ;;
+esac
+# THE RUSTC WRAPPER SYNCs HOME-ONLY TARGETS AT BUILD TIME. Install-time
+# linking cannot cover a `rustup target add` that runs after the last
+# promote; the --sysroot wrapper runs before every rustc, so it links the
+# missing view entry at use time with no repair round-trip (issue #115).
+# The fake home binary exits 0 so the wrapper can run end to end here.
+rw_script="$work/rw.sh"
+cat > "$rw_script" <<'RLD'
+set -u
+. "$1/lib/common.sh"
+. "$1/lib/space.sh"
+. "$1/lib/memexec.sh"
+. "$1/tools/rust.sh"
+SH_VIEW_MODE=copy; export SH_VIEW_MODE
+SH_EXEC_BIN="$2/bin"; export SH_EXEC_BIN
+view=$2/view
+whome=$2/whome
+mkdir -p "$view/bin" "$whome/bin" "$view/lib/rustlib" "$whome/lib/rustlib/newtriple/lib"
+printf '#!/bin/sh\nexit 0\n' > "$whome/bin/rustc"
+chmod 0755 "$whome/bin/rustc"
+printf 'rlib\n' > "$whome/lib/rustlib/newtriple/lib/libstd.rlib"
+printf '#!/bin/sh\nexit 0\n' > "$view/bin/rustc"
+chmod 0755 "$view/bin/rustc"
+tc_rust_sysroot_wrapper "$view/bin/rustc" "$whome/bin/rustc" "$view" ""
+case "$(cat "$view/bin/rustc" 2>/dev/null)" in
+    *'live-target sync'*) printf 'marked ' ;;
+    *) printf 'unmarked ' ;;
+esac
+sh "$view/bin/rustc" --version >/dev/null 2>&1 || true
+[ -L "$view/lib/rustlib/newtriple" ] && printf 'linked' || printf 'absent'
+RLD
+rw_out=$(sh "$rw_script" "$ROOT" "$work/rw-dirs" 2>/dev/null)
+case "$rw_out" in
+    *marked*linked*) t_ok 0 'the rustc wrapper carries the live-target sync and links at use time (#115)' ;;
+    *) t_ok 1 "the rustc wrapper carries the live-target sync and links at use time (#115) (got $rw_out)" ;;
+esac
 
 # ShellCheck, the linter, as a first-class module like any other: known by
 # name, with declared bins, installable offline in dry-run, and pinned.

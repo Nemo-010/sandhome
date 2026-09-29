@@ -397,6 +397,19 @@ if [ -x "$work/exec/bin/sandhome-memexec" ] && sh_memexec_probe >/dev/null 2>&1;
     t_is "$(sh_toolchain_view_kind mxlaunch)" 'launch' 'a launcher view entry reports launch'
     t_is "$(sh_view_kind_of "$work/exec/bin/nothere")" 'direct' 'a missing view entry reports direct'
     t_is "$(sh_report_view)" 'mixed' 'disagreeing views are reported as mixed'
+    # A SYMLINK IS DIRECT, NOT COPY: an adopted toolchain resolves outside
+    # the view, and calling it a copy claims mirrored bytes that were never
+    # written. Exec perms differ by sandbox, so only a byte or size
+    # comparison may answer launch or copy; a link never does.
+    ln -sfn /usr/bin/sh "$work/exec/bin/mxlink" 2>/dev/null
+    t_is "$(sh_view_kind_of "$work/exec/bin/mxlink")" 'direct' 'a symlinked view entry reports direct'
+    rm -f "$work/exec/bin/mxlink" 2>/dev/null
+    # A VIEW LINK POINTING INSIDE THE EXEC ROOT IS MEASURED, NOT DIRECT: the
+    # framework links every view entry into the exec bin, so following the
+    # link names the bytes that run. Only an outside link runs direct.
+    ln -sfn "$work/exec/bin/mxcop" "$work/exec/bin/mxself" 2>/dev/null
+    t_is "$(sh_view_kind_of "$work/exec/bin/mxself")" 'copy' 'an intra-view link reports its target kind'
+    rm -f "$work/exec/bin/mxself" 2>/dev/null
 else
     t_skip 'the helper does not probe here, so the measured-view clause was skipped'
 fi

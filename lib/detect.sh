@@ -218,11 +218,21 @@ sh_detect_passwd() {
 sh_detect_probe_out() {
     sh_dpo_secs=$1
     shift
+    # REDUNDANCY: SIX DIRS, UNIQUE NAME, ALWAYS CLEANED. /tmp alone fails on
+    # a sandbox where /tmp is read-only or full; each dir is tried in turn
+    # and the name carries both PID and a counter so two concurrent probes
+    # never share a file. A stale file from a killed run is removed before
+    # use and after read, so a second probe never reads the first one's
+    # answer. Falling back to /dev/null (no capture) is the last resort, not
+    # the second choice: it answers empty rather than a wrong line.
     sh_dpo_file=''
-    for sh_dpo_dir in ${SH_HOME_TMP:-} ${TMPDIR:-} /tmp; do
+    sh_dpo_n=0
+    for sh_dpo_dir in ${SH_HOME_TMP:-} ${TMPDIR:-} /tmp ${SH_HOME:-} ${XDG_RUNTIME_DIR:-} /dev/shm; do
         [ -n "$sh_dpo_dir" ] || continue
         { [ -d "$sh_dpo_dir" ] && [ -w "$sh_dpo_dir" ]; } || continue
-        sh_dpo_file="$sh_dpo_dir/.sandhome-probe.$$.out"
+        sh_dpo_n=$((sh_dpo_n + 1))
+        sh_dpo_file="$sh_dpo_dir/.sandhome-probe.$$.${sh_dpo_n}.out"
+        rm -f "$sh_dpo_file" 2>/dev/null
         : > "$sh_dpo_file" 2>/dev/null && break
         sh_dpo_file=''
     done

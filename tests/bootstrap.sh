@@ -254,6 +254,20 @@ case "$detout_off" in
     *'detected a project marker'*) t_ok 1 '--no-detect turns the project scan off (#116)' ;;
     *) t_ok 0 '--no-detect turns the project scan off (#116)' ;;
 esac
+# MONOREPO SUBDIRS AND MAKEFILES FOLD IN TOO. Top-level-only missed
+# frontend/package.json and backend/Cargo.toml entirely, and a Makefile
+# named no toolchain at all. One subdir level plus the make signal must
+# appear without a second install round-trip.
+mono="$work/mono"
+mkdir -p "$mono/frontend" "$mono/backend" 2>/dev/null
+printf '{"name":"f"}' > "$mono/frontend/package.json"
+printf '[package]\nname = "b"\n' > "$mono/backend/Cargo.toml"
+printf 'all:\n\tcc -o x x.c\n' > "$mono/Makefile"
+monoout=$(cd "$mono" && SANDHOME_HOME="$work/mono-home" SANDHOME_EXEC="$work/mono-exec" \
+    sh "$ROOT/bootstrap.sh" --toolset minimal --no-profile --no-path-line --no-skills --dry-run 2>&1)
+t_contains "$monoout" 'detected a project marker for node' 'a subdir node marker folds node in (#116)'
+t_contains "$monoout" 'detected a project marker for rust' 'a subdir rust marker folds rust in (#116)'
+t_contains "$monoout" 'detected a project marker for clang' 'a Makefile folds clang in (#116)'
 # The skills ride the same flag discipline: installed by default, suppressed
 # by --no-skills, and only announced on a dry run (issue #89).
 t_contains "$dryout" 'would install the skills' 'a dry run announces the skills install'

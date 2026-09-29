@@ -36,6 +36,30 @@ TC_qemuuser_DESC='qemu-user, the static user-mode emulators (run a guest ELF, tr
 TC_qemuuser_BINS='bin/qemu-x86_64'
 TC_qemuuser_EXEC_MB=12
 
+# tc_qemuuser_root -> the payload dir, or nothing. sh_toolchain_root lives in
+# lib/toolchain.sh, which the isolated probe (sh_run_isolated sources only
+# common.sh plus this module) does NOT have: calling it there answers empty
+# and the disk scan below then read `/bin` -- the whole system -- found the
+# system qemu-aarch64, and reported a requested guest present when it was
+# not (measured: isolated probe 0 beside direct probe 1 for the same
+# EXTRA=aarch64). Every disk read here goes through this guard, with the
+# derived fallbacks the framework itself uses, and system prefixes refuse.
+tc_qemuuser_root() {
+    sh_qr_root=''
+    if command -v sh_toolchain_root >/dev/null 2>&1; then
+        sh_qr_root=$(sh_toolchain_root qemuuser 2>/dev/null)
+    elif [ -n "${SH_HOME_TOOLCHAINS:-}" ]; then
+        sh_qr_root=$SH_HOME_TOOLCHAINS/qemuuser
+    elif [ -n "${SH_HOME:-}" ]; then
+        sh_qr_root=$SH_HOME/toolchains/qemuuser
+    fi
+    case "$sh_qr_root" in
+        ''|/bin|/usr/bin|/sbin|/|/bin/*|/usr/bin/*|/sbin/*) printf ''; return 0 ;;
+    esac
+    printf '%s' "$sh_qr_root"
+    return 0
+}
+
 # tc_qemuuser_bins_from_disk -> BINS listing what is actually in the bin
 # directory, host emulator first. Called at load time as well as after an
 # install, because the install function does NOT run on the "payload already
@@ -45,7 +69,8 @@ TC_qemuuser_EXEC_MB=12
 # Reading the directory is also the honest answer -- it names what exists, not
 # what was once requested.
 tc_qemuuser_bins_from_disk() {
-    sh_qbd_root=$(sh_toolchain_root qemuuser 2>/dev/null)
+    sh_qbd_root=$(tc_qemuuser_root 2>/dev/null)
+    [ -n "$sh_qbd_root" ] || return 0
     [ -d "$sh_qbd_root/bin" ] || return 0
     for sh_qbd_e in "$sh_qbd_root/bin/"*; do
         [ -f "$sh_qbd_e" ] || continue
@@ -61,33 +86,70 @@ tc_qemuuser_bins_from_disk() {
 # warned at source time when SANDHOME_QEMUUSER_EXTRA named a guest that was
 # not on disk, so `sandhome help`, `sandhome version` and every other command
 # printed a warning about a toolchain nobody asked it about. The missing
-# guests are recorded here and named once per process from the probe, which
-# is the path that actually answers about this toolchain.
+# guests are computed fresh in the probe, not at source time: `install
+# qemuuser --extra aarch64` sets the variable AFTER every module is sourced,
+# so a source-time snapshot never sees the flag and the install wrongly
+# adopts (issue #117). The probe is the path that actually answers about
+# this toolchain, and it re-reads the disk first so a payload already
+# present is never mistaken for a missing guest.
 SH_QEMUUSER_MISSING_EXTRA=''
 SH_QEMUUSER_WARNED=0
 tc_qemuuser_bins_from_disk
-if [ -n "${SANDHOME_QEMUUSER_EXTRA:-}" ]; then
-    for sh_qbd_x in ${SANDHOME_QEMUUSER_EXTRA:-}; do
-        case "$sh_qbd_x" in qemu-*) sh_qbd_n=$sh_qbd_x ;; *) sh_qbd_n=qemu-$sh_qbd_x ;; esac
-        case " $TC_qemuuser_BINS " in
-            *" bin/$sh_qbd_n "*) ;;
-            *) SH_QEMUUSER_MISSING_EXTRA="$SH_QEMUUSER_MISSING_EXTRA $sh_qbd_x" ;;
-        esac
-    done
-    SH_QEMUUSER_MISSING_EXTRA=${SH_QEMUUSER_MISSING_EXTRA# }
-fi
 
 tc_qemuuser_probe() {
-    # A guest that is requested but absent cannot run on the adopt path (the
-    # archive is gone), so it is named rather than silently ignored -- once
-    # per process, because the probe runs on every ensure. `install --force`
-    # is the remedy, and saying so is the difference between a warning and a
-    # mystery.
-    if [ -n "$SH_QEMUUSER_MISSING_EXTRA" ] && [ "$SH_QEMUUSER_WARNED" = 0 ]; then
-        SH_QEMUUSER_WARNED=1
-        sh_warn "SANDHOME_QEMUUSER_EXTRA names$SH_QEMUUSER_MISSING_EXTRA, but it is not installed; run 'sandhome install --force qemuuser' to fetch it"
+    # A guest that is requested but absent is a FAILED probe, not a warning
+    # beside a pass. The old shape warned and then answered present when the
+    # host emulator ran, so `sandhome install qemuuser --extra aarch64` on a
+    # tree that already held the host saw "present", skipped the install,
+    # and left `qemu-aarch64` missing with only a warning to explain it
+    # (issue #117). Failing here makes ensure fetch the guest whether or not
+    # --force was passed, and makes doctor name the unfulfilled request.
+    # The warning fires once per process because the probe runs on every
+    # ensure; the failure fires every time because the guest is still missing.
+    # The missing set is computed HERE, not at source time, so a flag parsed
+    # after the modules loaded (`install qemuuser --extra X`) is still seen.
+    tc_qemuuser_bins_from_disk >/dev/null 2>&1 || true
+    SH_QEMUUSER_MISSING_EXTRA=''
+    if [ -n "${SANDHOME_QEMUUSER_EXTRA:-}" ]; then
+        for sh_qbd_x in ${SANDHOME_QEMUUSER_EXTRA:-}; do
+            case "$sh_qbd_x" in qemu-*) sh_qbd_n=$sh_qbd_x ;; *) sh_qbd_n=qemu-$sh_qbd_x ;; esac
+            case " $TC_qemuuser_BINS " in
+                *" bin/$sh_qbd_n "*) ;;
+                *) SH_QEMUUSER_MISSING_EXTRA="$SH_QEMUUSER_MISSING_EXTRA $sh_qbd_x" ;;
+            esac
+        done
+        SH_QEMUUSER_MISSING_EXTRA=${SH_QEMUUSER_MISSING_EXTRA# }
+    fi
+    if [ -n "$SH_QEMUUSER_MISSING_EXTRA" ]; then
+        if [ "$SH_QEMUUSER_WARNED" = 0 ]; then
+            SH_QEMUUSER_WARNED=1
+            sh_warn "SANDHOME_QEMUUSER_EXTRA names$SH_QEMUUSER_MISSING_EXTRA, but it is not installed; run 'sandhome install qemuuser --extra $SH_QEMUUSER_MISSING_EXTRA' to fetch it"
+        fi
+        return 1
     fi
     sh_have qemu-x86_64 && qemu-x86_64 --version >/dev/null 2>&1
+}
+
+# tc_qemuuser_guests -> the guest arches present on disk (aarch64, arm, ...),
+# one per line, or nothing. The host emulator is excluded: it is always
+# present when the probe passes, and listing it as a guest would read as
+# "no further work needed" on a tree that holds only the host (issue #117).
+tc_qemuuser_guests() {
+    sh_qg_root=$(tc_qemuuser_root 2>/dev/null)
+    [ -n "$sh_qg_root" ] || return 0
+    [ -d "$sh_qg_root/bin" ] || return 0
+    sh_qg_host=''
+    case "$(uname -m 2>/dev/null)" in
+        x86_64|amd64) sh_qg_host=qemu-x86_64 ;;
+        aarch64|arm64) sh_qg_host=qemu-aarch64 ;;
+    esac
+    for sh_qg_e in "$sh_qg_root"/bin/qemu-*; do
+        [ -f "$sh_qg_e" ] || continue
+        sh_qg_b=${sh_qg_e##*/}
+        [ "$sh_qg_b" = "$sh_qg_host" ] && continue
+        printf '%s\n' "${sh_qg_b#qemu-}"
+    done
+    return 0
 }
 
 # tc_qemuuser_asset -> the archive asset name for this machine, or nothing when

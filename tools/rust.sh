@@ -135,8 +135,19 @@ sh_toolchain_rust_proxies() {
         done
     fi
     if [ ! -x "$sh_rr_cargo/bin/rustup" ] && [ -n "$sh_rr_host" ] && [ -x "$sh_rr_host" ]; then
-        ln -sfn "$sh_rr_host" "$sh_rr_cargo/bin/rustup" 2>/dev/null || \
-            cp -f "$sh_rr_host" "$sh_rr_cargo/bin/rustup" 2>/dev/null || true
+        # Belt and braces beside the caller's sh_path_where: a host inside
+        # the exec view or inside this very cargo dir is never a working
+        # copy, it is the view link (or self). Linking it would build the
+        # home -> exec -> view -> exec cycle measured on a force-install
+        # over an adopted tree. Refuse it and leave the proxy missing rather
+        # than linked wrong; the install still succeeds and names the gap.
+        sh_rr_bad=no
+        case "$sh_rr_host" in "${SH_EXEC:-/tmp}"/*) sh_rr_bad=yes ;; esac
+        case "$sh_rr_host" in "$sh_rr_cargo"/*) sh_rr_bad=yes ;; esac
+        if [ "$sh_rr_bad" = no ]; then
+            ln -sfn "$sh_rr_host" "$sh_rr_cargo/bin/rustup" 2>/dev/null || \
+                cp -f "$sh_rr_host" "$sh_rr_cargo/bin/rustup" 2>/dev/null || true
+        fi
     fi
     return 0
 }
@@ -259,6 +270,41 @@ tc_rust_sysroot_wrapper() {
     sh_rw_sysroot=$3
     sh_rw_ld=$4
     sh_rw_name=${sh_rw_view##*/}
+    # The live-target sync needs both rustlib dirs baked in: the view one
+    # this wrapper already names as its sysroot, and the home one beside
+    # the home binary it runs. Derived here, once, so every build pays no
+    # lookup for what install time already knew. The home argument is a
+    # binary path (.../bin/rustc), so two levels come off, not one.
+    sh_rw_home_sysroot=${sh_rw_home%/bin/*}
+    case "$sh_rw_home_sysroot" in "$sh_rw_home") sh_rw_home_sysroot=${sh_rw_home%/*}; sh_rw_home_sysroot=${sh_rw_home_sysroot%/*} ;; esac
+    sh_rw_view_rustlib="$sh_rw_sysroot/lib/rustlib"
+    sh_rw_home_rustlib="$sh_rw_home_sysroot/lib/rustlib"
+    # The per-build sync block, emitted into every wrapper below. A raw
+    # `rustup target add NEW` lands in the HOME only, after the last
+    # promote; without this the next `cargo build --target NEW` fails E0463
+    # pointing back at the command just run (issue #115). The wrapper runs
+    # before every rustc, so the missing view entry is linked here, at use
+    # time, with no repair round-trip. Best-effort and silent: a read-only
+    # view, a missing home, or a target carrying executables (left mirrored
+    # by the install-time pass) simply skips. Dangling view links whose home
+    # target was removed are dropped, so `target remove` converges too.
+    sh_rw_sync=$(cat <<SYNCEOF
+# sandhome: live-target sync (issue #115). Home-only targets appear here.
+if [ -d "$sh_rw_home_rustlib" ] && [ -d "$sh_rw_view_rustlib" ]; then
+    for sh_lts_d in "$sh_rw_home_rustlib"/*; do
+        [ -d "\$sh_lts_d" ] || continue
+        sh_lts_b=\${sh_lts_d##*/}
+        [ -e "$sh_rw_view_rustlib/\$sh_lts_b" ] || [ -L "$sh_rw_view_rustlib/\$sh_lts_b" ] || {
+            [ -d "\$sh_lts_d/bin" ] || ln -sfn "\$sh_lts_d" "$sh_rw_view_rustlib/\$sh_lts_b" 2>/dev/null || true
+        }
+    done
+    for sh_lts_v in "$sh_rw_view_rustlib"/*; do
+        [ -L "\$sh_lts_v" ] || continue
+        [ -e "\$sh_lts_v" ] || rm -f "\$sh_lts_v" 2>/dev/null || true
+    done
+fi
+SYNCEOF
+)
     if [ "${SH_VIEW_MODE:-copy}" = launch ] && sh_memexec_built; then
         sh_rw_run="$(sh_memexec_bin)"
         sh_rw_target=$sh_rw_home
@@ -284,6 +330,7 @@ tc_rust_sysroot_wrapper() {
                 printf 'LD_LIBRARY_PATH="%s${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"\n' "$sh_rw_ld"
                 printf 'export LD_LIBRARY_PATH\n'
             fi
+            printf '%s\n' "$sh_rw_sync"
             printf 'if [ -n "${1:-}" ] && [ -x "$1" ]; then\n'
             printf '    sh_rw_w="$1"; shift\n'
             if [ -n "$sh_rw_run" ]; then
@@ -310,6 +357,7 @@ tc_rust_sysroot_wrapper() {
                 printf 'LD_LIBRARY_PATH="%s${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"\n' "$sh_rw_ld"
                 printf 'export LD_LIBRARY_PATH\n'
             fi
+            printf '%s\n' "$sh_rw_sync"
             if [ -n "$sh_rw_run" ]; then
                 printf 'exec "%s" "%s" --sysroot "%s" "$@"\n' \
                     "$sh_rw_run" "$sh_rw_target" "$sh_rw_sysroot"
@@ -381,6 +429,13 @@ tc_rust_copy_bins() {
 # rlibs, objects and crt archives the linker reads, so a link is both safe and
 # current by construction. A target that holds an executable on either side is
 # left mirrored.
+#
+# REDUNDANCY: TWO DIRECTIONS, NOT ONE. The first loop links view dirs that
+# already exist; the second loop creates view links for home dirs that have no
+# view entry at all. Without the second loop a target added AFTER the promote
+# (the exact raw `rustup target add` path this exists for) has no view dir to
+# convert, so the next build still fails E0463. Both loops share the same
+# executable check, so a target that grows a linker later stays mirrored.
 tc_rust_link_data_targets() {
     sh_rld_view=$1
     sh_rld_home=$2
@@ -410,7 +465,36 @@ tc_rust_link_data_targets() {
             rm -rf "$sh_rld_t" 2>/dev/null || continue
             ln -sfn "$sh_rld_home_t" "$sh_rld_t" 2>/dev/null || true
         done
+        # Second direction: a home target with no view entry at all. This is
+        # the raw-add path: `rustup target add NEW` lands in HOME only, and
+        # the view has nothing to convert. Link it in so the next build sees
+        # it without a repair. Host-named dirs are still checked for
+        # executables first; a missing home dir is not an error.
+        for sh_rld_ht in "$sh_rld_home/$sh_rld_rel"/lib/rustlib/*; do
+            [ -d "$sh_rld_ht" ] || continue
+            sh_rld_vt="$sh_rld_tc/lib/rustlib/${sh_rld_ht##*/}"
+            [ -e "$sh_rld_vt" ] && continue
+            sh_rld_bad=no
+            for sh_rld_f in "$sh_rld_ht"/bin/* "$sh_rld_ht"/bin/*/*; do
+                if [ -f "$sh_rld_f" ] && sh_is_exec_file "$sh_rld_f"; then
+                    sh_rld_bad=yes
+                    break
+                fi
+            done
+            [ "$sh_rld_bad" = no ] || continue
+            ln -sfn "$sh_rld_ht" "$sh_rld_vt" 2>/dev/null || true
+        done
     done
+    return 0
+}
+
+# tc_rust_sync_targets VIEW HOME -> the repair-time entry point for the same
+# invariant. A view rebuilt from an older home (or a home that gained targets
+# while the view sat stale) converges in one call: existing view dirs become
+# links where safe, and home-only targets appear as links. Returns 0 always;
+# a caller that needs the count reads the disk, not this status.
+tc_rust_sync_targets() {
+    tc_rust_link_data_targets "$1" "$2" || true
     return 0
 }
 
@@ -598,7 +682,19 @@ SHIMEOF
     # home directories.
     sh_re_host_rustup=''
     if sh_have rustup; then
-        sh_re_host_rustup=$(command -v rustup 2>/dev/null)
+        # The exec view is excluded: after an adopt cycle `command -v rustup`
+        # answers the view's own link, and proxying the home to the view
+        # builds a three-cycle (home -> exec -> view -> exec) that doctor
+        # then reports as a broken exec link and `rustup` reports as too
+        # many levels of symbolic links. sh_path_where skips SH_EXEC_BIN.
+        if command -v sh_path_where >/dev/null 2>&1; then
+            sh_re_host_rustup=$(sh_path_where rustup 2>/dev/null)
+        else
+            sh_re_host_rustup=$(command -v rustup 2>/dev/null)
+        fi
+        case "$sh_re_host_rustup" in
+            "${SH_EXEC:-/tmp}"/*) sh_re_host_rustup='' ;;
+        esac
     fi
     if [ ! -x "$sh_re_cargo/bin/cargo" ] || [ ! -x "$sh_re_cargo/bin/rustup" ]; then
         sh_toolchain_rust_proxies "$sh_re_cargo" "$sh_re_rustup" "$sh_re_host_rustup"

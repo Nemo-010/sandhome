@@ -630,15 +630,32 @@ sh_toolchain_view_measured() {
     fi
     sh_tvm_bins=''
     eval "sh_tvm_bins=\${TC_${sh_tvm_name}_BINS:-}"
+    # EVERY linked bin is measured, not just the first. A toolchain repaired
+    # under mixed modes (node copied, npm still launched) disagrees with
+    # itself, and reporting the first entry would call the tree launch while
+    # half of it is real bytes. Disagreement inside one toolchain is mixed at
+    # the toolchain level; the global report folds those into its own mixed.
+    sh_tvm_seen=''
+    sh_tvm_any=0
     for sh_tvm_b in $sh_tvm_bins; do
         sh_tvm_base=${sh_tvm_b##*/}
         [ -n "$sh_tvm_base" ] || continue
-        if [ -e "$SH_EXEC_BIN/$sh_tvm_base" ]; then
-            sh_view_kind_of "$SH_EXEC_BIN/$sh_tvm_base"
+        [ -e "$SH_EXEC_BIN/$sh_tvm_base" ] || continue
+        sh_tvm_k=$(sh_view_kind_of "$SH_EXEC_BIN/$sh_tvm_base" 2>/dev/null)
+        case "$sh_tvm_k" in
+            launch|copy|direct) ;;
+            *) continue ;;
+        esac
+        sh_tvm_any=1
+        if [ -z "$sh_tvm_seen" ]; then
+            sh_tvm_seen=$sh_tvm_k
+        elif [ "$sh_tvm_seen" != "$sh_tvm_k" ]; then
+            printf 'mixed'
             return 0
         fi
     done
-    printf ''
+    [ "$sh_tvm_any" = 1 ] || { printf ''; return 0; }
+    printf '%s' "$sh_tvm_seen"
     return 0
 }
 

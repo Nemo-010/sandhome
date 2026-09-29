@@ -130,12 +130,21 @@ fi
 # carried nothing about SANDHOME_HOME, so with no environment it fell back to
 # /tmp/sandhome, found no env.sh there, picked an unrelated exec root and
 # reported home=/tmp/sandhome. `env -i <exec>/bin/sandhome exec jq` then exited
-# 127 because jq was not on the PATH it had invented. Two routes, so a copy that
-# predates the bake or whose home moved still recovers: the baked home, and a
-# `.sandhome-home` pointer written on the exec root beside the copy.
-if [ -z "${SANDHOME_HOME:-}" ] && [ -n "$SH_BAKED_HOME" ] && [ -r "$SH_BAKED_HOME/env.sh" ]; then
-    SANDHOME_HOME=$SH_BAKED_HOME
-    export SANDHOME_HOME
+# 127 because jq was not on the PATH it had invented. Four routes, in order,
+# so a copy that predates the bake, whose home moved, or whose exec root was
+# cleared still recovers: the baked home, a `.sandhome-home` pointer written
+# on the exec root beside the copy, the conventional home paths, and the
+# recorded exec root's own pointer. Every pointer is validated (absolute path
+# plus a readable env.sh) before it is trusted, because a stale or hostile
+# file must not redirect the home.
+if [ -z "${SANDHOME_HOME:-}" ] && [ -n "$SH_BAKED_HOME" ]; then
+    case "$SH_BAKED_HOME" in
+        /*)
+            if [ -r "$SH_BAKED_HOME/env.sh" ]; then
+                SANDHOME_HOME=$SH_BAKED_HOME
+                export SANDHOME_HOME
+            fi ;;
+    esac
 fi
 if [ -z "${SANDHOME_HOME:-}" ]; then
     sh_home_ptr=''
@@ -144,11 +153,21 @@ if [ -z "${SANDHOME_HOME:-}" ]; then
     esac
     if [ -n "$sh_home_ptr" ] && [ -r "$sh_home_ptr/.sandhome-home" ]; then
         IFS= read -r sh_home_from_ptr < "$sh_home_ptr/.sandhome-home" || sh_home_from_ptr=''
-        if [ -n "$sh_home_from_ptr" ] && [ -r "$sh_home_from_ptr/env.sh" ]; then
-            SANDHOME_HOME=$sh_home_from_ptr
-            export SANDHOME_HOME
-        fi
+        case "$sh_home_from_ptr" in
+            /*) [ -r "$sh_home_from_ptr/env.sh" ] && { SANDHOME_HOME=$sh_home_from_ptr; export SANDHOME_HOME; } ;;
+        esac
     fi
+fi
+if [ -z "${SANDHOME_HOME:-}" ]; then
+    for sh_home_conv in "${XDG_DATA_HOME:-}/sandhome" "${HOME:-}/.local/share/sandhome" "${HOME:-}/.sandhome"; do
+        case "$sh_home_conv" in ''|/.local/share/sandhome|/.sandhome|/sandhome) continue ;; esac
+        case "$sh_home_conv" in /*) ;; *) continue ;; esac
+        if [ -r "$sh_home_conv/env.sh" ]; then
+            SANDHOME_HOME=$sh_home_conv
+            export SANDHOME_HOME
+            break
+        fi
+    done
 fi
 
 SH_REPO_DIR=$sh_repo
@@ -505,6 +524,26 @@ cmd_toolchains() {
             "$sh_c_t" "$sh_c_st" \
             "$sh_c_ver" "$sh_c_desc"
         printf '          path: %s\n' "$sh_c_path"
+        # Qemu guests are opt-in and otherwise invisible: `install qemuuser`
+        # alone holds only the host emulator, and the failure is a bare
+        # `command not found` (issue #117). The hint is printed here, where a
+        # consumer lists what is here, not only in the module source.
+        if [ "$sh_c_t" = qemuuser ]; then
+            if command -v tc_qemuuser_guests >/dev/null 2>&1; then
+                sh_c_guests=''
+                for sh_c_g in $(tc_qemuuser_guests 2>/dev/null); do
+                    sh_c_guests="$sh_c_guests $sh_c_g"
+                done
+                sh_c_guests=$(sh_trim "$sh_c_guests")
+                if [ -n "$sh_c_guests" ]; then
+                    printf '          guests: %s\n' "$sh_c_guests"
+                else
+                    printf '          guests: none (add with: sandhome install qemuuser --extra aarch64)\n'
+                fi
+            else
+                printf '          guests: none (add with: sandhome install qemuuser --extra aarch64)\n'
+            fi
+        fi
     done
 }
 cmd_install() {
@@ -703,6 +742,12 @@ cmd_repair() {
             # the same state.
             if command -v "tc_${sh_rp_name}_env" >/dev/null 2>&1; then
                 "tc_${sh_rp_name}_env" >/dev/null 2>&1 || true
+            fi
+            # Rust targets added after the last promote are re-linked here
+            # too: a repair that re-mirrors without re-linking would undo
+            # the live-target invariant and bring back E0463 (issue #115).
+            if [ "$sh_rp_name" = rust ] && command -v tc_rust_link_data_targets >/dev/null 2>&1; then
+                tc_rust_link_data_targets "$SH_EXEC_VIEWS/rust" "$(sh_toolchain_root rust)" >/dev/null 2>&1 || true
             fi
             sh_say "repaired the exec view for $sh_rp_name"
         else
@@ -1078,19 +1123,20 @@ cmd_status() {
         sh_cs_next="run 'sandhome doctor' for the failing invariant"
     fi
     if [ "$sh_cs_json" = 1 ]; then
-        printf '{"ready":"%s","failures":%s,"home":"%s","exec":"%s","exec_space":"%s","view":"%s","toolchains_present":%s,"toolchains_total":%s,"workdir":"%s","workdir_noexec":"%s","build_root":"%s","next_action":"%s"}\n' \
+        printf '{"ready":"%s","failures":%s,"home":"%s","exec":"%s","exec_space":"%s","exec_ceiling":"%s","view":"%s","toolchains_present":%s,"toolchains_total":%s,"workdir":"%s","workdir_noexec":"%s","build_root":"%s","next_action":"%s"}\n' \
             "$sh_cs_ready" "$sh_cs_fail" \
             "$(sh_json_escape "${SH_HOME:-unknown}")" "$(sh_json_escape "${SH_EXEC:-unknown}")" \
             "$(sh_json_escape "$(sh_space_status "${SH_EXEC:-/tmp}" 2>/dev/null)")" \
+            "$(sh_json_escape "$(sh_space_ceiling 2>/dev/null)")" \
             "$(sh_json_escape "$(sh_report_view 2>/dev/null)")" \
             "$sh_cs_present" "$sh_cs_total" \
             "$(sh_json_escape "$sh_cs_wd")" "$sh_cs_wd_noexec" \
             "$(sh_json_escape "${SH_EXEC:-unknown}")" "$(sh_json_escape "$sh_cs_next")"
         return "$sh_cs_rc"
     fi
-    printf 'ready=%s home=%s exec=%s exec_space=%s view=%s toolchains=%s/%s workdir_noexec=%s next=%s\n' \
+    printf 'ready=%s home=%s exec=%s exec_space=%s exec_ceiling=%s view=%s toolchains=%s/%s workdir_noexec=%s next=%s\n' \
         "$sh_cs_ready" "${SH_HOME:-unknown}" "${SH_EXEC:-unknown}" \
-        "$(sh_space_status "${SH_EXEC:-/tmp}" 2>/dev/null)" "$(sh_report_view 2>/dev/null)" \
+        "$(sh_space_status "${SH_EXEC:-/tmp}" 2>/dev/null)" "$(sh_space_ceiling 2>/dev/null)" "$(sh_report_view 2>/dev/null)" \
         "$sh_cs_present" "$sh_cs_total" "$sh_cs_wd_noexec" "$sh_cs_next"
     return "$sh_cs_rc"
 }

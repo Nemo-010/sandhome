@@ -157,9 +157,26 @@ t_ok "$([ ! -d "$tmp/worktree/.sandhome" ]; echo $?)" \
     'the probe report did not create the working-tree candidate (#114)'
 wt_root=$(cd / && SANDHOME_EXEC='' HOME='' sh -c \
     '. "$1/lib/common.sh"; . "$1/lib/space.sh"; sh_exec_candidates' sh "$ROOT" 2>/dev/null)
-case "$wt_root" in
-    *"/.sandhome/exec"*) t_ok 1 'the filesystem root is not offered as a working tree (#114)' ;;
+case " $wt_root " in
+    *" /.sandhome/exec "*) t_ok 1 'the filesystem root is not offered as a working tree (#114)' ;;
     *) t_ok 0 'the filesystem root is not offered as a working tree (#114)' ;;
+esac
+# PARENT DIRS AND MOUNT SCANS ARE CANDIDATES TOO, NOT JUST PWD. An agent in
+# project/subdir must see the project root's namespaced dir, and a roomy
+# mount that is neither PWD nor /tmp must appear from /proc/mounts. System
+# prefixes (/bin, /usr, tool bind mounts) must never appear.
+wt_sub=$(mkdir -p "$tmp/wtproj/sub" && cd "$tmp/wtproj/sub" && \
+    SANDHOME_EXEC='' HOME='' sh -c \
+        '. "$1/lib/common.sh"; . "$1/lib/space.sh"; sh_exec_candidates' sh "$ROOT" 2>/dev/null)
+case "$wt_sub" in
+    *"/wtproj/.sandhome/exec"*) t_ok 0 'a parent dir is an exec candidate (#114)' ;;
+    *) t_ok 1 "a parent dir is an exec candidate (#114) (got $wt_sub)" ;;
+esac
+wt_sys=$(SANDHOME_EXEC='' HOME='' PWD=/tmp sh -c \
+    '. "$1/lib/common.sh"; . "$1/lib/space.sh"; sh_exec_candidates' sh "$ROOT" 2>/dev/null)
+case "$wt_sys" in
+    *"/bin/.sandhome/exec"*|*"/usr/.sandhome/exec"*|*"/lib/.sandhome/exec"*) t_ok 1 "system prefixes are not exec candidates (got $wt_sys)" ;;
+    *) t_ok 0 'system prefixes are not exec candidates' ;;
 esac
 
 # NOTE: A SYMLINK WHOSE TARGET IS OUTSIDE THE TREE IS LEFT ALONE. The remap ran

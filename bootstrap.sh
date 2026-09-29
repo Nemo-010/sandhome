@@ -311,10 +311,12 @@ sh_toolset_names() {
 # once. A one-paste setup cannot know a project it was never told about, so a
 # fresh Rust checkout whose owner asked for `--toolset developer` paid an
 # `sandhome install rust` round-trip before the first `cargo build` (issue
-# #116). Only the working DIRECTORY is read: a project marker at the top level
-# is the signal, and walking an arbitrary tree is a different, slower question
-# that a setup step should not answer behind the caller's back -- --no-detect
-# and --without both turn the fold off.
+# #116). The working DIRECTORY is read first, then the git top level when it
+# differs, then one level of subdirs for monorepos: walking an arbitrary tree
+# is a slower question that a setup step should not answer behind the
+# caller's back, but top-level-only misses `frontend/package.json` and
+# `backend/Cargo.toml` entirely. --no-detect and --without both turn the fold
+# off.
 sh_bootstrap_detect() {
     sh_bdet_seen=' '
     sh_bdet_out=''
@@ -326,22 +328,53 @@ sh_bootstrap_detect() {
         sh_bdet_out="$sh_bdet_out $1"
         return 0
     }
-    # Manifests and lockfiles first: they name the toolchain outright.
-    if [ -e Cargo.toml ] || [ -e Cargo.lock ]; then sh_bdet_add rust; fi
-    if [ -e go.mod ] || [ -e go.sum ] || [ -e go.work ]; then sh_bdet_add go; fi
-    if [ -e package.json ] || [ -e package-lock.json ] || [ -e pnpm-lock.yaml ] || [ -e yarn.lock ]; then sh_bdet_add node; fi
-    if [ -e deno.json ] || [ -e deno.jsonc ]; then sh_bdet_add deno; fi
-    if [ -e bun.lockb ] || [ -e bunfig.toml ]; then sh_bdet_add bun; fi
-    if [ -e build.zig ] || [ -e build.zig.zon ]; then sh_bdet_add zig; fi
-    if [ -e pyproject.toml ] || [ -e requirements.txt ] || [ -e setup.py ] || [ -e Pipfile ]; then sh_bdet_add python; fi
-    # A C/C++ build system is the only signal here for the native side: the
-    # compiler, linker and build runner that read it. A bare `.c` is weaker
-    # and is handled by the source-file pass below.
-    if [ -e CMakeLists.txt ] || [ -e meson.build ] || [ -e configure.ac ]; then
-        sh_bdet_add clang
-        sh_bdet_add mold
-        sh_bdet_add ninja
+    # One dir's markers, factored so PWD, the git root and one subdir level
+    # share the same table. Manifests name the toolchain outright; a C/C++
+    # build system names the compiler plus its linker and runner.
+    sh_bdet_dir() {
+        sh_bdet_d=${1:-.}
+        if [ -e "$sh_bdet_d/Cargo.toml" ] || [ -e "$sh_bdet_d/Cargo.lock" ] || [ -e "$sh_bdet_d/rust-toolchain.toml" ] || [ -e "$sh_bdet_d/rust-toolchain" ]; then sh_bdet_add rust; fi
+        if [ -e "$sh_bdet_d/go.mod" ] || [ -e "$sh_bdet_d/go.sum" ] || [ -e "$sh_bdet_d/go.work" ]; then sh_bdet_add go; fi
+        if [ -e "$sh_bdet_d/package.json" ] || [ -e "$sh_bdet_d/package-lock.json" ] || [ -e "$sh_bdet_d/pnpm-lock.yaml" ] || [ -e "$sh_bdet_d/yarn.lock" ] || [ -e "$sh_bdet_d/.nvmrc" ]; then sh_bdet_add node; fi
+        if [ -e "$sh_bdet_d/deno.json" ] || [ -e "$sh_bdet_d/deno.jsonc" ]; then sh_bdet_add deno; fi
+        if [ -e "$sh_bdet_d/bun.lockb" ] || [ -e "$sh_bdet_d/bunfig.toml" ]; then sh_bdet_add bun; fi
+        if [ -e "$sh_bdet_d/build.zig" ] || [ -e "$sh_bdet_d/build.zig.zon" ]; then sh_bdet_add zig; fi
+        if [ -e "$sh_bdet_d/pyproject.toml" ] || [ -e "$sh_bdet_d/requirements.txt" ] || [ -e "$sh_bdet_d/setup.py" ] || [ -e "$sh_bdet_d/Pipfile" ] || [ -e "$sh_bdet_d/uv.lock" ]; then sh_bdet_add python; fi
+        if [ -e "$sh_bdet_d/CMakeLists.txt" ] || [ -e "$sh_bdet_d/meson.build" ] || [ -e "$sh_bdet_d/configure.ac" ] || [ -e "$sh_bdet_d/CMakePresets.json" ]; then
+            sh_bdet_add clang
+            sh_bdet_add mold
+            sh_bdet_add ninja
+        fi
+        # A Makefile alone is a weaker C signal than CMake: it names the need
+        # for a compiler and a runner, but not necessarily a mold linker, so
+        # only clang and ninja fold in. A bare `.c` is weaker still (below).
+        if [ -e "$sh_bdet_d/Makefile" ] || [ -e "$sh_bdet_d/makefile" ] || [ -e "$sh_bdet_d/GNUmakefile" ]; then
+            sh_bdet_add clang
+            sh_bdet_add ninja
+        fi
+    }
+    sh_bdet_dir .
+    # The git top level, when it differs from PWD: the agent may sit in a
+    # subdir of the project it was pasted to work on.
+    if sh_have git; then
+        sh_bdet_top=$(git rev-parse --show-toplevel 2>/dev/null) || sh_bdet_top=''
+        case "$sh_bdet_top" in ''|.) ;;
+            *)
+                sh_bdet_here=$(pwd 2>/dev/null) || sh_bdet_here=''
+                if [ -n "$sh_bdet_top" ] && [ "$sh_bdet_top" != "$sh_bdet_here" ] && [ -d "$sh_bdet_top" ]; then
+                    sh_bdet_dir "$sh_bdet_top"
+                fi ;;
+        esac
     fi
+    # One subdir level for monorepos: frontend/, backend/, crates/* each name
+    # their own toolchain. Bounded (no recursion) and manifest-only (no
+    # source globs down here, which would be noise from vendored trees).
+    for sh_bdet_sub in ./*/; do
+        [ -d "$sh_bdet_sub" ] || continue
+        case "$sh_bdet_sub" in ./.*/ ) continue ;; esac
+        case "$sh_bdet_sub" in ./node_modules/|./.git/|./target/|./.venv/|./venv/) continue ;; esac
+        sh_bdet_dir "${sh_bdet_sub%/}"
+    done
     # A source file at the top level is a real, if weaker, signal. The glob is
     # written relative so the shell does the matching and a directory that
     # matched nothing leaves the literal, which `-e` refuses.
@@ -454,26 +487,28 @@ sh_bootstrap_install_command() {
     # no HOME and no inherited environment finds its library from itself
     # (issue #88). A shell read-loop, because this file cannot require sed
     # or grep; a path with a quote in it is refused rather than half-baked.
-    # Exactly one line per baked path must result, or the copy is left unbaked.
+    # Each path bakes independently: a future copy with only one marker still
+    # gets the other, and a copy with neither keeps both empty rather than
+    # failing the whole bake because one line was renamed.
     case "$SH_REPO_DIR:$SH_HOME" in
         *\'*) sh_warn "not baking the paths (a quote in $SH_REPO_DIR or $SH_HOME)" ;;
         *)
             sh_bic_tmp="$SH_EXEC_BIN/.sandhome.cmd.$$"
-            sh_bic_n=0
+            sh_bic_repo=0; sh_bic_home=0
             sh_bic_ok=0
             {
                 while IFS= read -r sh_bic_l || [ -n "$sh_bic_l" ]; do
                     case "$sh_bic_l" in
                         SH_BAKED_REPO_DIR=*)
                             printf "SH_BAKED_REPO_DIR='%s'\n" "$SH_REPO_DIR"
-                            sh_bic_n=$((sh_bic_n + 1)) ;;
+                            sh_bic_repo=1 ;;
                         SH_BAKED_HOME=*)
                             printf "SH_BAKED_HOME='%s'\n" "$SH_HOME"
-                            sh_bic_n=$((sh_bic_n + 1)) ;;
+                            sh_bic_home=1 ;;
                         *) printf '%s\n' "$sh_bic_l" ;;
                     esac
                 done < "$SH_EXEC_BIN/sandhome"
-            } > "$sh_bic_tmp" 2>/dev/null && [ "$sh_bic_n" = 2 ] && \
+            } > "$sh_bic_tmp" 2>/dev/null && { [ "$sh_bic_repo" = 1 ] || [ "$sh_bic_home" = 1 ]; } && \
                 mv -f "$sh_bic_tmp" "$SH_EXEC_BIN/sandhome" 2>/dev/null && \
                 chmod 0755 "$SH_EXEC_BIN/sandhome" 2>/dev/null && sh_bic_ok=1
             rm -f "$sh_bic_tmp" 2>/dev/null

@@ -124,6 +124,15 @@ sh_home_default() {
 sh_exec_candidates() {
     sh_ec_seen=' '
     sh_ec_out=''
+    sh_ec_add() {
+        [ -n "$1" ] || return 0
+        case "$sh_ec_seen" in
+            *" $1 "*) return 0 ;;
+        esac
+        sh_ec_seen="$sh_ec_seen$1 "
+        sh_ec_out="$sh_ec_out$1 "
+        return 0
+    }
     # # STOP: THE WORKING TREE IS A CANDIDATE (issue #114). The list was a
     # hardcoded set, so a machine whose scratch roots are small or refuse
     # execve but whose checkout sits on a roomy, exec-capable mount never
@@ -132,27 +141,92 @@ sh_exec_candidates() {
     # `.sandhome/exec` under the tree, not the tree itself, so a chosen root
     # writes bin/ and views/ into a namespaced directory instead of littering
     # a project root. `/` is skipped: `/.sandhome` is not a working tree.
+    #
+    # REDUNDANCY: FOUR LAYERS, NOT ONE PWD. PWD alone misses the project root
+    # when the agent works in a subdir (PWD=/ws/proj/sub, root=/ws/proj), the
+    # git top level when PWD is not the checkout, and every other exec-capable
+    # mount the hardcoded five never named. Each layer is best-effort and
+    # bounded: a missing tool (git), an unreadable /proc/mounts, or a strange
+    # PWD degrades to the layers that remain rather than failing the list.
+    # Exec perms differ by sandbox, so listing is never deciding: every entry
+    # is still probed with a real file before it can win.
     sh_ec_pwd=''
     case "${PWD:-}" in
         ''|/) ;;
         *) sh_ec_pwd=$PWD/.sandhome/exec ;;
     esac
+    # Layer 1: the explicit override and the work-tree namespaced dirs (PWD,
+    # its parents up to two levels, and the git top level). Parents cover
+    # `project/subdir` runs; git covers a PWD outside the checkout.
+    sh_ec_git=''
+    if sh_have git; then
+        sh_ec_git=$(git rev-parse --show-toplevel 2>/dev/null) || sh_ec_git=''
+    fi
+    # Two parent levels, no deeper: a setup step must not walk to / looking
+    # for room. Only '' and / are dropped; every other parent names a
+    # namespaced dir, never the tree itself.
+    sh_ec_par1=''; sh_ec_par2=''
+    sh_ec_up=${PWD:-}
+    case "$sh_ec_up" in ''|/) sh_ec_up='' ;; *) sh_ec_up=${sh_ec_up%/*} ;; esac
+    case "$sh_ec_up" in ''|/) ;; *) sh_ec_par1=$sh_ec_up/.sandhome/exec ;; esac
+    case "$sh_ec_up" in ''|/) sh_ec_up='' ;; *) sh_ec_up=${sh_ec_up%/*} ;; esac
+    case "$sh_ec_up" in ''|/) ;; *) sh_ec_par2=$sh_ec_up/.sandhome/exec ;; esac
     for sh_ec_c in \
         ${SANDHOME_EXEC:+"$SANDHOME_EXEC"} \
         ${sh_ec_pwd:+"$sh_ec_pwd"} \
+        ${sh_ec_git:+"$sh_ec_git/.sandhome/exec"} \
+        ${sh_ec_par1:+"$sh_ec_par1"} \
+        ${sh_ec_par2:+"$sh_ec_par2"} \
         "$SH_HOME" \
         /dev/shm \
         /tmp \
         "/run/user/$(id -u 2>/dev/null)" \
-        ${HOME:+"$HOME/.cache/sandhome/exec"}
+        ${HOME:+"$HOME/.cache/sandhome/exec"} \
+        ${TMPDIR:+"$TMPDIR"} \
+        ${XDG_RUNTIME_DIR:+"$XDG_RUNTIME_DIR/sandhome-exec"} \
+        /var/tmp
     do
         [ -n "$sh_ec_c" ] || continue
-        case "$sh_ec_seen" in
-            *" $sh_ec_c "*) continue ;;
-        esac
-        sh_ec_seen="$sh_ec_seen$sh_ec_c "
-        sh_ec_out="$sh_ec_out$sh_ec_c "
+        # The filesystem root is never a working tree.
+        case "$sh_ec_c" in /.sandhome/exec|/.sandhome) continue ;; esac
+        sh_ec_add "$sh_ec_c"
     done
+    # Layer 2: every other rw mount point, bounded. /proc/mounts names what
+    # the kernel mounted; the plan still probes each entry with a real file,
+    # so a noexec mount is listed and then loses on its merits rather than
+    # being assumed away from its options. Only scratch-like prefixes are
+    # considered: system prefixes (/bin, /lib, /usr, /etc, /opt) are never
+    # candidates, because writing `.sandhome/exec` there litters the OS and
+    # is usually read-only anyway. Bounded at 12 entries so a container
+    # with 40 bind mounts does not turn the plan into 40 probes.
+    if [ -r /proc/mounts ]; then
+        sh_ec_n=0
+        while read -r sh_ec_dev sh_ec_point sh_ec_fs sh_ec_opts sh_ec_a sh_ec_b; do
+            [ "$sh_ec_n" -lt 12 ] || break
+            case "$sh_ec_point" in
+                ''|/|/dev|/dev/*|/proc|/proc/*|/sys|/sys/*|/run/secrets|/run/secrets/*|/etc/*) continue ;;
+            esac
+            case "$sh_ec_fs" in proc|sysfs|cgroup*|devpts|mqueue|shm|overlay) continue ;; esac
+            case "$sh_ec_opts" in *ro*) continue ;; esac
+            # Scratch-like prefixes only: the work areas and temp roots.
+            # Anything else (system bind mounts, language runtimes, package
+            # caches) is not a place to put an exec root. Deep bind mounts
+            # (a tool dir mounted at /home/u/.local/share/.../bin) are also
+            # skipped: only roots up to three levels deep are considered, so
+            # per-tool mounts never become exec roots.
+            case "$sh_ec_point" in
+                /workspace*|/tmp*|/var/tmp*|/home*|/state*|/mnt*|/media*|/srv*|/data*|/scratch*|/run/user/*|/dev/shm) ;;
+                *) continue ;;
+            esac
+            case "$sh_ec_point" in /*/*/*/*) continue ;; esac
+            [ -d "$sh_ec_point" ] || continue
+            sh_ec_mp_c="$sh_ec_point/.sandhome/exec"
+            case "$sh_ec_seen" in *" $sh_ec_mp_c "*) continue ;; esac
+            case "$sh_ec_seen" in *" $sh_ec_point "*) continue ;; esac
+            sh_ec_add "$sh_ec_mp_c"
+            sh_ec_n=$((sh_ec_n + 1))
+        done < /proc/mounts
+    fi
     sh_ec_out=${sh_ec_out% }
     printf '%s' "$sh_ec_out"
 }

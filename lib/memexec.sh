@@ -114,22 +114,70 @@ sh_memexec_probe() {
 }
 
 # sh_view_kind_of FILE -> launch when FILE is a launcher copy, copy when it is
-# a real file, direct when it is not there. THIS READS THE DISK, AND IT HAS TO:
-# sh_memexec_mode answers what the machine WOULD do, and a single view built
-# under an explicit SANDHOME_VIEW_MODE=copy is real bytes while the machine
-# still probes launch. A report that echoed the plan named the wrong thing for
-# exactly the tree a caller had just asked to change (issue #113).
+# a real file, direct when it is not there or is a symlink out of the view.
+# THIS READS THE DISK, AND IT HAS TO: sh_memexec_mode answers what the
+# machine WOULD do, and a single view built under an explicit
+# SANDHOME_VIEW_MODE=copy is real bytes while the machine still probes
+# launch. A report that echoed the plan named the wrong thing for exactly
+# the tree a caller had just asked to change (issue #113).
+#
+# REDUNDANCY: THREE FALLBACKS, NOT ONE. cmp is the exact answer; when cmp is
+# absent the file SIZE still distinguishes a 17KB launcher from a 149MB real
+# binary, and when even the helper is absent the mode falls back to the
+# caller. A symlink is direct, not copy: an adopted toolchain resolves
+# outside the view, and calling it a copy would claim bytes that were never
+# mirrored. Exec perms differ by sandbox, so existence alone never implies
+# launch or copy: only a byte or size comparison does.
 sh_view_kind_of() {
     sh_vko_f=$1
     if [ -z "$sh_vko_f" ] || [ ! -e "$sh_vko_f" ]; then
         printf 'direct'
         return 0
     fi
-    # Without cmp the launcher cannot be told from a real file, and answering
-    # `copy` would make a launch host look like a copy host. Say nothing and let
-    # the caller fall back to the machine mode.
+    # A symlink needs its target read before it is named. The framework
+    # links every view entry into the exec bin, so a view link pointing
+    # INSIDE the exec root is the tree's own indirection: its target is
+    # measured below. A link resolving OUTSIDE (an adopted system binary)
+    # runs direct however large it is. Without readlink the two cannot be
+    # told apart, and direct is the safe answer: never claim mirrored bytes
+    # blindly. Exec perms differ by sandbox, so existence alone never
+    # implies launch or copy: only a byte or size comparison does.
+    if [ -L "$sh_vko_f" ]; then
+        if sh_have readlink && command -v sh_dirname >/dev/null 2>&1 && command -v sh_lex_normalize >/dev/null 2>&1; then
+            sh_vko_t=$(readlink "$sh_vko_f" 2>/dev/null) || { printf 'direct'; return 0; }
+            case "$sh_vko_t" in
+                /*) sh_vko_r=$sh_vko_t ;;
+                *) sh_vko_r=$(sh_dirname "$sh_vko_f" 2>/dev/null)/$sh_vko_t
+                   sh_vko_r=$(sh_lex_normalize "$sh_vko_r" 2>/dev/null) || sh_vko_r='' ;;
+            esac
+            case "$sh_vko_r" in
+                "${SH_EXEC:-/tmp}"/*) sh_vko_f=$sh_vko_r ;;
+                *) printf 'direct'; return 0 ;;
+            esac
+        else
+            printf 'direct'
+            return 0
+        fi
+    fi
     if sh_memexec_built && sh_have cmp; then
         if cmp -s "$sh_vko_f" "$(sh_memexec_bin)" 2>/dev/null; then
+            printf 'launch'
+        else
+            printf 'copy'
+        fi
+        return 0
+    fi
+    # Without cmp, sizes still separate the two shapes on every sandbox this
+    # tree runs on: the launcher is one small helper, a real view entry is
+    # the payload. sh_file_bytes is the tree's own size reader (no wc
+    # dependency in the library path); equal sizes read as launch, different
+    # sizes as copy, unreadable sizes as nothing (caller falls back).
+    if sh_memexec_built; then
+        sh_vko_a=$(sh_file_bytes "$sh_vko_f" 2>/dev/null)
+        sh_vko_b=$(sh_file_bytes "$(sh_memexec_bin)" 2>/dev/null)
+        case "$sh_vko_a" in ''|*[!0-9]*) printf ''; return 0 ;; esac
+        case "$sh_vko_b" in ''|*[!0-9]*) printf ''; return 0 ;; esac
+        if [ "$sh_vko_a" = "$sh_vko_b" ]; then
             printf 'launch'
         else
             printf 'copy'

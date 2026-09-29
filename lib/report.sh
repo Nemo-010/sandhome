@@ -41,6 +41,9 @@ sh_report_view() {
         for sh_rv_t in $(sh_toolchain_available 2>/dev/null); do
             sh_rv_k=$(sh_toolchain_view_measured "$sh_rv_t" 2>/dev/null)
             case "$sh_rv_k" in
+                mixed)
+                    printf 'mixed'
+                    return 0 ;;
                 launch|copy)
                     if [ -z "$sh_rv_seen" ]; then
                         sh_rv_seen=$sh_rv_k
@@ -56,6 +59,30 @@ sh_report_view() {
         fi
     fi
     printf '%s' "$sh_rv_mode"
+}
+
+# sh_report_views_json -> a JSON object mapping each installed toolchain to
+# its measured view kind (launch/copy/mixed/direct), or {} when nothing is
+# installed. The global `view` field stays the summary for old readers; this
+# is the breakdown the summary folds (issue #113). Only identifiers reach
+# the object, so no escaping beyond the names themselves is needed.
+sh_report_views_json() {
+    sh_rvj_first=1
+    printf '{'
+    if command -v sh_toolchain_view_measured >/dev/null 2>&1; then
+        for sh_rvj_t in $(sh_toolchain_available 2>/dev/null); do
+            [ -d "$(sh_toolchain_root "$sh_rvj_t" 2>/dev/null)" ] || continue
+            sh_rvj_k=$(sh_toolchain_view_measured "$sh_rvj_t" 2>/dev/null)
+            [ -n "$sh_rvj_k" ] || continue
+            if [ "$sh_rvj_first" = 1 ]; then
+                sh_rvj_first=0
+            else
+                printf ','
+            fi
+            printf '"%s":"%s"' "$(sh_json_escape "$sh_rvj_t")" "$(sh_json_escape "$sh_rvj_k")"
+        done
+    fi
+    printf '}'
 }
 
 # sh_report_memexec -> the one line sh_memexec_report prints, or `unknown`
@@ -113,6 +140,16 @@ sh_report_text() {
     printf 'shims_built_this_run=%s\n' "$(sh_lead "${SH_SHIMS_BUILT:-}")"
     printf 'view=%s\n' "$(sh_report_view 2>/dev/null)"
     printf 'memexec=%s\n' "$(sh_report_memexec 2>/dev/null)"
+    # Per-toolchain measured views: the breakdown the global `view` folds.
+    # A mixed tree names which entries are which without a second command.
+    if command -v sh_toolchain_view_measured >/dev/null 2>&1; then
+        for sh_rt_vt in $(sh_toolchain_available 2>/dev/null); do
+            [ -d "$(sh_toolchain_root "$sh_rt_vt" 2>/dev/null)" ] || continue
+            sh_rt_vk=$(sh_toolchain_view_measured "$sh_rt_vt" 2>/dev/null)
+            [ -n "$sh_rt_vk" ] || continue
+            printf 'view.%s=%s\n' "$sh_rt_vt" "$sh_rt_vk"
+        done
+    fi
     for sh_rt_name in $(sh_toolchain_available 2>/dev/null); do
         # TEXT ONLY, on purpose (judge finding 8-A): the JSON object carries no
         # toolchain map. A version is free text from the tool itself, and this
@@ -161,6 +198,11 @@ sh_report_json() {
         "$(sh_json_escape "$(sh_lead "$(sh_shim_needed_missing 2>/dev/null)")")" \
         "$(sh_json_escape "$(sh_report_view 2>/dev/null)")" \
         "$(sh_json_escape "$(sh_report_memexec 2>/dev/null)")"
+    # The per-toolchain breakdown beside the summary: old readers keep
+    # reading `view`, new readers read `views` to see which entry is which.
+    if command -v sh_report_views_json >/dev/null 2>&1; then
+        printf ',"views":%s' "$(sh_report_views_json 2>/dev/null || printf '{}')"
+    fi
     # The fields an agent needs before writing its first file (issue #88):
     # whether the current directory runs binaries, where build output must
     # go, and what to do next. next_action reads the exec-space state only;
