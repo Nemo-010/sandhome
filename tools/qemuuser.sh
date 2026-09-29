@@ -94,6 +94,11 @@ tc_qemuuser_install() {
     sh_qu_dir=$(find "$sh_qu_root" -maxdepth 1 -type d -name "qemu-linux-*" | head -1)
     [ -n "$sh_qu_dir" ] || { sh_warn "the qemu-static archive had no top-level directory"; return 1; }
     mkdir -p "$sh_qu_root/bin" 2>/dev/null || return 1
+    # START FROM A CLEAN BIN: without this, a re-install that asks for different
+    # guests leaves the previous guests on disk, and the BINS loop below would
+    # promise them on PATH even though this install did not decide to keep them.
+    rm -rf "$sh_qu_root/bin" 2>/dev/null || true
+    mkdir -p "$sh_qu_root/bin" 2>/dev/null || return 1
     # The host emulator always; the guest set on request. Promoting all 33
     # unconditionally is ~280MB of view for a machine that will run one or two,
     # and the exec root is the constrained side of the split -- this is the
@@ -134,10 +139,16 @@ tc_qemuuser_install() {
         esac
     done
     export TC_qemuuser_BINS
-    [ -x "$sh_qu_root/bin/qemu-x86_64" ] || [ -x "$sh_qu_root/bin/qemu-aarch64" ] || {
-        sh_warn "the archive did not contain the expected emulator"
-        return 1
-    }
+    # The host emulator is the one this module promises. Checking for it by name
+    # after the copies means an archive that did not contain it is caught here
+    # rather than at first use; on a host whose name we do not know, the case
+    # above left sh_qu_host empty and there is nothing to assert.
+    if [ -n "$sh_qu_host" ]; then
+        [ -x "$sh_qu_root/bin/$sh_qu_host" ] || {
+            sh_warn "the archive did not contain bin/$sh_qu_host"
+            return 1
+        }
+    fi
     chmod 0755 "$sh_qu_root/bin/"* 2>/dev/null || true
     rm -rf "$sh_qu_dir" "$sh_qu_root/qu.tar.xz"
     return 0

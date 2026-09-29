@@ -976,13 +976,55 @@ EOF
             *aarch64*) t_ok 0 'zig cross-compiles an aarch64 guest with its bundled sysroot' ;;
             *)         t_ok 1 'zig cross-compiles an aarch64 guest with its bundled sysroot' ;;
         esac
-        t_ok "$([ "$(qemu-aarch64 "$work/g64" 2>/dev/null)" = 'cross-ok' ]; echo $?)" \
-            'qemu-aarch64 runs the cross-compiled guest'
+        # The guest emulator is OPT-IN (SANDHOME_QEMUUSER_EXTRA), so its absence
+        # is a configuration, not a defect: say so rather than failing a clause
+        # for a machine that did not ask for it.
+        # # STOP: `command -v` IS NOT ENOUGH, AND ISSUE #110 IS WHY. A view
+        # launcher whose payload was pruned still resolves through `command -v`
+        # -- the stale entry survives on PATH -- and only fails when run. So the
+        # precondition is "it actually runs", not "it resolves", or this clause
+        # fails on a machine where the guest emulator is simply not installed.
+        qa_ok=no
+        if command -v qemu-aarch64 >/dev/null 2>&1 && qemu-aarch64 --version >/dev/null 2>&1; then
+            qa_ok=yes
+        fi
+        if [ "$qa_ok" = yes ]; then
+            t_ok "$([ "$(qemu-aarch64 "$work/g64" 2>/dev/null)" = 'cross-ok' ]; echo $?)" \
+                'qemu-aarch64 runs the cross-compiled guest'
+        else
+            echo '  skip  qemu-aarch64 is not installed here (set SANDHOME_QEMUUSER_EXTRA=aarch64)'
+        fi
     else
         echo '  skip  zig could not cross-compile here (may want its install dir)'
     fi
 else
     echo '  skip  zig or qemu-aarch64 is not on PATH here'
+fi
+
+
+# The promotion must mirror the module's BINS, not accumulate. qemuuser is the
+# first module whose BINS can shrink (SANDHOME_QEMUUSER_EXTRA), which exposes a
+# direction the tree never had to handle: a re-install that asks for fewer
+# guests must not leave the previous guest's launcher on PATH. This is issue
+# #110 at the module level, and the clause is here because the module is what
+# made it reachable.
+case "$(cat "$ROOT/tools/qemuuser.sh")" in
+    *'START FROM A CLEAN BIN'*) t_ok 0 'a re-install clears the bin directory first' ;;
+    *) t_ok 1 'a re-install clears the bin directory first' ;;
+esac
+case "$(cat "$ROOT/tools/qemuuser.sh")" in
+    *'the archive did not contain bin/$sh_qu_host'*) t_ok 0 'the missing-emulator check names the host emulator, not two hardcoded names' ;;
+    *) t_ok 1 'the missing-emulator check names the host emulator, not two hardcoded names' ;;
+esac
+cat > "$work/guest.c" <<'EOF'
+int main(void){ return 0; }
+EOF
+if command -v qemu-x86_64 >/dev/null 2>&1; then
+    # A guest binary with no payload behind it must fail; the point is that the
+    # launcher is not left promising something that was removed.
+    printf 'not an elf\n' > "$work/notelf"
+    qemu-x86_64 "$work/notelf" >/dev/null 2>&1
+    t_ok "$([ $? -ne 0 ]; echo $?)" 'a launcher does not report success for a guest it cannot run'
 fi
 
 t_end
