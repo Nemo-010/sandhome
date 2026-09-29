@@ -63,6 +63,8 @@ sh_report_text() {
     printf 'provider=%s\n'    "${SH_PROVIDER:-none}"
     printf 'pty=%s\n'         "${SH_PTY:-unknown}"
     printf 'passwd=%s\n'      "${SH_PASSWD:-unknown}"
+    printf 'ptrace=%s\n'      "${SH_PTRACE:-unknown}"
+    printf 'bind=%s\n'        "${SH_BIND:-unknown}"
     printf 'home=%s\n'        "${SH_HOME:-unknown}"
     printf 'home_exec=%s\n'   "${SH_HOME_EXEC:-unknown}"
     printf 'exec=%s\n'        "${SH_EXEC:-unknown}"
@@ -116,9 +118,10 @@ sh_report_json() {
         "$(sh_json_escape "${SH_OS_ID:-unknown}")" "$(sh_json_escape "${SH_KERNEL:-unknown}")" \
         "$(sh_json_escape "${SH_ARCH:-unknown}")" "$(sh_json_escape "${SH_LIBC:-unknown}")" \
         "$(sh_json_escape "${SH_WSL:-unknown}")"
-    printf ',"privilege":"%s","provider":"%s","pty":"%s","passwd":"%s"' \
+    printf ',"privilege":"%s","provider":"%s","pty":"%s","passwd":"%s","ptrace":"%s","bind":"%s"' \
         "$(sh_json_escape "${SH_PRIVILEGE:-none}")" "$(sh_json_escape "${SH_PROVIDER:-none}")" \
-        "$(sh_json_escape "${SH_PTY:-unknown}")" "$(sh_json_escape "${SH_PASSWD:-unknown}")"
+        "$(sh_json_escape "${SH_PTY:-unknown}")" "$(sh_json_escape "${SH_PASSWD:-unknown}")" \
+        "$(sh_json_escape "${SH_PTRACE:-unknown}")" "$(sh_json_escape "${SH_BIND:-unknown}")"
     printf ',"home":"%s","home_exec":"%s","exec":"%s","exec_free_mb":"%s","exec_space":"%s","max_exec_free_mb":"%s","exec_ceiling":"%s"' \
         "$(sh_json_escape "${SH_HOME:-unknown}")" "$(sh_json_escape "${SH_HOME_EXEC:-unknown}")" \
         "$(sh_json_escape "${SH_EXEC:-unknown}")" "$(sh_json_escape "$(sh_free_mb "${SH_EXEC:-/tmp}" 2>/dev/null)")" \
@@ -215,6 +218,13 @@ sh_doctor() {
             "$([ -f "$sh_doc_shim_dir/fakepwd.so" ] && printf yes || printf no)" yes
         sh_doctor_check fakepwd_database \
             "$([ -r "$sh_doc_shim_dir/passwd" ] && printf yes || printf no)" yes
+    fi
+    # antiptrace is doctor-checked the same way: present when the machine denies
+    # ptrace, or when an earlier run built it here and the file is the same one a
+    # program will load.
+    if [ "${SH_PTRACE:-unknown}" = no ] || [ -f "$sh_doc_shim_dir/antiptrace.so" ]; then
+        sh_doctor_check antiptrace_built \
+            "$([ -f "$sh_doc_shim_dir/antiptrace.so" ] && printf yes || printf no)" yes
     fi
     # The exec view must exist, and every toolchain that was installed must
     # still answer. `report` prints a version per toolchain; doctor turns the

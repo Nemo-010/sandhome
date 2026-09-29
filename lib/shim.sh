@@ -1,9 +1,12 @@
 #!/bin/sh
-# shim.sh - build and install the two LD_PRELOAD interposers. Sourced.
+# shim.sh - build and install the LD_PRELOAD interposers. Sourced.
 #
 # fakepty makes a pipe-backed shell believe fds 0-2 are a terminal, so readline
 # and echo work where there is no /dev/ptmx. fakepwd answers getpwnam/getpwuid
-# from a synthetic passwd database for a cage with no /etc/passwd.
+# from a synthetic passwd database for a cage with no /etc/passwd. antiptrace
+# lets a program that self-checks with ptrace(PTRACE_TRACEME), or reads TracerPid
+# from /proc/self/status, run on a host whose seccomp profile denies the ptrace
+# syscall class -- the machine the other two shims exist alongside.
 #
 # STOP: NEITHER CAN REACH A STATICALLY LINKED BINARY. A static binary carries its own
 # libc, so LD_PRELOAD has nothing to interpose into. That is a measurement, not a
@@ -11,12 +14,27 @@
 
 sh_shims_dir() { printf '%s/shims' "$SH_HOME"; }
 
+# sh_shim_names -> every shim this tree ships, space separated, in build order.
+#
+# # STOP: THIS LIST WAS WRITTEN OUT THREE TIMES AND ONLY TWO OF THEM GOT THE
+# THIRD SHIM. Adding antiptrace needed edits in sh_shim_build_all, sh_shim_present
+# and sh_shim_needed_missing, and the two that were missed by hand went on
+# reporting a machine as fully shimmed while a needed shim was absent -- exactly
+# the silent-green shape lib/shim.sh already documents for the build. One list,
+# read by all three, so the next shim is added in one place or not at all.
+sh_shim_names() { printf 'fakepty fakepwd antiptrace'; }
+
 # sh_shim_need NAME -> yes when the machine lacks what the shim supplies.
 sh_shim_need() {
     case "$1" in
-        fakepty) [ "${SH_PTY:-unknown}" = no ] && printf 'yes' || printf 'no' ;;
-        fakepwd) [ "${SH_PASSWD:-unknown}" = no ] && printf 'yes' || printf 'no' ;;
-        *)       printf 'no' ;;
+        fakepty)    [ "${SH_PTY:-unknown}" = no ] && printf 'yes' || printf 'no' ;;
+        fakepwd)    [ "${SH_PASSWD:-unknown}" = no ] && printf 'yes' || printf 'no' ;;
+        # antiptrace is needed whenever the ptrace syscall class is denied, which
+        # is exactly the machine whose software self-checks with PTRACE_TRACEME
+        # and exits. `partial` counts as needed: something answered EPERM for a
+        # request it should not have, and the shim can only help.
+        antiptrace) [ "${SH_PTRACE:-unknown}" = no ] && printf 'yes' || printf 'no' ;;
+        *)          printf 'no' ;;
     esac
 }
 
@@ -92,7 +110,7 @@ sh_shim_build_all() {
     sh_sba_dir=$1
     sh_sba_built=''
     sh_sba_failed=''
-    for sh_sba_name in fakepty fakepwd; do
+    for sh_sba_name in $(sh_shim_names); do
         sh_sba_need=$(sh_shim_need "$sh_sba_name")
         sh_sba_out="$(sh_shims_dir)/$sh_sba_name.so"
         if [ "$sh_sba_need" != yes ]; then
@@ -124,9 +142,10 @@ sh_shim_build_all() {
 
 sh_sba_what() {
     case "$1" in
-        fakepty) printf 'a pty' ;;
-        fakepwd) printf 'a passwd database' ;;
-        *)       printf 'what it needs' ;;
+        fakepty)    printf 'a pty' ;;
+        fakepwd)    printf 'a passwd database' ;;
+        antiptrace) printf 'a working ptrace syscall' ;;
+        *)          printf 'what it needs' ;;
     esac
 }
 
@@ -220,7 +239,7 @@ sh_shim_report() {
 # about a home no run of this command has touched.
 sh_shim_present() {
     sh_sp_present=''
-    for sh_sp_name in fakepty fakepwd; do
+    for sh_sp_name in $(sh_shim_names); do
         if [ -f "$(sh_shims_dir)/$sh_sp_name.so" ]; then
             sh_sp_present="$sh_sp_present $sh_sp_name"
         fi
@@ -235,7 +254,7 @@ sh_shim_present() {
 # the other.
 sh_shim_needed_missing() {
     sh_snm_missing=''
-    for sh_snm_name in fakepty fakepwd; do
+    for sh_snm_name in $(sh_shim_names); do
         if [ "$(sh_shim_need "$sh_snm_name")" = yes ] && \
            [ ! -f "$(sh_shims_dir)/$sh_snm_name.so" ]; then
             sh_snm_missing="$sh_snm_missing $sh_snm_name"
