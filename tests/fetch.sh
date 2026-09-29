@@ -352,4 +352,14 @@ case "$dns_msg" in
     *) t_ok 1 'a resolver failure names the DoH lever' ;;
 esac
 
+# THE MIRROR LEG IS PURE STRING WORK, SO IT IS TESTED WITHOUT A NETWORK
+# (issue #104). A GitHub API path goes through the API mirror; anything else
+# through the passthrough with the origin appended; an emptied base opts out
+# (unset takes the default); non-http answers nothing.
+t_is "$(sh_mirror_url 'https://github.com/x/y.tar.gz')" 'https://api.rv.pkgforge.dev/https://github.com/x/y.tar.gz' 'a release URL maps onto the passthrough'
+t_is "$(sh_mirror_url 'https://api.github.com/repos/x/y/releases/latest')" 'https://api.gh.pkgforge.dev/repos/x/y/releases/latest' 'an API path maps onto the API mirror'
+t_is "$(SANDHOME_MIRROR_URL= sh_mirror_url 'https://github.com/x/y' || printf empty)" 'empty' 'an emptied mirror base opts out'
+t_is "$(sh_mirror_url 'ftp://x/y' || printf empty)" 'empty' 'a non-http URL maps nowhere'
+t_is "$(SANDHOME_MIRROR_URL=https://m.example/ sh_mirror_url 'https://github.com/x/y')" 'https://m.example/https://github.com/x/y' 'the mirror base is configurable'
+
 t_end

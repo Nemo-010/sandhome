@@ -155,6 +155,14 @@ usage: sh bootstrap.sh [options]
                       only after the system resolver fails twice with curl
                       exit 6; the retry pins the resolver by IP literal so it
                       cannot itself need DNS.
+  SANDHOME_MIRROR_URL Mirror base tried once when plain downloaders fail for
+                      a non-DNS reason, e.g. a 403-blocked origin. Default
+                      https://api.rv.pkgforge.dev/ (the origin URL is appended).
+                      Empty opts out. The pin still applies: mirrored bytes are
+                      the origin's bytes under another route.
+  SANDHOME_MIRROR_GH_URL
+                      Same, for https://api.github.com/ paths. Default
+                      https://api.gh.pkgforge.dev/. Empty opts out.
 ```
 
 ## Toolsets
@@ -191,6 +199,8 @@ usage: sh bootstrap.sh [options]
 | `SANDHOME_LOW_EXEC_MB` | space.sh sandhome | `unset, and the feature is off until it is set` |
 | `SANDHOME_LOW_EXEC_PCT` | space.sh sandhome | `unset, and the feature is off until it is set` |
 | `SANDHOME_MIN_EXEC_MB` | space.sh sandhome | `128` |
+| `SANDHOME_MIRROR_GH_URL` | fetch.sh bootstrap.sh | `unset, and the feature is off until it is set` |
+| `SANDHOME_MIRROR_URL` | fetch.sh bootstrap.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_MOLD_VERSION` | mold.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_NODE_INDEX_URL` | sandhome node.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_NO_PROFILE` | profile.sh | `unset, and the feature is off until it is set` |

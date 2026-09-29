@@ -166,7 +166,49 @@ sh_resolver_failed_twice() {
     return 0
 }
 
-# sh_fetch_via_doh URL DEST -> 0 when the DoH retry fetched the URL. Refuses
+# sh_mirror_url URL -> the mirror URL for URL, or nothing. A GitHub API
+# path goes through the API mirror; anything else through the general
+# passthrough with the original URL appended. Empty when the matching base
+# is emptied (opt-out) or the URL is not http(s). Pure string work, so it is
+# unit-tested without a network (issue #104).
+sh_mirror_url() {
+    case "${1:-}" in
+        https://api.github.com/*)
+            # `${VAR-default}` and not `:-`: an explicitly emptied base opts
+            # out, while an unset one takes the default. `:-` cannot tell
+            # the two apart and would resurrect an opted-out mirror.
+            sh_mu_base=${SANDHOME_MIRROR_GH_URL-https://api.gh.pkgforge.dev/}
+            [ -n "$sh_mu_base" ] || return 1
+            printf '%s%s' "$sh_mu_base" "${1#https://api.github.com/}"
+            return 0 ;;
+        https://*|http://*)
+            sh_mu_base=${SANDHOME_MIRROR_URL-https://api.rv.pkgforge.dev/}
+            [ -n "$sh_mu_base" ] || return 1
+            printf '%s%s' "$sh_mu_base" "$1"
+            return 0 ;;
+    esac
+    return 1
+}
+
+# sh_fetch_via_mirror URL DEST -> 0 when the mirror leg fetched the URL. Runs
+# after the plain downloaders and before the failure message: a downloader
+# failure that is not a resolver failure may still be a blocked origin. The
+# mirror answers wget and BSD fetch with 420, so this leg is curl-only with
+# an explicit curl-like agent, and says so when curl is absent rather than
+# reporting a UA refusal as a fetch failure. The bytes are the origin's
+# bytes under a different route, so the caller's pin still applies unchanged.
+sh_fetch_via_mirror() {
+    sh_fm_mirror=$(sh_mirror_url "$1") || return 1
+    if ! sh_have curl; then
+        sh_warn "the mirror leg needs curl (the mirror answers wget with 420) and none is here; skipping $sh_fm_mirror"
+        return 1
+    fi
+    if curl -fSL --retry 2 --retry-delay 2 -A 'curl/sandhome' -o "$2" "$sh_fm_mirror" 2>/dev/null && [ -s "$2" ]; then
+        sh_step "Downloaded from: $sh_fm_mirror with curl (mirror)"
+        return 0
+    fi
+    return 1
+}
 # (return 1, no network beyond two confirmatory probes) unless ALL hold:
 # curl exists and supports --doh-url, SANDHOME_DOH_URL is set, the resolver
 # failure is confirmed twice, and the retry verifies. Nothing here changes
@@ -237,6 +279,11 @@ sh_fetch() {
     # confirmed resolver failure may still be recoverable through DNS over
     # HTTPS. Off unless SANDHOME_DOH_URL is set; see sh_fetch_via_doh.
     if sh_fetch_via_doh "$sh_f_url" "$sh_f_dest"; then
+        return 0
+    fi
+    # A failure that is not a resolver failure may be a blocked origin
+    # rather than a dead one: one mirror leg before the failure message.
+    if sh_fetch_via_mirror "$sh_f_url" "$sh_f_dest"; then
         return 0
     fi
     sh_f_hint=$(sh_downloader_hint)

@@ -241,6 +241,14 @@ usage: sh bootstrap.sh [options]
                       only after the system resolver fails twice with curl
                       exit 6; the retry pins the resolver by IP literal so it
                       cannot itself need DNS.
+  SANDHOME_MIRROR_URL Mirror base tried once when plain downloaders fail for
+                      a non-DNS reason, e.g. a 403-blocked origin. Default
+                      https://api.rv.pkgforge.dev/ (the origin URL is appended).
+                      Empty opts out. The pin still applies: mirrored bytes are
+                      the origin's bytes under another route.
+  SANDHOME_MIRROR_GH_URL
+                      Same, for https://api.github.com/ paths. Default
+                      https://api.gh.pkgforge.dev/. Empty opts out.
 USAGE
 }
 
