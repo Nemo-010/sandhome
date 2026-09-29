@@ -452,6 +452,12 @@ sh_pin_for() {
             ripgrep) [ -n "${SANDHOME_SHA256_RIPGREP:-}" ] && { printf '%s' "$SANDHOME_SHA256_RIPGREP"; return 0; } ;;
             rust)    [ -n "${SANDHOME_SHA256_RUST:-}" ] && { printf '%s' "$SANDHOME_SHA256_RUST"; return 0; } ;;
             zig)     [ -n "${SANDHOME_SHA256_ZIG:-}" ] && { printf '%s' "$SANDHOME_SHA256_ZIG"; return 0; } ;;
+            # qemuuser resolves its tag from the forge API at install time, so the
+            # pin cannot be a literal in the tree: it is whatever the operator
+            # recorded for the build they fetched. tests/unit.sh requires the
+            # NAME to be here, and that is the point of the list -- a module
+            # cannot be added without somewhere for its digest to live.
+            qemuuser) [ -n "${SANDHOME_SHA256_QEMUUSER:-}" ] && { printf '%s' "$SANDHOME_SHA256_QEMUUSER"; return 0; } ;;
         esac
     fi
     case "$(sh_pin_key "$sh_pf_url")" in
@@ -522,7 +528,7 @@ sh_pin_for() {
 # sh_pin_names -> every toolchain name a `SANDHOME_SHA256_<NAME>` pin answers to.
 # Printed so tests/unit.sh can require one entry per module in tools/, which is
 # what keeps the closed `case` above from going stale when a module is added.
-sh_pin_names() { printf ' fd go jq node python ripgrep rust zig mold clang deno bun\n'; }
+sh_pin_names() { printf ' fd go jq node python ripgrep rust zig mold clang deno bun qemuuser\n'; }
 
 # sh_pin_from URL [NAME] [PUBLISHED] -> the NAME of the pin that answered for
 # this URL, or nothing. The provenance line in the report names it, because a

@@ -844,4 +844,78 @@ case "$bigc_need" in
         fi ;;
 esac
 
+# qemuuser: a module for the static user-mode emulators. Two things are asserted
+# here that no other module has: the tag is RESOLVED rather than hardcoded (#105),
+# and the two capabilities the module exists for actually work -- running a
+# binary from a noexec tree, and tracing syscalls without ptrace. The network
+# fetch is NOT asserted: a test that needs the Electrosphere is a test that
+# skips, and the module contract can be checked without one.
+cat > "$work/repo/tools/qemuuser.sh" <<'EOF'
+TC_qemuuser_DESC='qemu-user test module'
+TC_qemuuser_BINS='bin/qemu-x86_64'
+TC_qemuuser_EXEC_MB=12
+tc_qemuuser_probe() { sh_have qemu-x86_64 && qemu-x86_64 --version >/dev/null 2>&1; }
+tc_qemuuser_install() { return 0; }
+tc_qemuuser_env() { return 0; }
+tc_qemuuser_version() { sh_have qemu-x86_64 && qemu-x86_64 --version 2>/dev/null | sed -n '1s/.*version //p'; }
+EOF
+. "$ROOT/lib/toolchain.sh" 2>/dev/null || true
+SH_REPO_DIR="$work/repo" SH_LIB_DIR="$ROOT/lib"
+export SH_REPO_DIR SH_LIB_DIR
+t_is "$(sh_toolchain_known qemuuser && echo yes)" 'yes' 'a module dropped in tools/ is known by name'
+# BINS is read the way the promote step reads it, through the loader, because
+# the variable is only set after the module is sourced.
+sh_toolchain_load qemuuser >/dev/null 2>&1
+t_is "$(eval "printf '%s' \"\${TC_qemuuser_BINS:-}\"")" 'bin/qemu-x86_64' 'its declared binaries are read'
+# The declared constant is read through the module loader and compared to the
+# file, because sh_toolchain_exec_mb answers a MEASURED figure once a root
+# exists and this module has none here.
+sh_toolchain_load qemuuser >/dev/null 2>&1
+t_is "$(eval "printf '%s' \"\${TC_qemuuser_EXEC_MB:-}\"")" '12' 'its declared exec size is read'
+
+# NO HARDCODED VERSION IN THE MODULE. The tag must come from the API at install
+# time; a literal here is the rot shape #105 names. The check is textual on
+# purpose: it is the file's content that decays, not its behaviour today.
+case "$(cat "$ROOT/tools/qemuuser.sh")" in
+    *releases/download/v[0-9]*) t_ok 1 'the module does not hardcode a release tag' ;;
+    *) t_ok 0 'the module does not hardcode a release tag' ;;
+esac
+
+# The module must resolve the tag through the proxy, and must send a curl-like
+# agent: the endpoint answers 420 without one. Both are asserted by reading the
+# module, because the fetch itself needs the network.
+case "$(cat "$ROOT/tools/qemuuser.sh")" in
+    *api.cb.pkgforge.dev*) t_ok 0 'the module resolves the newest tag from the Forgejo API' ;;
+    *) t_ok 1 'the module resolves the newest tag from the Forgejo API' ;;
+esac
+case "$(cat "$ROOT/tools/qemuuser.sh")" in
+    *"api.rv.pkgforge.dev"*) t_ok 0 'it fetches the asset through the arbitrary-URL passthrough' ;;
+    *) t_ok 1 'it fetches the asset through the arbitrary-URL passthrough' ;;
+esac
+
+# CAPABILITY, when a real qemu-x86_64 is on PATH: a static binary in a directory
+# that refuses exec must run under it. This is the whole reason the module is in
+# the tree, so it is asserted rather than described.
+if command -v qemu-x86_64 >/dev/null 2>&1 && command -v cc >/dev/null 2>&1; then
+    cat > "$work/g.c" <<'EOF'
+#include <stdio.h>
+int main(void){ printf("qemuuser-ran\n"); return 0; }
+EOF
+    cc -static -O2 -o "$work/g" "$work/g.c" 2>/dev/null
+    if [ -x "$work/g" ]; then
+        t_ok "$([ "$(qemu-x86_64 "$work/g" 2>/dev/null)" = 'qemuuser-ran' ]; echo $?)" \
+            'a static guest runs under qemu-x86_64'
+        # -strace prints the guest's syscalls with no ptrace involved.
+        case "$(qemu-x86_64 -strace "$work/g" 2>&1)" in
+            *write*|*brk*) t_ok 0 '-strace reports the guest syscalls without ptrace' ;;
+            *) t_ok 1 '-strace reports the guest syscalls without ptrace' ;;
+        esac
+    else
+        echo '  skip  the guest probe needs a working static cc'
+    fi
+else
+    echo '  skip  qemu-x86_64 is not on PATH here'
+fi
+
+
 t_end

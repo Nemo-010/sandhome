@@ -16,6 +16,7 @@ cannot be added without recording it.
 | mold | `https://github.com/rui314/mold/releases/download/` | latest-release redirect tag | caller pin only (`SANDHOME_SHA256_MOLD*`); hashed and printed otherwise |
 | node | `https://nodejs.org/dist/` | `https://nodejs.org/dist/index.json`, first entry | `SHASUMS256.txt` entry for the tarball, shape-validated hex64 |
 | python | `https://github.com/astral-sh/uv/releases/latest/download/` (uv installs CPython from python-build-standalone) | latest-release redirect tag | caller pin only (`SANDHOME_SHA256_PYTHON*`); hashed and printed otherwise |
+| qemuuser | `https://codeberg.org/ziglang/qemu-static/releases/download/` (fetched through `https://api.rv.pkgforge.dev/`) | Forgejo API `https://api.cb.pkgforge.dev/api/v1/repos/ziglang/qemu-static/releases/latest`, `tag_name` entry | caller pin only (`SANDHOME_SHA256_QEMUUSER*`); hashed and printed otherwise |
 | ripgrep | `https://github.com/BurntSushi/ripgrep/releases/download/` | release tag | caller pin only (`SANDHOME_SHA256_RIPGREP*`); hashed and printed otherwise |
 | rust | `https://static.rust-lang.org/rustup/dist/` (rustup-init installs the toolchain) | stable channel | caller pin only (`SANDHOME_SHA256_RUST*`); hashed and printed otherwise |
 | zig | `https://ziglang.org/download/` | `https://ziglang.org/download/index.json`, first version | caller pin only (`SANDHOME_SHA256_ZIG*`); hashed and printed otherwise |

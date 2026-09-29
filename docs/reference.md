@@ -206,6 +206,7 @@ usage: sh bootstrap.sh [options]
 | `SANDHOME_SHA256_MOLD` | fetch.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_SHA256_NODE` | fetch.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_SHA256_PYTHON` | fetch.sh | `unset, and the feature is off until it is set` |
+| `SANDHOME_SHA256_QEMUUSER` | fetch.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_SHA256_RIPGREP` | fetch.sh bootstrap.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_SHA256_RUST` | fetch.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_SHA256_ZIG` | fetch.sh | `unset, and the feature is off until it is set` |
@@ -246,6 +247,7 @@ usage: sh bootstrap.sh [options]
 | `mold` | `bin/mold bin/ld.mold` | mold, a fast ELF linker (gcc/clang/rust via -fuse-ld=mold) |
 | `node` | `bin/node bin/npm bin/npx` | Node.js with the bundled npm, from the official nodejs.org tarball |
 | `python` | `(via its own PATH fragment)` | CPython, installed by uv (uv is always left on PATH) |
+| `qemuuser` | `bin/qemu-x86_64` | qemu-user, the static user-mode emulators (run a guest ELF, trace its syscalls without ptrace) |
 | `ripgrep` | `bin/rg` | ripgrep (rg), the fast recursive search tool |
 | `rust` | `cargo/bin/rustup cargo/bin/cargo` | Rust via rustup (rustc, cargo, rustup; minimal profile) |
 | `zig` | `zig` | zig cc cross compiler and linker, from the official tarball |
