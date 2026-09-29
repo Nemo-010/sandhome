@@ -297,6 +297,28 @@ emulator, and `qemu-x86_64 -strace` traces its syscalls with no ptrace at all
 linter as a single static binary, and the same binary `tests/syntax.sh` runs
 over this tree when it is present.
 
+### AppImages in a sealed sandbox
+
+Portable artifacts build here end to end (measured: a hello-world AppImage
+via `quick-sharun.sh` in 16s), but the cage changes five assumptions of the
+upstream HOW-TO-MAKE-THESE guide:
+
+- Skip the `/usr` and `pacman` steps. There is no write access to `/usr` and
+  no package DB; build the app straight into `AppDir/bin` instead.
+- Keep `ICON` and `DESKTOP` outside `AppDir`. A path inside it fails with
+  `cp: 'X' and 'X' are the same file`.
+- No FUSE here (`/dev/fuse` absent, measured), so every AppImage runs via
+  `--appimage-extract-and-run`. That fallback working is expected, not a
+  broken artifact.
+- No `xvfb-run`, so GUI dlopen verification is skipped: `quick-sharun`
+  warns once and continues, which means a GUI AppImage built in the cage is
+  **unverified** for runtime-dlopened libraries. That caveat is the single
+  most important thing to carry out of the build.
+- Build on the exec root (a `sandhome project` dir), because deployment
+  downloads and the whole AppDir land wherever they run: tens of MB for a
+  hello-world, hundreds for GTK/Qt/OpenGL, all against the same exec
+  ceiling as everything else (see section 7).
+
 ### Cross compilers and linkers
 
 `zig cc` is a complete C/C++ compiler and cross compiler, and it is also a
