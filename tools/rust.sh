@@ -457,7 +457,7 @@ tc_rust_env() {
     if [ -d "$sh_re_rustup/toolchains" ] || [ -d "$sh_re_cargo/bin" ]; then
         sh_re_installed=yes
     fi
-    if [ "$sh_re_installed" = no ] && tc_rust_probe; then
+    if [ "$sh_re_installed" = no ] && sh_toolchain_probe rust; then
         # Pure adoption: no sandhome tree. The toolchain bin that answered the
         # probe keeps winning on PATH, and CARGO_INSTALL_ROOT still points at
         # the exec root so `cargo install` puts a runnable binary somewhere it

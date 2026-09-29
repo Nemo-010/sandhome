@@ -425,11 +425,19 @@ cmd_toolchains() {
             eval "sh_c_desc=\${TC_${sh_c_t}_DESC:-}"
             eval "sh_c_bins=\${TC_${sh_c_t}_BINS:-}"
             [ "$sh_c_n" -gt 0 ] && printf ','
+            # The version is read only for a present toolchain: probing
+            # already bounded the hung-binary case, and re-running its
+            # version query would make every listing pay the timeout twice.
+            sh_c_st=$(sh_toolchain_status "$sh_c_t")
+            sh_c_ver=''
+            if [ "$sh_c_st" = present ]; then
+                sh_c_ver=$(sh_toolchain_version "$sh_c_t")
+            fi
             printf '{"name":"%s","desc":"%s","bins":"%s","status":"%s","version":"%s","origin":"%s","view":"%s"}' \
                 "$(sh_json_escape "$sh_c_t")" "$(sh_json_escape "$sh_c_desc")" \
                 "$(sh_json_escape "$sh_c_bins")" \
-                "$(sh_json_escape "$(sh_toolchain_status "$sh_c_t")")" \
-                "$(sh_json_escape "$(sh_toolchain_version "$sh_c_t")")" \
+                "$(sh_json_escape "$sh_c_st")" \
+                "$(sh_json_escape "$sh_c_ver")" \
                 "$(sh_toolchain_origin "$sh_c_t")" \
                 "$(sh_toolchain_view_kind "$sh_c_t")"
             sh_c_n=$((sh_c_n + 1))
@@ -451,9 +459,16 @@ cmd_toolchains() {
         if [ "$(sh_toolchain_origin "$sh_c_t")" = local ]; then
             sh_c_path="$sh_c_path (local module)"
         fi
+        # Status first, version only when present: same single-timeout rule
+        # as the JSON arm above.
+        sh_c_st=$(sh_toolchain_status "$sh_c_t")
+        sh_c_ver=''
+        if [ "$sh_c_st" = present ]; then
+            sh_c_ver=$(sh_toolchain_version "$sh_c_t")
+        fi
         printf '%-9s %-8s %-9s %s\n' \
-            "$sh_c_t" "$(sh_toolchain_status "$sh_c_t")" \
-            "$(sh_toolchain_version "$sh_c_t")" "$sh_c_desc"
+            "$sh_c_t" "$sh_c_st" \
+            "$sh_c_ver" "$sh_c_desc"
         printf '          path: %s\n' "$sh_c_path"
     done
 }

@@ -101,7 +101,10 @@ tc_python_ensure_uv() {
 }
 
 tc_python_env() {
-    if tc_python_probe && ! sh_have uv; then
+    # Bounded and isolated like every probe: an interpreter that never
+    # answers must fail the adoption, not wedge the install. Routes through
+    # the framework probe so the isolation applies here too.
+    if sh_toolchain_probe python && ! sh_have uv; then
         # Adopted system python with no uv: still provide uv on the exec view
         # without putting the adopted interpreter behind ours. The fragment only
         # carries uv plus cache env, and names ensurepip/venv when uv cannot

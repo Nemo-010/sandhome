@@ -128,13 +128,24 @@ sh_toolchain_load() {
 
 # sh_toolchain_probe NAME -> 0 when the toolchain answers already. Loads the
 # module, so it is safe to ask about a toolchain before deciding anything.
+# Bounded (SH_PROBE_TIMEOUT_SECS, default 60) and isolated: a probe that
+# never answers returns 2, distinct from 1 (answered no), so callers refuse
+# a pathological binary instead of hanging on it or installing over it.
+# Isolation matters because the timeout must also reap the probe's children:
+# a bare pid-kill orphans an exec-looping child, and the orphan holds every
+# capture pipe above it open forever.
 sh_toolchain_probe() {
     sh_tp_name=$1
     sh_toolchain_load "$sh_tp_name" || return 1
     if ! command -v "tc_${sh_tp_name}_probe" >/dev/null 2>&1; then
         return 1
     fi
-    "tc_${sh_tp_name}_probe" >/dev/null 2>&1
+    sh_run_isolated "${SH_PROBE_TIMEOUT_SECS:-60}" "${SH_LIB_DIR:-.}" "$(sh_toolchain_module "$sh_tp_name")" "tc_${sh_tp_name}_probe" >/dev/null 2>&1
+    sh_tp_rc=$?
+    if [ "$sh_tp_rc" = 124 ]; then
+        return 2
+    fi
+    return "$sh_tp_rc"
 }
 
 # sh_toolchain_root_or_default NAME -> the module's home root. The default is
@@ -455,10 +466,20 @@ sh_toolchain_install_one() {
             return 1
         fi
         INSTALLED="$INSTALLED $sh_te_name"
-    elif sh_toolchain_probe "$sh_te_name"; then
-        sh_say "toolchain $sh_te_name: a working copy is already here; adopting it"
-        ADOPTED="$ADOPTED $sh_te_name"
-    elif sh_toolchain_payload_present "$sh_te_name"; then
+    else
+        sh_toolchain_probe "$sh_te_name"
+        sh_te_probe_rc=$?
+        if [ "$sh_te_probe_rc" = 2 ]; then
+            # The copy on PATH never answers: adopting it would bless a
+            # binary that wedges every later probe, and installing over it
+            # would download a toolchain beside one that already hangs.
+            # Refuse loudly instead of hanging here like every caller did.
+            sh_fail "toolchain $sh_te_name hangs its probe (no answer in ${SH_PROBE_TIMEOUT_SECS:-60}s); refusing to adopt or install over a binary that never answers"
+            return 1
+        elif [ "$sh_te_probe_rc" = 0 ]; then
+            sh_say "toolchain $sh_te_name: a working copy is already here; adopting it"
+            ADOPTED="$ADOPTED $sh_te_name"
+        elif sh_toolchain_payload_present "$sh_te_name"; then
         # The view is gone but the payload survived (a tmpfs restart clears
         # the exec root, never the home): rebuild the view from the bytes
         # already here instead of downloading them again (issue #73). A force
@@ -477,6 +498,7 @@ sh_toolchain_install_one() {
             return 1
         fi
         INSTALLED="$INSTALLED $sh_te_name"
+    fi
     fi
 
     # The exec view, then PATH entries for this module's binaries. Runs on both
@@ -507,7 +529,11 @@ sh_toolchain_install_one() {
     # module that probes by its own home path is true on a collapsed home and
     # false the moment the roots split.
     if command -v "tc_${sh_te_name}_probe" >/dev/null 2>&1; then
-        if ! "tc_${sh_te_name}_probe" >/dev/null 2>&1; then
+        # Bounded like every other probe: a binary that wedges the
+        # verification must fail it, not hang the install.
+        sh_toolchain_probe "$sh_te_name" >/dev/null 2>&1
+        sh_te_verify_rc=$?
+        if [ "$sh_te_verify_rc" != 0 ]; then
             if [ "${SH_TE_REUSED:-0}" = 1 ]; then
                 # The kept payload does not run: it is a half-written tree
                 # from a killed run, not a toolchain. Download a fresh copy
@@ -529,7 +555,8 @@ sh_toolchain_install_one() {
                 fi
                 sh_env_load
                 hash -r 2>/dev/null || :
-                if ! "tc_${sh_te_name}_probe" >/dev/null 2>&1; then
+                sh_toolchain_probe "$sh_te_name" >/dev/null 2>&1
+                if [ "$?" != 0 ]; then
                     sh_fail "toolchain $sh_te_name installed without an error and still does not run from the exec view"
                     return 1
                 fi
@@ -568,12 +595,14 @@ sh_toolchain_ensure() {
     return 0
 }
 
-# sh_toolchain_version NAME -> the version string, or nothing.
+# sh_toolchain_version NAME -> the version string, or nothing. Bounded and
+# isolated like the probe (SH_VERSION_TIMEOUT_SECS, default 30): a version
+# query that never answers is read as absent rather than hanging the report.
 sh_toolchain_version() {
     sh_tv_name=$1
     sh_toolchain_load "$sh_tv_name" >/dev/null 2>&1 || { printf ''; return 0; }
     if command -v "tc_${sh_tv_name}_version" >/dev/null 2>&1; then
-        "tc_${sh_tv_name}_version" 2>/dev/null
+        sh_run_isolated "${SH_VERSION_TIMEOUT_SECS:-30}" "${SH_LIB_DIR:-.}" "$(sh_toolchain_module "$sh_tv_name")" "tc_${sh_tv_name}_version" 2>/dev/null || printf ''
         return 0
     fi
     printf ''

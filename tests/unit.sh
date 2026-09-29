@@ -370,6 +370,49 @@ t_is "$(sh_read_file_spaces "$tmp/full.json")" 'a b ' \
     'a newline-terminated file is read the same way'
 t_is "$(sh_read_file "$tmp/partial.json")" 'ab' 'read_file joins the lines without a separator'
 
+# A bounded run returns the command's status when it finishes first and 124
+# when the timeout fires, so a probe that never answers cannot wedge the
+# caller (measured: an adopted launcher that re-execs itself hung every
+# probe boundlessly). Fast commands cost no extra second: only the hung one
+# costs the timeout.
+sh_run_bounded 10 true
+t_is "$?" 0 'a bounded run that finishes answers its own status'
+sh_run_bounded 10 false
+t_is "$?" 1 'a bounded run that fails answers its failure, not a timeout'
+sh_run_bounded 2 sleep 30
+t_is "$?" 124 'a bounded run that hangs answers 124 after the timeout'
+# The timeout kills the whole tree, not just the direct child: a command
+# that orphans a spinning pipe-holder would otherwise wedge the caller's
+# $(...) forever on a pipe whose writer never exits (measured: an
+# exec-looping orphan left the report hanging with the killer long dead).
+# The fixture orphans a 60s pipe-holder; the capture must return in ~3s,
+# not 60s. SH_LIB_DIR is saved and restored around the isolated call.
+if sh_have setsid; then
+    cat > "$tmp/hangmod.sh" <<'EOF'
+spin_and_orphan() { sleep 60 & exec sleep 60; }
+EOF
+    sh_hs_saved_lib=${SH_LIB_DIR:-}
+    sh_hs_start=$(date +%s 2>/dev/null)
+    SH_LIB_DIR=$ROOT/lib
+    export SH_LIB_DIR
+    sh_run_isolated 3 "$ROOT/lib" "$tmp/hangmod.sh" spin_and_orphan >/dev/null 2>&1
+    sh_hs_rc=$?
+    sh_hs_end=$(date +%s 2>/dev/null)
+    SH_LIB_DIR=$sh_hs_saved_lib
+    export SH_LIB_DIR
+    t_is "$sh_hs_rc" 124 'an isolated run reaps an orphaned spinner with the tree'
+    case "$sh_hs_start" in
+        ''|*[!0-9]*) t_skip 'no date +%s here, so the prompt-return clause did not run' ;;
+        *)
+            case "$sh_hs_end" in
+                ''|*[!0-9]*) t_skip 'no date +%s here, so the prompt-return clause did not run' ;;
+                *) t_ok "$([ "$((sh_hs_end - sh_hs_start))" -lt 20 ]; echo $?)" 'the orphaned capture returns promptly, not when the orphan exits' ;;
+            esac ;;
+    esac
+else
+    t_skip 'no setsid here, so the group-kill clause did not run'
+fi
+
 # # STOP: sh_upper IS A HELPER AND NOT `tr`, BECAUSE THE USERLANDS THIS TOOL
 # RUNS ON CARRY NO tr. The pin resolver below builds environment-variable names
 # out of it, and a version that shelled out to `tr` died on exactly the machine

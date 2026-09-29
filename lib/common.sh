@@ -31,6 +31,85 @@ sh_failures() { printf '%s' "$SH_FAILURES"; }
 # here and would not be inside somebody's interactive shell.
 sh_have() { command -v "$1" >/dev/null 2>&1; }
 
+# sh_run_wait_pid SECS PID GROUP -> wait PID with a timeout killer. GROUP=1
+# also kills the process group (only for groups this tree created via
+# setsid, where PID is the leader). Returns PID's status, or 124 when the
+# timeout fired (the GNU timeout convention). The killer runs detached from
+# every pipe, so even a leaked sleeper holds nothing open.
+sh_run_wait_pid() {
+    sh_rwp_secs=$1
+    sh_rwp_pid=$2
+    sh_rwp_group=${3:-0}
+    ( sleep "$sh_rwp_secs" 2>/dev/null </dev/null >/dev/null 2>&1
+      if [ "$sh_rwp_group" = 1 ]; then
+          # No `--`: dash kill rejects it, and bare -$pid names the group
+          # this tree created via setsid. A missing group errors harmlessly.
+          kill -9 "-$sh_rwp_pid" 2>/dev/null
+      fi
+      kill -9 "$sh_rwp_pid" 2>/dev/null ) </dev/null >/dev/null 2>&1 &
+    sh_rwp_killer=$!
+    wait "$sh_rwp_pid" 2>/dev/null
+    sh_rwp_rc=$?
+    kill "$sh_rwp_killer" 2>/dev/null
+    wait "$sh_rwp_killer" 2>/dev/null
+    # 137/143 mean something was killed: either our own killer fired (the
+    # timeout), or the command died by signal on its own (nearly unheard of
+    # for a probe). Both read as "never answered" rather than a version.
+    if [ "$sh_rwp_rc" = 137 ] || [ "$sh_rwp_rc" = 143 ]; then
+        return 124
+    fi
+    return "$sh_rwp_rc"
+}
+
+# sh_run_bounded SECS CMD... -> run CMD, killing it after SECS seconds.
+# Returns CMD's status when it finished first, 124 on timeout. Probes
+# execute binaries the tree did not write: a wrapper that exec-loops
+# (measured: an adopted launcher that re-execs itself forever) would hang
+# every probe boundlessly, and a hanging probe is how `toolchains`, `status`
+# and `install` all wedged on one pathological PATH entry. Kills the direct
+# child; an infinite orphan needs sh_run_isolated below. Output is the
+# caller's to redirect. SH_PROBE_TIMEOUT_SECS and SH_VERSION_TIMEOUT_SECS
+# tune the two module callers; the values at the call sites are the
+# defaults, not promises.
+sh_run_bounded() {
+    sh_rb_secs=$1
+    shift
+    case "$sh_rb_secs" in
+        ''|*[!0-9]*) sh_rb_secs=30 ;;
+    esac
+    "$@" &
+    sh_run_wait_pid "$sh_rb_secs" "$!" 0
+    return $?
+}
+
+# sh_run_isolated SECS LIBDIR MODFILE FUNC [ARGS...] -> run FUNC, defined in
+# MODFILE plus common.sh, in a fresh sh under setsid in its own process
+# group; the timeout kills the whole group. Same returns as sh_run_bounded.
+# Without setsid (or unreadable files) this degrades to sh_run_bounded,
+# which still bounds every finite hang. The fresh shell inherits the
+# exported environment; module probes only need PATH plus common.sh, so a
+# missing variable fails a probe closed (absent) rather than hanging it.
+# This is what keeps an exec-looping orphan from holding a capture pipe:
+# the whole tree dies together, so the caller's $(...) always terminates.
+sh_run_isolated() {
+    sh_ri_secs=$1
+    sh_ri_lib=$2
+    sh_ri_mod=$3
+    sh_ri_fn=$4
+    shift 4
+    case "$sh_ri_secs" in
+        ''|*[!0-9]*) sh_ri_secs=30 ;;
+    esac
+    if sh_have setsid && [ -f "$sh_ri_lib/common.sh" ] && [ -f "$sh_ri_mod" ]; then
+        setsid sh -c '. "$1/common.sh"; SH_SELF=${SH_SELF:-sandhome}; export SH_SELF; . "$2"; "$3" "$@"' sh "$sh_ri_lib" "$sh_ri_mod" "$sh_ri_fn" "$@" &
+        sh_run_wait_pid "$sh_ri_secs" "$!" 1
+        return $?
+    fi
+    "$sh_ri_fn" "$@" &
+    sh_run_wait_pid "$sh_ri_secs" "$!" 0
+    return $?
+}
+
 # # sh_path_where NAME -> the absolute path NAME resolves to, with the exec
 # view REMOVED from the answer, or nothing.
 #

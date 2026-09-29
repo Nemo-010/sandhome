@@ -1223,4 +1223,43 @@ SANDHOME_REPO_DIR="$ROOT" SANDHOME_HOME="$sh_ad_home" SANDHOME_EXEC="$sh_ad_exec
     sh "$ROOT/bin/sandhome" add single --url https://x.example/single >/dev/null 2>&1
 t_is "$?" 1 'add without --scaffold-only tries to install (fails here with no network for x.example)'
 
+# A probe that never answers returns 2, distinct from 1, and an install over
+# it is refused instead of hanging (measured: an adopted launcher that
+# re-execs itself wedged toolchains, status and install on one PATH entry).
+# SH_PROBE_TIMEOUT_SECS=2 keeps the hanging fixture fast.
+cat > "$work/repo/tools/hangtool.sh" <<'EOF'
+TC_hangtool_DESC='a hanging fixture'
+TC_hangtool_BINS='bin/hangtool'
+TC_hangtool_EXEC_MB=8
+tc_hangtool_probe() { sleep 30; return 0; }
+tc_hangtool_install() { printf 'should-not-install\n' >&2; return 1; }
+tc_hangtool_env() { return 0; }
+tc_hangtool_version() { printf 'hangtool 1'; }
+EOF
+SH_REPO_DIR="$work/repo" SH_LIB_DIR="$work/repo/lib" SH_PROBE_TIMEOUT_SECS=2 sh_toolchain_probe hangtool >/dev/null 2>&1
+t_is "$?" 2 'a hanging probe answers 2, not 1 and not forever'
+# And an install over it is refused without hanging or downloading: the
+# refused binary is never adopted and the install function never runs.
+cat > "$work/hang-driver.sh" <<EOF
+for m in common detect space fetch env toolchain memexec; do
+    . "$ROOT/lib/\$m.sh"
+done
+mkdir -p "\$SH_EXEC_BIN" "\$SH_EXEC_VIEWS" "\$SH_HOME_TOOLCHAINS" "\$SH_HOME_TMP" 2>/dev/null
+# No output discard: the refusal message is the evidence the next clauses read.
+sh_toolchain_install_one hangtool
+echo "STATUS=\$?"
+EOF
+SH_LIB_DIR="$work/repo/lib" SH_REPO_DIR="$work/repo" \
+SH_HOME_TOOLCHAINS="$work/hang-tc" SH_EXEC="$work/hang-exec" SH_HOME="$work/hang-home" \
+SH_EXEC_BIN="$work/hang-exec/bin" SH_EXEC_VIEWS="$work/hang-exec/views" \
+SH_HOME_TMP="$work/hang-home/tmp" SH_HOME_EXEC=no SH_VIEW_MODE=copy SH_DRY_RUN=0 SH_SELF=test \
+SH_PROBE_TIMEOUT_SECS=2 sh "$work/hang-driver.sh" > "$work/hang-out.txt" 2>&1
+t_contains "$(cat "$work/hang-out.txt" 2>/dev/null)" 'STATUS=1' 'an install over a hanging probe is refused'
+t_contains "$(cat "$work/hang-out.txt" 2>/dev/null)" 'hangs its probe' 'the refusal names the hang'
+case "$(cat "$work/hang-out.txt" 2>/dev/null)" in
+    *'should-not-install'*) t_ok 1 'the refused install function never runs' ;;
+    *) t_ok 0 'the refused install function never runs' ;;
+esac
+unset SH_PROBE_TIMEOUT_SECS
+
 t_end
