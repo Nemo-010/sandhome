@@ -28,6 +28,11 @@
 # and the asset is fetched through the arbitrary-URL passthrough; both want a
 # curl-like user agent (a browser UA is answered 420).
 TC_qemuuser_DESC='qemu-user, the static user-mode emulators (run a guest ELF, trace its syscalls without ptrace)'
+# The HOST emulator is always promoted; extra guest architectures are opt-in
+# through SANDHOME_QEMUUSER_EXTRA, because all 33 emulators are ~280MB of exec
+# view and most sessions need one. Naming a guest arch here is what makes
+# `zig cc --target=aarch64-linux-musl ... && qemu-aarch64 ./out` work, which is
+# the whole cross-architecture story on a host with no cross toolchain.
 TC_qemuuser_BINS='bin/qemu-x86_64'
 TC_qemuuser_EXEC_MB=12
 
@@ -89,14 +94,46 @@ tc_qemuuser_install() {
     sh_qu_dir=$(find "$sh_qu_root" -maxdepth 1 -type d -name "qemu-linux-*" | head -1)
     [ -n "$sh_qu_dir" ] || { sh_warn "the qemu-static archive had no top-level directory"; return 1; }
     mkdir -p "$sh_qu_root/bin" 2>/dev/null || return 1
-    # Only the host-architecture emulator is promoted: BINS names one file, and
-    # the other 32 would be 270MB of view for nothing.
+    # The host emulator always; the guest set on request. Promoting all 33
+    # unconditionally is ~280MB of view for a machine that will run one or two,
+    # and the exec root is the constrained side of the split -- this is the
+    # same mistake the archive invites, avoided once here.
     case "$sh_qu_mach" in
         x86_64|amd64)
-            cp "$sh_qu_dir/bin/qemu-x86_64" "$sh_qu_root/bin/" 2>/dev/null || true ;;
+            sh_qu_host=qemu-x86_64 ;;
         aarch64|arm64)
-            cp "$sh_qu_dir/bin/qemu-aarch64" "$sh_qu_root/bin/" 2>/dev/null || true ;;
+            sh_qu_host=qemu-aarch64 ;;
+        *)
+            sh_qu_host='' ;;
     esac
+    if [ -n "$sh_qu_host" ]; then
+        cp "$sh_qu_dir/bin/$sh_qu_host" "$sh_qu_root/bin/" 2>/dev/null || true
+    fi
+    for sh_qu_extra in ${SANDHOME_QEMUUSER_EXTRA:-}; do
+        # A name is accepted as either `aarch64` or `qemu-aarch64`.
+        case "$sh_qu_extra" in
+            qemu-*) sh_qu_name=$sh_qu_extra ;;
+            *)      sh_qu_name=qemu-$sh_qu_extra ;;
+        esac
+        if [ -f "$sh_qu_dir/bin/$sh_qu_name" ]; then
+            cp "$sh_qu_dir/bin/$sh_qu_name" "$sh_qu_root/bin/" 2>/dev/null || true
+        else
+            sh_warn "SANDHOME_QEMUUSER_EXTRA names $sh_qu_extra, but the archive has no bin/$sh_qu_name"
+        fi
+    done
+    # BINS is read as a plain variable by the promote step, so the set that
+    # actually reached disk is what it must list. Appending here, after the
+    # copies, keeps the two in step: a guest that failed to copy is not
+    # promised on PATH, and one that copied is.
+    for sh_qu_bins in "$sh_qu_root/bin/"*; do
+        [ -f "$sh_qu_bins" ] || continue
+        sh_qu_binsname=${sh_qu_bins##*/}
+        case " $TC_qemuuser_BINS " in
+            *" bin/$sh_qu_binsname "*) ;;
+            *) TC_qemuuser_BINS="$TC_qemuuser_BINS bin/$sh_qu_binsname" ;;
+        esac
+    done
+    export TC_qemuuser_BINS
     [ -x "$sh_qu_root/bin/qemu-x86_64" ] || [ -x "$sh_qu_root/bin/qemu-aarch64" ] || {
         sh_warn "the archive did not contain the expected emulator"
         return 1
@@ -107,6 +144,7 @@ tc_qemuuser_install() {
 }
 
 tc_qemuuser_env() { return 0; }
+
 
 tc_qemuuser_version() {
     sh_have qemu-x86_64 && qemu-x86_64 --version 2>/dev/null | sed -n '1s/.*version //p'

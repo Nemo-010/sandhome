@@ -187,6 +187,7 @@ usage: sh bootstrap.sh [options]
 | `SANDHOME_PASSWD_USERS` | shim.sh sandhome | `unset, and the feature is off until it is set` |
 | `SANDHOME_PCT_MEANINGFUL_MB` | space.sh sandhome | `unset, and the feature is off until it is set` |
 | `SANDHOME_PROFILE` | profile.sh | `1` |
+| `SANDHOME_QEMUUSER_EXTRA` | qemuuser.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_REF` | bootstrap.sh sandhome | `unset, and the feature is off until it is set` |
 | `SANDHOME_REPO` | env.sh bootstrap.sh sandhome | `unset, and the feature is off until it is set` |
 | `SANDHOME_REPO_DIR` | env.sh bootstrap.sh sandhome | `unset, and the feature is off until it is set` |

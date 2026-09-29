@@ -918,4 +918,71 @@ else
 fi
 
 
+
+# The guest set is opt-in and BINS must end up listing what reached disk. Both
+# halves matter: without the append a promoted qemu-aarch64 sits in the home and
+# never reaches PATH, and a name that failed to copy must not be promised.
+case "$(cat "$ROOT/tools/qemuuser.sh")" in
+    *SANDHOME_QEMUUSER_EXTRA*) t_ok 0 'the guest emulator set is opt-in' ;;
+    *) t_ok 1 'the guest emulator set is opt-in' ;;
+esac
+case "$(cat "$ROOT/tools/qemuuser.sh")" in
+    *'TC_qemuuser_BINS="$TC_qemuuser_BINS'*) t_ok 0 'BINS is extended to what actually copied' ;;
+    *) t_ok 1 'BINS is extended to what actually copied' ;;
+esac
+# All 33 emulators is 274MB of view; a module that promotes them unconditionally
+# is the mistake the archive invites, so the module must not contain the loop
+# that copies every bin/*.
+case "$(cat "$ROOT/tools/qemuuser.sh")" in
+    *'cp "$sh_qu_dir/bin/"*'*) t_ok 1 'the module does not promote all 33 emulators' ;;
+    *) t_ok 0 'the module does not promote all 33 emulators' ;;
+esac
+
+# END TO END, when zig and qemu-aarch64 are both present: cross-compile a guest
+# and run it. This is the whole cross-architecture story on a host with no cross
+# toolchain, so it is executed rather than described -- and skipped, loudly, when
+# either half is absent.
+if command -v qemu-aarch64 >/dev/null 2>&1 && command -v zig >/dev/null 2>&1; then
+    cat > "$work/g64.c" <<'EOF'
+#include <stdio.h>
+int main(void){ printf("cross-ok\n"); return 0; }
+EOF
+    # # STOP: A BARE `zig cc` FAILS ON THIS MACHINE, AND THAT IS #77, NOT THE
+    # TEST. The view hands zig a /memfd: launcher, so its install-dir lookup
+    # cannot find lib/ and every subcommand that needs it exits. The workaround
+    # is a real directory containing the binary beside a lib/ symlink, so the
+    # clause tries that shape first and only then gives up.
+    zigcc=zig
+    if ! ( cd "$work" && timeout 300 zig cc --target=aarch64-linux-musl -O2 -o g64 g64.c ) >/dev/null 2>&1; then
+        # A REAL distribution has lib/ beside the binary; the view's launcher does
+        # not, and picking it first would reproduce the same failure.
+        # The view ALSO has a lib/, so having one is not enough to tell a real
+        # distribution from the memexec launcher that sits in front of it. The
+        # launcher is a few kilobytes and the real zig is tens of megabytes, so
+        # the size is what separates them.
+        for cand in $(find "${SANDHOME_EXEC:-/tmp}" /dev/shm /workspace -maxdepth 3 -type f -name zig 2>/dev/null); do
+            if [ -d "${cand%/*}/lib" ] && [ -f "${cand%/*}/lib/std/std.zig" ]; then
+                csz=$(wc -c < "$cand" 2>/dev/null || echo 0)
+                if [ "$csz" -gt 1000000 ]; then
+                    zigcc=$cand
+                    break
+                fi
+            fi
+        done
+    fi
+    if ( cd "$work" && timeout 300 "$zigcc" cc --target=aarch64-linux-musl -O2 -o g64 g64.c ) >/dev/null 2>&1 \
+       && [ -f "$work/g64" ]; then
+        case "$(file "$work/g64" 2>/dev/null)" in
+            *aarch64*) t_ok 0 'zig cross-compiles an aarch64 guest with its bundled sysroot' ;;
+            *)         t_ok 1 'zig cross-compiles an aarch64 guest with its bundled sysroot' ;;
+        esac
+        t_ok "$([ "$(qemu-aarch64 "$work/g64" 2>/dev/null)" = 'cross-ok' ]; echo $?)" \
+            'qemu-aarch64 runs the cross-compiled guest'
+    else
+        echo '  skip  zig could not cross-compile here (may want its install dir)'
+    fi
+else
+    echo '  skip  zig or qemu-aarch64 is not on PATH here'
+fi
+
 t_end
