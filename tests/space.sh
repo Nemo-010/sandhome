@@ -135,6 +135,33 @@ for d in $dupes; do
 done
 t_is "$dupes_n" 0 'the exec candidate list has no duplicates'
 
+# A WORKING TREE ON A ROOMY EXEC-CAPABLE MOUNT IS A CANDIDATE, AND IS LISTED
+# WITHOUT BEING MADE (issue #114). The list was hardcoded, so a checkout on a
+# big mount was invisible to the planner and to `space --probe`; the candidate
+# is a namespaced `.sandhome/exec` under the tree, and a report must name it
+# without creating it. `/` is not a working tree and must not offer `/.sandhome`.
+wt=$(cd "$tmp" && mkdir -p worktree && cd worktree && \
+    SANDHOME_EXEC='' HOME='' sh -c \
+        '. "$1/lib/common.sh"; . "$1/lib/space.sh"; sh_exec_candidates' sh "$ROOT" 2>/dev/null)
+case "$wt" in
+    *"/worktree/.sandhome/exec"*) t_ok 0 'the working tree is an exec candidate (#114)' ;;
+    *) t_ok 1 "the working tree is an exec candidate (#114) (got $wt)" ;;
+esac
+wt_probe=$(cd "$tmp/worktree" && SANDHOME_EXEC='' HOME='' sh -c \
+    '. "$1/lib/common.sh"; . "$1/lib/detect.sh"; . "$1/lib/space.sh"; sh_space_probe_report' sh "$ROOT" 2>/dev/null)
+case "$wt_probe" in
+    *"/worktree/.sandhome/exec"*) t_ok 0 'space --probe lists the working-tree candidate (#114)' ;;
+    *) t_ok 1 'space --probe lists the working-tree candidate (#114)' ;;
+esac
+t_ok "$([ ! -d "$tmp/worktree/.sandhome" ]; echo $?)" \
+    'the probe report did not create the working-tree candidate (#114)'
+wt_root=$(cd / && SANDHOME_EXEC='' HOME='' sh -c \
+    '. "$1/lib/common.sh"; . "$1/lib/space.sh"; sh_exec_candidates' sh "$ROOT" 2>/dev/null)
+case "$wt_root" in
+    *"/.sandhome/exec"*) t_ok 1 'the filesystem root is not offered as a working tree (#114)' ;;
+    *) t_ok 0 'the filesystem root is not offered as a working tree (#114)' ;;
+esac
+
 # NOTE: A SYMLINK WHOSE TARGET IS OUTSIDE THE TREE IS LEFT ALONE. The remap ran
 # for every absolute target and compared afterwards, so
 # `bin/link.sh -> ../outside/ext.sh` became `link.sh -> <view>/outside/ext.sh`,
@@ -1002,5 +1029,9 @@ case "$sl_out" in
     *) t_ok 1 "space --largest prints sizes (got: $sl_out)" ;;
 esac
 rm -rf "$sl"
+
+# A create-plan mkdir -p's every candidate, including the namespaced work-tree
+# one, even when it does not choose it. The tree is left as it was found.
+rm -rf "$ROOT/.sandhome" "$PWD/.sandhome" 2>/dev/null
 
 t_end

@@ -22,6 +22,7 @@ usage: sandhome COMMAND [args]
   install NAME...        adopt or install each toolchain, then write the env
   install --force NAME   install NAME even when a working copy is on PATH
   install rust --target T   add rust cross targets (comma list, repeatable)
+  install qemuuser --extra A  also install guest emulators (comma list)
   ensure NAME...         alias for install
   repair [NAME...]       rebuild the exec view and launchers, downloading
                          nothing. The fix for "Permission denied" on a tool
@@ -110,6 +111,8 @@ usage: sh bootstrap.sh [options]
                       comma-separated list.
   --without NAME      leave a toolchain out. Repeatable, and also takes a
                       comma-separated list.
+  --no-detect         do not add toolchains implied by project markers in the
+                      working directory (Cargo.toml, go.mod, package.json, ...)
   --list-toolchains   print the known names and exit
   --home DIR          persistent data root. Default $XDG_DATA_HOME/sandhome
   --exec DIR          exec-capable root. Default: detected (see sandhome space)
@@ -202,7 +205,7 @@ usage: sh bootstrap.sh [options]
 | `SANDHOME_GO_DL_JSON_URL` | sandhome go.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_GO_VERSION_URL` | sandhome go.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_HERE` | profile.sh | `unset, and the feature is off until it is set` |
-| `SANDHOME_HOME` | env.sh profile.sh space.sh bootstrap.sh sandhome go.sh node.sh python.sh rust.sh | `unset, and the feature is off until it is set` |
+| `SANDHOME_HOME` | env.sh profile.sh space.sh bootstrap.sh sandhome go.sh node.sh python.sh rust.sh | `$SH_BAKED_HOME` |
 | `SANDHOME_LLVM_TAG` | clang.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_LOW_EXEC_MB` | space.sh sandhome | `unset, and the feature is off until it is set` |
 | `SANDHOME_LOW_EXEC_PCT` | space.sh sandhome | `unset, and the feature is off until it is set` |
@@ -218,7 +221,7 @@ usage: sh bootstrap.sh [options]
 | `SANDHOME_PASSWD_USERS` | shim.sh sandhome | `unset, and the feature is off until it is set` |
 | `SANDHOME_PCT_MEANINGFUL_MB` | space.sh sandhome | `unset, and the feature is off until it is set` |
 | `SANDHOME_PROFILE` | profile.sh | `1` |
-| `SANDHOME_QEMUUSER_EXTRA` | qemuuser.sh | `unset, and the feature is off until it is set` |
+| `SANDHOME_QEMUUSER_EXTRA` | sandhome qemuuser.sh | `$SANDHOME_QEMUUSER_EXTRA $sh_c_x` |
 | `SANDHOME_REF` | bootstrap.sh sandhome | `unset, and the feature is off until it is set` |
 | `SANDHOME_REPO` | env.sh bootstrap.sh sandhome | `unset, and the feature is off until it is set` |
 | `SANDHOME_REPO_DIR` | env.sh bootstrap.sh sandhome | `unset, and the feature is off until it is set` |
@@ -246,7 +249,7 @@ usage: sh bootstrap.sh [options]
 | `SANDHOME_SHELLCHECK_VERSION` | shellcheck.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_SHFMT_VERSION` | shfmt.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_SHIMS` | env.sh shim.sh sandhome | `unset, and the feature is off until it is set` |
-| `SANDHOME_VIEW_MODE` | memexec.sh bootstrap.sh | `unset, and the feature is off until it is set` |
+| `SANDHOME_VIEW_MODE` | env.sh memexec.sh report.sh space.sh bootstrap.sh sandhome | `unset, and the feature is off until it is set` |
 | `SANDHOME_WANTED_TOOLCHAINS` | env.sh report.sh | `*)` |
 | `SANDHOME_ZIG_INDEX_URL` | sandhome zig.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_ZIG_VERSION` | sandhome zig.sh | `unset, and the feature is off until it is set` |

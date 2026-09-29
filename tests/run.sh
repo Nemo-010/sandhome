@@ -109,6 +109,11 @@ for t in harness syntax unit space fetch toolchain memexec shims docs bootstrap 
     fi
 done
 
+# The exec-candidate plan mkdir -p's the namespaced work-tree candidate even
+# when it does not choose it (issue #114). The checkout is left as it was
+# found, whether or not the create-plan ever selected that root.
+rm -rf "$HERE/../.sandhome" "$HERE/.sandhome" 2>/dev/null
+
 printf '\n===============================\n'
 printf 'passed :%s\n' "$PASSED"
 printf 'skipped:%s\n' "$SKIPPED"

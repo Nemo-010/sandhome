@@ -12,3 +12,4 @@ __pycache__/
 # runner does, into the directory it ran from, and a run that leaves the tree
 # dirty is a run nobody can tell apart from real work.
 tests/.*.out.*
+.sandhome/

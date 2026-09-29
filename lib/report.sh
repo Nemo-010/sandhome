@@ -19,18 +19,43 @@ sh_toolchain_status() {
     fi
 }
 
-# sh_report_view -> launch or copy for this machine, read-only. The mode is
-# a fact about the machine (split home plus a helper that probes here), not
-# a memory of what installed it: SH_VIEW_MODE lives only in the installing
-# process, so a fresh report would otherwise always say copy. sh_memexec_mode
-# never builds, so the report changes nothing by asking. Guarded for drivers
-# that source the report without the memexec module.
+# sh_report_view -> launch, copy or mixed for this machine, read-only. The
+# mode is a fact about the machine (split home plus a helper that probes
+# here), not a memory of what installed it: SH_VIEW_MODE lives only in the
+# installing process, so a fresh report would otherwise always say copy.
+# sh_memexec_mode never builds, so the report changes nothing by asking.
+#
+# STOP: THE VIEWS ON DISK OUTRANK THE MACHINE MODE. A tree repaired under an
+# explicit SANDHOME_VIEW_MODE=copy is real bytes while the machine still
+# probes launch; saying `launch` there described the plan, not the tree
+# (issue #113). Every installed tree whose bins are already linked is
+# measured, and disagreement is reported as `mixed` rather than papered over.
 sh_report_view() {
+    sh_rv_mode=''
     if command -v sh_memexec_mode >/dev/null 2>&1; then
-        sh_memexec_mode 2>/dev/null || printf 'copy'
-    else
-        printf '%s' "${SH_VIEW_MODE:-copy}"
+        sh_rv_mode=$(sh_memexec_mode 2>/dev/null) || sh_rv_mode=''
     fi
+    [ -n "$sh_rv_mode" ] || sh_rv_mode=${SH_VIEW_MODE:-copy}
+    if command -v sh_toolchain_view_measured >/dev/null 2>&1; then
+        sh_rv_seen=''
+        for sh_rv_t in $(sh_toolchain_available 2>/dev/null); do
+            sh_rv_k=$(sh_toolchain_view_measured "$sh_rv_t" 2>/dev/null)
+            case "$sh_rv_k" in
+                launch|copy)
+                    if [ -z "$sh_rv_seen" ]; then
+                        sh_rv_seen=$sh_rv_k
+                    elif [ "$sh_rv_seen" != "$sh_rv_k" ]; then
+                        printf 'mixed'
+                        return 0
+                    fi ;;
+            esac
+        done
+        if [ -n "$sh_rv_seen" ]; then
+            printf '%s' "$sh_rv_seen"
+            return 0
+        fi
+    fi
+    printf '%s' "$sh_rv_mode"
 }
 
 # sh_report_memexec -> the one line sh_memexec_report prints, or `unknown`

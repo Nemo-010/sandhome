@@ -193,6 +193,8 @@ usage: sh bootstrap.sh [options]
                       comma-separated list.
   --without NAME      leave a toolchain out. Repeatable, and also takes a
                       comma-separated list.
+  --no-detect         do not add toolchains implied by project markers in the
+                      working directory (Cargo.toml, go.mod, package.json, ...)
   --list-toolchains   print the known names and exit
   --home DIR          persistent data root. Default $XDG_DATA_HOME/sandhome
   --exec DIR          exec-capable root. Default: detected (see sandhome space)
@@ -276,6 +278,7 @@ sh_load_library() {
 SH_TOOLSET=developer
 SH_WITH=''
 SH_WITHOUT=''
+SH_DETECT=auto
 SH_HOME_ARG=''
 SH_EXEC_ARG=''
 SH_SHIMS=build
@@ -304,12 +307,62 @@ sh_toolset_names() {
     esac
 }
 
+# sh_bootstrap_detect -> the extra toolchains the working tree asks for, each
+# once. A one-paste setup cannot know a project it was never told about, so a
+# fresh Rust checkout whose owner asked for `--toolset developer` paid an
+# `sandhome install rust` round-trip before the first `cargo build` (issue
+# #116). Only the working DIRECTORY is read: a project marker at the top level
+# is the signal, and walking an arbitrary tree is a different, slower question
+# that a setup step should not answer behind the caller's back -- --no-detect
+# and --without both turn the fold off.
+sh_bootstrap_detect() {
+    sh_bdet_seen=' '
+    sh_bdet_out=''
+    sh_bdet_add() {
+        case "$sh_bdet_seen" in
+            *" $1 "*) return 0 ;;
+        esac
+        sh_bdet_seen="$sh_bdet_seen$1 "
+        sh_bdet_out="$sh_bdet_out $1"
+        return 0
+    }
+    # Manifests and lockfiles first: they name the toolchain outright.
+    if [ -e Cargo.toml ] || [ -e Cargo.lock ]; then sh_bdet_add rust; fi
+    if [ -e go.mod ] || [ -e go.sum ] || [ -e go.work ]; then sh_bdet_add go; fi
+    if [ -e package.json ] || [ -e package-lock.json ] || [ -e pnpm-lock.yaml ] || [ -e yarn.lock ]; then sh_bdet_add node; fi
+    if [ -e deno.json ] || [ -e deno.jsonc ]; then sh_bdet_add deno; fi
+    if [ -e bun.lockb ] || [ -e bunfig.toml ]; then sh_bdet_add bun; fi
+    if [ -e build.zig ] || [ -e build.zig.zon ]; then sh_bdet_add zig; fi
+    if [ -e pyproject.toml ] || [ -e requirements.txt ] || [ -e setup.py ] || [ -e Pipfile ]; then sh_bdet_add python; fi
+    # A C/C++ build system is the only signal here for the native side: the
+    # compiler, linker and build runner that read it. A bare `.c` is weaker
+    # and is handled by the source-file pass below.
+    if [ -e CMakeLists.txt ] || [ -e meson.build ] || [ -e configure.ac ]; then
+        sh_bdet_add clang
+        sh_bdet_add mold
+        sh_bdet_add ninja
+    fi
+    # A source file at the top level is a real, if weaker, signal. The glob is
+    # written relative so the shell does the matching and a directory that
+    # matched nothing leaves the literal, which `-e` refuses.
+    for sh_bdet_f in ./*.rs; do if [ -e "$sh_bdet_f" ]; then sh_bdet_add rust; fi; done
+    for sh_bdet_f in ./*.go; do if [ -e "$sh_bdet_f" ]; then sh_bdet_add go; fi; done
+    for sh_bdet_f in ./*.py; do if [ -e "$sh_bdet_f" ]; then sh_bdet_add python; fi; done
+    for sh_bdet_f in ./*.zig; do if [ -e "$sh_bdet_f" ]; then sh_bdet_add zig; fi; done
+    for sh_bdet_f in ./*.c ./*.cc ./*.cpp ./*.cxx ./*.h ./*.hpp; do
+        if [ -e "$sh_bdet_f" ]; then sh_bdet_add clang; fi
+    done
+    printf '%s' "${sh_bdet_out# }"
+    return 0
+}
+
 sh_bootstrap_args() {
     while [ "$#" -gt 0 ]; do
         case "$1" in
             --toolset)         sh_need_value "$@"; SH_TOOLSET=$2; shift 2 ;;
             --with)            sh_need_value "$@"; SH_WITH="$SH_WITH,$2"; shift 2 ;;
             --without)         sh_need_value "$@"; SH_WITHOUT="$SH_WITHOUT,$2"; shift 2 ;;
+            --no-detect)       SH_DETECT=none; shift ;;
             --list-toolchains) for sh_ba_t in $(sh_toolchain_available); do
                                    printf '%s\n' "$sh_ba_t"
                                done
@@ -401,9 +454,9 @@ sh_bootstrap_install_command() {
     # no HOME and no inherited environment finds its library from itself
     # (issue #88). A shell read-loop, because this file cannot require sed
     # or grep; a path with a quote in it is refused rather than half-baked.
-    # Exactly one baked line must result, or the copy is left unbaked.
-    case "$SH_REPO_DIR" in
-        *\'*) sh_warn "not baking the repo path ($SH_REPO_DIR carries a quote)" ;;
+    # Exactly one line per baked path must result, or the copy is left unbaked.
+    case "$SH_REPO_DIR:$SH_HOME" in
+        *\'*) sh_warn "not baking the paths (a quote in $SH_REPO_DIR or $SH_HOME)" ;;
         *)
             sh_bic_tmp="$SH_EXEC_BIN/.sandhome.cmd.$$"
             sh_bic_n=0
@@ -414,17 +467,20 @@ sh_bootstrap_install_command() {
                         SH_BAKED_REPO_DIR=*)
                             printf "SH_BAKED_REPO_DIR='%s'\n" "$SH_REPO_DIR"
                             sh_bic_n=$((sh_bic_n + 1)) ;;
+                        SH_BAKED_HOME=*)
+                            printf "SH_BAKED_HOME='%s'\n" "$SH_HOME"
+                            sh_bic_n=$((sh_bic_n + 1)) ;;
                         *) printf '%s\n' "$sh_bic_l" ;;
                     esac
                 done < "$SH_EXEC_BIN/sandhome"
-            } > "$sh_bic_tmp" 2>/dev/null && [ "$sh_bic_n" = 1 ] && \
+            } > "$sh_bic_tmp" 2>/dev/null && [ "$sh_bic_n" = 2 ] && \
                 mv -f "$sh_bic_tmp" "$SH_EXEC_BIN/sandhome" 2>/dev/null && \
                 chmod 0755 "$SH_EXEC_BIN/sandhome" 2>/dev/null && sh_bic_ok=1
             rm -f "$sh_bic_tmp" 2>/dev/null
             if [ "$sh_bic_ok" = 1 ]; then
-                sh_step "baked $SH_REPO_DIR into $SH_EXEC_BIN/sandhome"
+                sh_step "baked $SH_REPO_DIR and $SH_HOME into $SH_EXEC_BIN/sandhome"
             else
-                sh_warn "could not bake the repo path; no-HOME launches fall back to HOME lookup"
+                sh_warn "could not bake the paths; no-HOME launches fall back to HOME lookup"
             fi ;;
     esac
     return 0
@@ -575,6 +631,26 @@ sandhome_bootstrap_main() {
         fi
         sh_mb_wanted="$sh_mb_wanted $sh_mb_name"
     done
+    # The working tree is asked for what it names (issue #116). The detected
+    # names come after the toolset so a later --without still removes them, and
+    # each one is said out loud: an install a caller did not name must be a
+    # sentence they can see, not a surprise download.
+    if [ "${SH_DETECT:-auto}" != none ]; then
+        SH_DETECTED_TOOLCHAINS=''
+        for sh_mb_name in $(sh_bootstrap_detect); do
+            if sh_in_list "$sh_mb_name" "$(sh_split_on ',' "$SH_WITHOUT")"; then
+                continue
+            fi
+            if sh_in_list "$sh_mb_name" "$sh_mb_wanted"; then
+                continue
+            fi
+            sh_mb_wanted="$sh_mb_wanted $sh_mb_name"
+            SH_DETECTED_TOOLCHAINS="$SH_DETECTED_TOOLCHAINS $sh_mb_name"
+            sh_say "detected a project marker for $sh_mb_name in $PWD; adding it to the request (--no-detect turns this off)"
+        done
+        SH_DETECTED_TOOLCHAINS=${SH_DETECTED_TOOLCHAINS# }
+        export SH_DETECTED_TOOLCHAINS
+    fi
 
     # Price the whole request before spending anything (issue #75): one line
     # per toolchain with what it wants and whether the root holds it, then
@@ -586,6 +662,25 @@ sandhome_bootstrap_main() {
     # partly consumed.
     # shellcheck disable=SC2086
     sh_feasibility_plan $sh_mb_wanted
+    # A detected toolchain is a convenience, not a request: one the exec root
+    # cannot hold is named and dropped, and does not turn the setup red. A name
+    # the caller asked for is still refused loudly, because that is a promise
+    # the run has to keep or break on purpose.
+    if [ -n "${SH_DETECTED_TOOLCHAINS:-}" ]; then
+        sh_mb_keep=''
+        for sh_mb_name in $sh_mb_wanted; do
+            case " $SH_INFEASIBLE " in
+                *" $sh_mb_name "*)
+                    case " $SH_DETECTED_TOOLCHAINS " in
+                        *" $sh_mb_name "*)
+                            sh_warn "detected $sh_mb_name does not fit the exec root; skipping it (name it with --with to require it)"
+                            continue ;;
+                    esac ;;
+            esac
+            sh_mb_keep="$sh_mb_keep $sh_mb_name"
+        done
+        sh_mb_wanted=$sh_mb_keep
+    fi
     if [ "${SH_DRY_RUN:-0}" = 1 ]; then
         # shellcheck disable=SC2086
         for sh_mb_name in $SH_FEASIBLE; do
@@ -593,6 +688,11 @@ sandhome_bootstrap_main() {
         done
     else
         for sh_mb_name in $SH_INFEASIBLE; do
+            # A detected name was already dropped above with a warning; it is
+            # not a refusal.
+            case " ${SH_DETECTED_TOOLCHAINS:-} " in
+                *" $sh_mb_name "*) continue ;;
+            esac
             # The shortfall is named, not just the refusal: the plan priced
             # each name as name:need:free, so the reader sees which tool is
             # blocked and by how many megabytes (issue #87).

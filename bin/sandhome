@@ -12,6 +12,11 @@ SH_SELF=sandhome
 # and every later source is tried in turn, so a moved tree degrades to the
 # old behavior instead of a wrong library.
 SH_BAKED_REPO_DIR=''
+# SANDHOME-BAKED-HOME: replaced at install with the durable data root. The
+# library path alone is not enough: a copy with no inherited environment also
+# needs to know where env.sh, the toolchain payloads and the recorded exec root
+# live, or it invents /tmp/sandhome and runs the wrong environment.
+SH_BAKED_HOME=''
 
 # Resolve the repository directory: the environment wins, then this script's own
 # path. A script read from a pipe has no path, and that case is refused rather
@@ -120,6 +125,32 @@ if [ ! -r "$sh_repo/lib/common.sh" ]; then
     exit 2
 fi
 
+# # STOP: THE COPY MUST KNOW ITS HOME, NOT ONLY ITS LIBRARY. The installed copy
+# carries the checkout path so `env -i /exec/bin/sandhome version` starts; it
+# carried nothing about SANDHOME_HOME, so with no environment it fell back to
+# /tmp/sandhome, found no env.sh there, picked an unrelated exec root and
+# reported home=/tmp/sandhome. `env -i <exec>/bin/sandhome exec jq` then exited
+# 127 because jq was not on the PATH it had invented. Two routes, so a copy that
+# predates the bake or whose home moved still recovers: the baked home, and a
+# `.sandhome-home` pointer written on the exec root beside the copy.
+if [ -z "${SANDHOME_HOME:-}" ] && [ -n "$SH_BAKED_HOME" ] && [ -r "$SH_BAKED_HOME/env.sh" ]; then
+    SANDHOME_HOME=$SH_BAKED_HOME
+    export SANDHOME_HOME
+fi
+if [ -z "${SANDHOME_HOME:-}" ]; then
+    sh_home_ptr=''
+    case "$0" in
+        */*) sh_home_ptr=$(CDPATH='' cd -- "${0%/*}/.." 2>/dev/null && pwd) ;;
+    esac
+    if [ -n "$sh_home_ptr" ] && [ -r "$sh_home_ptr/.sandhome-home" ]; then
+        IFS= read -r sh_home_from_ptr < "$sh_home_ptr/.sandhome-home" || sh_home_from_ptr=''
+        if [ -n "$sh_home_from_ptr" ] && [ -r "$sh_home_from_ptr/env.sh" ]; then
+            SANDHOME_HOME=$sh_home_from_ptr
+            export SANDHOME_HOME
+        fi
+    fi
+fi
+
 SH_REPO_DIR=$sh_repo
 SH_LIB_DIR="$sh_repo/lib"
 # The env file puts this on PATH, which is what lets a fresh shell run
@@ -180,6 +211,7 @@ usage: sandhome COMMAND [args]
   install NAME...        adopt or install each toolchain, then write the env
   install --force NAME   install NAME even when a working copy is on PATH
   install rust --target T   add rust cross targets (comma list, repeatable)
+  install qemuuser --extra A  also install guest emulators (comma list)
   ensure NAME...         alias for install
   repair [NAME...]       rebuild the exec view and launchers, downloading
                          nothing. The fix for "Permission denied" on a tool
@@ -291,11 +323,14 @@ HELP
             return 0 ;;
         install|ensure)
             cat <<'HELP'
-usage: sandhome install [--force] [--target T] NAME...
+usage: sandhome install [--force] [--target T] [--extra LIST] NAME...
 Adopt each toolchain already on PATH, or install it into the home root when
 absent, then rebuild its exec view and write the env. --force installs even
 when a working copy is on PATH. --target T (rust only, repeatable,
-comma-separated) adds cross targets. --dry-run is a bootstrap.sh flag and is
+comma-separated) adds cross targets. --extra LIST (qemuuser only,
+comma-separated or repeatable) also installs the named guest emulators, so
+`install qemuuser --extra aarch64` makes `qemu-aarch64` exist; the same
+lever is SANDHOME_QEMUUSER_EXTRA. --dry-run is a bootstrap.sh flag and is
 refused here: an unknown flag aborts before anything is installed.
 HELP
             return 0 ;;
@@ -504,6 +539,31 @@ cmd_install() {
                     SH_RUST_TARGETS=$2
                 fi
                 shift 2 ;;
+            # `install qemuuser --extra aarch64` is the flag spelling of
+            # SANDHOME_QEMUUSER_EXTRA, which the module read but no command
+            # ever showed a caller how to set from the prompt. qemuuser is the
+            # only consumer today; the flag is parsed once and exported, so a
+            # second module that grows an extra list gets the same lever.
+            --extra|--guest)
+                [ "$#" -ge 2 ] || sh_die 'install --extra needs a value'
+                sh_c_x=$(sh_split_on ',' "$2")
+                if [ -n "${SANDHOME_QEMUUSER_EXTRA:-}" ]; then
+                    SANDHOME_QEMUUSER_EXTRA="$SANDHOME_QEMUUSER_EXTRA $sh_c_x"
+                else
+                    SANDHOME_QEMUUSER_EXTRA=$sh_c_x
+                fi
+                export SANDHOME_QEMUUSER_EXTRA
+                shift 2 ;;
+            --extra=*|--guest=*)
+                sh_c_x=$(sh_split_on ',' "${1#*=}")
+                [ -n "$(sh_trim "$sh_c_x")" ] || sh_die 'install --extra needs a value'
+                if [ -n "${SANDHOME_QEMUUSER_EXTRA:-}" ]; then
+                    SANDHOME_QEMUUSER_EXTRA="$SANDHOME_QEMUUSER_EXTRA $sh_c_x"
+                else
+                    SANDHOME_QEMUUSER_EXTRA=$sh_c_x
+                fi
+                export SANDHOME_QEMUUSER_EXTRA
+                shift ;;
             --target=*)
                 sh_c_v=${1#--target=}
                 [ -n "$sh_c_v" ] || sh_die 'install --target needs a value'
@@ -553,6 +613,28 @@ cmd_install() {
     for sh_c_n in $sh_c_args; do
         sh_toolchain_ensure "$sh_c_n" || true
     done
+    # # STOP: AN EXPLICIT VIEW MODE REBUILDS THE NAMED VIEWS. `ensure` sees an
+    # already-present toolchain and stops, so `SANDHOME_VIEW_MODE=copy sandhome
+    # install node` printed success and changed nothing - the promote that
+    # would have honoured the mode never ran (issue #113). The named trees are
+    # re-mirrored here so the mode the caller asked for is the mode on disk,
+    # and no payload is downloaded: the home tree is already there.
+    case "${SANDHOME_VIEW_MODE:-}" in
+        ''|auto) ;;
+        *)
+            for sh_c_n in $sh_c_args; do
+                [ -d "$(sh_toolchain_root "$sh_c_n")" ] || continue
+                sh_toolchain_load "$sh_c_n" >/dev/null 2>&1 || continue
+                sh_ci_bins=''
+                eval "sh_ci_bins=\${TC_${sh_c_n}_BINS:-}"
+                [ -n "$sh_ci_bins" ] || continue
+                # shellcheck disable=SC2086
+                sh_promote_toolchain "$sh_c_n" $sh_ci_bins || true
+                if command -v "tc_${sh_c_n}_env" >/dev/null 2>&1; then
+                    "tc_${sh_c_n}_env" >/dev/null 2>&1 || true
+                fi
+            done ;;
+    esac
     # Record what was asked for even when an ensure failed, so doctor can name
     # the unfulfilled request later (issue #57). sh_env_write merges with the
     # list already in the file when this process holds none.

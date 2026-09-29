@@ -262,6 +262,16 @@ case "$inst_t" in
     *'--target'*) t_ok 0 'install usage names --target (#29)' ;;
     *) t_ok 1 'install usage names --target (#29)' ;;
 esac
+# The qemu guest lever is a documented flag, not an environment variable a
+# caller has to be told about out of band (issue #117). `install qemuuser
+# --extra aarch64` is the prompt spelling of SANDHOME_QEMUUSER_EXTRA, and the
+# usage must name both the flag and the toolchain it applies to.
+inst_extra=$(SANDHOME_HOME="$work/ih" SANDHOME_EXEC="$work/ie" SANDHOME_REPO_DIR="$ROOT" \
+    sh "$ROOT/bin/sandhome" help 2>&1)
+case "$inst_extra" in
+    *'--extra'*'qemuuser'*|*'qemuuser'*'--extra'*) t_ok 0 'install usage names --extra for qemuuser (#117)' ;;
+    *) t_ok 1 'install usage names --extra for qemuuser (#117)' ;;
+esac
 
 # --- class H: --force is a flag the tool accepts and obeys --------------------
 # # STOP: THE CLAIM IS "AN INSTRUCTION THE TOOL PRINTS IS ONE THE TOOL OBEYS".
@@ -586,7 +596,13 @@ esac
 # runs the test suite that is running it does not terminate. The property under
 # test is the exit code, and one real test file is enough to hold it.
 st_real=$(cd "$ROOT" && sh "$ROOT/tests/unit.sh" >/dev/null 2>&1; printf '%s' "$?")
-t_is "$st_real" '0' 'a real checkout still runs its suite and exits 0'
+# 2 is the harness's "ran green but skipped something" code (a host without jq
+# skips the JSON clauses), and 0 is a clean run; only 1 is a failure. Asserting
+# 0 makes this clause a claim about the host's jq, not about the checkout.
+case "$st_real" in
+    0|2) t_ok 0 'a real checkout still runs its suite without failing' ;;
+    *) t_ok 1 "a real checkout still runs its suite without failing (got $st_real)" ;;
+esac
 
 # # STOP: DOCTOR CHECKS THE TOOLCHAINS THE SETUP ASKED FOR. `doctor` is the
 # readiness gate ROUTE.md step 2 tells a session to trust, and it only ever
@@ -1078,6 +1094,47 @@ sh_qtu_tag=$(SH_LIB_DIR="$ROOT/lib" SH_REPO_DIR="$ROOT" sh -c '. "$1/lib/common.
 t_is "$sh_qtu_tag" '9.9.9' 'the tag parser reads tag_name without helpers'
 sh_qtu_tag=$(SH_LIB_DIR="$ROOT/lib" SH_REPO_DIR="$ROOT" sh -c '. "$1/lib/common.sh"; . "$1/lib/fetch.sh"; . "$1/tools/qemuuser.sh" >/dev/null 2>&1; tc_qemuuser_tag_from_body "{\"nope\":1}"' sh "$ROOT" 2>/dev/null)
 t_is "$sh_qtu_tag" '' 'the tag parser answers nothing when there is no tag'
+
+# A CROSS TARGET ADDED AFTER THE PROMOTE IS VISIBLE WITHOUT A REBUILD (#115).
+# The rustlib snapshot was taken at promote time, so a raw `rustup target add
+# aarch64-unknown-linux-musl` printed success and then `cargo build --target`
+# failed with "can't find crate for std". A data-only cross target is linked
+# to the home tree, so new files appear at once; a target that holds an
+# executable keeps its mirrored copy, because the linkers rustc spawns cannot
+# run from a noexec home.
+rld_script="$work/rld.sh"
+cat > "$rld_script" <<'RLD'
+set -u
+. "$1/lib/common.sh"
+. "$1/lib/space.sh"
+. "$1/tools/rust.sh"
+view=$2
+home=$3
+tc=$view/rustup/toolchains/stable
+hc=$home/rustup/toolchains/stable
+mkdir -p "$tc/lib/rustlib/host/bin/gcc-ld" "$tc/lib/rustlib/aarch64/lib" \
+         "$hc/lib/rustlib/host/bin/gcc-ld" "$hc/lib/rustlib/aarch64/lib"
+printf '#!/bin/sh\n' > "$tc/lib/rustlib/host/bin/gcc-ld/ld.lld"
+chmod 0755 "$tc/lib/rustlib/host/bin/gcc-ld/ld.lld"
+printf '#!/bin/sh\n' > "$hc/lib/rustlib/host/bin/gcc-ld/ld.lld"
+chmod 0755 "$hc/lib/rustlib/host/bin/gcc-ld/ld.lld"
+printf 'rlib\n' > "$tc/lib/rustlib/aarch64/lib/libstd.rlib"
+printf 'rlib\n' > "$hc/lib/rustlib/aarch64/lib/libstd.rlib"
+tc_rust_link_data_targets "$view" "$home"
+printf 'new\n' > "$hc/lib/rustlib/aarch64/lib/libcore.rlib"
+[ -e "$tc/lib/rustlib/aarch64/lib/libcore.rlib" ] && printf 'seen' || printf 'missing'
+printf ' host='
+[ -L "$tc/lib/rustlib/host" ] && printf 'link' || printf 'dir'
+RLD
+rld_out=$(sh "$rld_script" "$ROOT" "$work/rld-view" "$work/rld-home" 2>/dev/null)
+case "$rld_out" in
+    *seen*) t_ok 0 'a target added after the promote is visible without a rebuild (#115)' ;;
+    *) t_ok 1 "a target added after the promote is visible without a rebuild (#115) (got $rld_out)" ;;
+esac
+case "$rld_out" in
+    *'host=dir'*) t_ok 0 'a target that runs something keeps its mirrored copy (#115)' ;;
+    *) t_ok 1 "a target that runs something keeps its mirrored copy (#115) (got $rld_out)" ;;
+esac
 
 # ShellCheck, the linter, as a first-class module like any other: known by
 # name, with declared bins, installable offline in dry-run, and pinned.

@@ -97,6 +97,21 @@ sh_env_body() {
         printf 'SANDHOME_WANTED_TOOLCHAINS=%s\n' "$(sh_sq_quote "$(sh_trim "$SH_WANTED_TOOLCHAINS")")"
         printf 'export SANDHOME_WANTED_TOOLCHAINS\n'
     fi
+    # # STOP: AN EXPLICIT VIEW MODE IS PERSISTED, SO `resume` HONOURS IT. The
+    # mode lived only in the installing process, so `sandhome resume`, which
+    # rebuilds every view after a tmpfs wipe, silently reverted the trees to
+    # launch (issue #113). Written as a guarded assignment so an operator can
+    # still override it for one command, and only when it was explicitly set:
+    # an absent variable leaves the file alone rather than pinning the
+    # machine decision to whatever this run happened to compute.
+    case "${SANDHOME_VIEW_MODE:-}" in
+        ''|auto) ;;
+        *)
+            printf 'if [ -z "${SANDHOME_VIEW_MODE:-}" ]; then\n'
+            printf '  SANDHOME_VIEW_MODE=%s\n' "$(sh_sq_quote "$SANDHOME_VIEW_MODE")"
+            printf '  export SANDHOME_VIEW_MODE\n'
+            printf 'fi\n' ;;
+    esac
     printf 'export PATH\n'
     # XDG_RUNTIME_DIR first: every headless GL/EGL/Wayland/pipewire tool
     # errors when it is unset, and the setup knows exactly where writable
@@ -233,6 +248,13 @@ sh_env_write() {
     sh_ew_tmp="$SH_HOME/env.sh.tmp.$$"
     sh_env_body > "$sh_ew_tmp" || return 1
     mv "$sh_ew_tmp" "$SH_HOME/env.sh" || return 1
+    # The exec root carries a pointer back to the home beside the installed
+    # command, so a copy with no inherited environment (or one whose baked home
+    # is stale) can still find env.sh and the recorded exec root. Best effort:
+    # a read-only or absent exec root is not a reason to fail an env write.
+    if [ -n "${SH_EXEC:-}" ]; then
+        printf '%s\n' "$SH_HOME" > "$SH_EXEC/.sandhome-home" 2>/dev/null || true
+    fi
     sh_step "wrote $SH_HOME/env.sh"
     return 0
 }

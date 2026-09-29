@@ -118,6 +118,29 @@ sh_is_exec_file "$tmp/run.sh" && t_ok 0 'is_exec_file accepts an executable' || 
 sh_is_exec_file "$tmp/data.txt" && t_ok 1 'is_exec_file rejects a data file' || t_ok 0 'is_exec_file rejects a data file'
 sh_is_exec_file "$tmp/libfoo.so" && t_ok 1 'is_exec_file rejects a shared object' || t_ok 0 'is_exec_file rejects a shared object'
 
+# # STOP: A PROBE THAT FORKS MUST NOT BE CAPTURED WITH A $() PIPE. A command
+# substitution waits for every writer of the pipe to close, so a probe that
+# leaves a child holding the write end wedges its caller forever. Measured on a
+# GitHub runner: the ptrace probe's self-stopped child outlived the parent, kept
+# the pipe open, and sh_detect_all blocked for CI's six-hour limit. The fixture
+# answers and then leaves a pipe holder; detection must answer anyway, and the
+# outer bound makes a regression fail here instead of hanging the suite.
+dp_stub="$tmp/leaky-python-bin"
+mkdir -p "$dp_stub"
+cat > "$dp_stub/python3" <<'PYSTUB'
+#!/bin/sh
+echo yes
+sleep 30 &
+exit 0
+PYSTUB
+chmod 0755 "$dp_stub/python3"
+dp_out=$(PATH="$dp_stub:$PATH" sh_run_bounded 5 sh -c '
+    . "$1/lib/common.sh"
+    . "$1/lib/detect.sh"
+    sh_detect_ptrace
+' sh "$ROOT" 2>/dev/null)
+t_is "$dp_out" 'yes' 'a forking probe that leaks a pipe holder cannot wedge detection'
+
 # sh_sq_quote: every path written into env.sh passes through this. A home with
 # an apostrophe or a space in it must survive being written and read back.
 t_is "$(sh_sq_quote /a/b)" "'/a/b'" 'sq_quote wraps a plain path'

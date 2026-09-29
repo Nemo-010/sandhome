@@ -377,4 +377,28 @@ export SH_VIEW_MODE SANDHOME_VIEW_MODE
 t_is "$(sh_toolchain_view_kind mxkind)" 'launch' 'an installed tree runs in the machine mode'
 t_is "$(sh_toolchain_view_kind nosuchtool)" 'direct' 'an adopted copy runs direct'
 
+# THE VIEW KIND IS READ FROM THE FILE, NOT FROM THE PLAN (issue #113), AND
+# DISAGREEING VIEWS ARE REPORTED AS SUCH. A tree repaired under an explicit
+# copy mode is real bytes while the machine still probes launch; the report
+# must name what runs rather than repeat what the plan would have done.
+if [ -x "$work/exec/bin/sandhome-memexec" ] && sh_memexec_probe >/dev/null 2>&1; then
+    mkdir -p "$work/home/toolchains.d" "$work/home/toolchains/mxcop/bin" \
+             "$work/home/toolchains/mxlaunch/bin" "$work/exec/views/mxcop/bin" \
+             "$work/exec/views/mxlaunch/bin"
+    printf 'TC_mxcop_BINS="bin/mxcop"\n' > "$work/home/toolchains.d/mxcop.sh"
+    printf 'TC_mxlaunch_BINS="bin/mxlaunch"\n' > "$work/home/toolchains.d/mxlaunch.sh"
+    printf '#!/bin/sh\nexit 0\n' > "$work/home/toolchains/mxcop/bin/mxcop"
+    printf '#!/bin/sh\nexit 0\n' > "$work/home/toolchains/mxlaunch/bin/mxlaunch"
+    printf '#!/bin/sh\nexit 0\n' > "$work/exec/bin/mxcop"
+    cp "$work/exec/bin/sandhome-memexec" "$work/exec/bin/mxlaunch"
+    SH_VIEW_MODE=launch
+    export SH_VIEW_MODE
+    t_is "$(sh_toolchain_view_kind mxcop)" 'copy' 'a real view entry reports copy'
+    t_is "$(sh_toolchain_view_kind mxlaunch)" 'launch' 'a launcher view entry reports launch'
+    t_is "$(sh_view_kind_of "$work/exec/bin/nothere")" 'direct' 'a missing view entry reports direct'
+    t_is "$(sh_report_view)" 'mixed' 'disagreeing views are reported as mixed'
+else
+    t_skip 'the helper does not probe here, so the measured-view clause was skipped'
+fi
+
 t_end

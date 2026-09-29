@@ -236,6 +236,24 @@ case "$dryout" in
 esac
 t_ok "$([ ! -e "$dryhome/shims/fakepty.so" ]; echo $?)" 'a dry run writes no shim object'
 t_ok "$([ ! -d "$dryhome/toolchains/jq" ]; echo $?)" 'a dry run downloads no toolchain'
+# A ONE-PASTE SETUP READS THE PROJECT IT IS RUN FROM (issue #116). A rust
+# checkout asked for `--toolset developer` used to get no rust, and the first
+# `cargo build` paid an `sandhome install rust` round-trip. The marker folds
+# the toolchain in, and --no-detect takes it back out.
+proj="$work/project"
+mkdir -p "$proj" 2>/dev/null
+printf '[package]\nname = "x"\n' > "$proj/Cargo.toml"
+printf 'module x\n' > "$proj/go.mod"
+detout=$(cd "$proj" && SANDHOME_HOME="$work/det-home" SANDHOME_EXEC="$work/det-exec" \
+    sh "$ROOT/bootstrap.sh" --toolset minimal --no-profile --no-path-line --dry-run 2>&1)
+t_contains "$detout" 'detected a project marker for rust' 'a rust marker folds rust into the request (#116)'
+t_contains "$detout" 'detected a project marker for go' 'a go marker folds go into the request (#116)'
+detout_off=$(cd "$proj" && SANDHOME_HOME="$work/det-home2" SANDHOME_EXEC="$work/det-exec2" \
+    sh "$ROOT/bootstrap.sh" --toolset minimal --no-profile --no-path-line --no-detect --dry-run 2>&1)
+case "$detout_off" in
+    *'detected a project marker'*) t_ok 1 '--no-detect turns the project scan off (#116)' ;;
+    *) t_ok 0 '--no-detect turns the project scan off (#116)' ;;
+esac
 # The skills ride the same flag discipline: installed by default, suppressed
 # by --no-skills, and only announced on a dry run (issue #89).
 t_contains "$dryout" 'would install the skills' 'a dry run announces the skills install'

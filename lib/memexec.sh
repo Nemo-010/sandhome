@@ -113,6 +113,33 @@ sh_memexec_probe() {
     return 1
 }
 
+# sh_view_kind_of FILE -> launch when FILE is a launcher copy, copy when it is
+# a real file, direct when it is not there. THIS READS THE DISK, AND IT HAS TO:
+# sh_memexec_mode answers what the machine WOULD do, and a single view built
+# under an explicit SANDHOME_VIEW_MODE=copy is real bytes while the machine
+# still probes launch. A report that echoed the plan named the wrong thing for
+# exactly the tree a caller had just asked to change (issue #113).
+sh_view_kind_of() {
+    sh_vko_f=$1
+    if [ -z "$sh_vko_f" ] || [ ! -e "$sh_vko_f" ]; then
+        printf 'direct'
+        return 0
+    fi
+    # Without cmp the launcher cannot be told from a real file, and answering
+    # `copy` would make a launch host look like a copy host. Say nothing and let
+    # the caller fall back to the machine mode.
+    if sh_memexec_built && sh_have cmp; then
+        if cmp -s "$sh_vko_f" "$(sh_memexec_bin)" 2>/dev/null; then
+            printf 'launch'
+        else
+            printf 'copy'
+        fi
+        return 0
+    fi
+    printf ''
+    return 0
+}
+
 # sh_memexec_mode -> launch or copy, read-only. The mode is a fact about the
 # machine (split home plus a helper that probes here), not a memory of what
 # installed it: a fresh `sandhome report` must answer the same mode the

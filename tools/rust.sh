@@ -370,6 +370,50 @@ tc_rust_copy_bins() {
     done
 }
 
+# tc_rust_link_data_targets VIEW HOME -> make each installed target's rustlib
+# in the view a link to the HOME tree when that target runs nothing, so a raw
+# `rustup target add <triple>` is visible to the next build instead of waiting
+# for a promote that may never come (issue #115). The target snapshot is taken
+# at promote time, so adding `aarch64-unknown-linux-musl` printed success and
+# then `cargo build --target` failed with "can't find crate for std". The HOST
+# target keeps its mirrored copy: it holds the gcc-ld linkers rustc spawns, and
+# a link into a noexec home would make them unrunnable. A cross target is
+# rlibs, objects and crt archives the linker reads, so a link is both safe and
+# current by construction. A target that holds an executable on either side is
+# left mirrored.
+tc_rust_link_data_targets() {
+    sh_rld_view=$1
+    sh_rld_home=$2
+    if [ -z "$sh_rld_view" ] || [ -z "$sh_rld_home" ]; then
+        return 0
+    fi
+    [ -d "$sh_rld_view/rustup/toolchains" ] || return 0
+    for sh_rld_tc in "$sh_rld_view"/rustup/toolchains/*; do
+        [ -d "$sh_rld_tc" ] || continue
+        sh_rld_rel=${sh_rld_tc#"$sh_rld_view"/}
+        for sh_rld_t in "$sh_rld_tc"/lib/rustlib/*; do
+            [ -d "$sh_rld_t" ] || continue
+            [ -L "$sh_rld_t" ] && continue
+            sh_rld_home_t="$sh_rld_home/$sh_rld_rel/lib/rustlib/${sh_rld_t##*/}"
+            sh_rld_bad=no
+            for sh_rld_side in "$sh_rld_t" "$sh_rld_home_t"; do
+                for sh_rld_f in "$sh_rld_side"/bin/* "$sh_rld_side"/bin/*/*; do
+                    if [ -f "$sh_rld_f" ] && sh_is_exec_file "$sh_rld_f"; then
+                        sh_rld_bad=yes
+                        break
+                    fi
+                done
+                [ "$sh_rld_bad" = no ] || break
+            done
+            [ "$sh_rld_bad" = no ] || continue
+            [ -d "$sh_rld_home_t" ] || continue
+            rm -rf "$sh_rld_t" 2>/dev/null || continue
+            ln -sfn "$sh_rld_home_t" "$sh_rld_t" 2>/dev/null || true
+        done
+    done
+    return 0
+}
+
 # tc_rust_ld_fragment FILE DIRS -> append the LD_LIBRARY_PATH block for DIRS
 # to FILE. Split out so the heredoc is testable under `set -u`: an unquoted
 # heredoc expands every `$`, and one bare `$ORIGIN` in a comment aborted the
@@ -631,6 +675,10 @@ SHIMEOF
                 "$sh_re_sysroot" "$sh_re_ld" || \
                 sh_warn "could not wrap $sh_re_w with --sysroot"
         done
+        # Targets added after the promote are made visible without one (issue
+        # #115). Runs after the wrappers so the view's rustc is already the
+        # --sysroot wrapper; linking a target directory does not touch it.
+        tc_rust_link_data_targets "$sh_re_view" "$sh_re_root" || true
     fi
     sh_env_write_fragment rust <<EOF
 : "\${SANDHOME_HOME:=$SH_HOME}"

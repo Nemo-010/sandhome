@@ -203,6 +203,39 @@ sh_detect_passwd() {
     printf 'no'
 }
 
+# sh_detect_probe_out SECS CMD... -> run CMD with its stdout in a FILE rather
+# than a command-substitution pipe, bounded by SECS, and answer its first line.
+#
+# # STOP: A PIPE IS THE WRONG CAPTURE FOR A PROBE THAT FORKS. A command
+# substitution waits for EVERY writer of the pipe to close, not merely for CMD
+# to exit. The ptrace probe below forks a child that stops itself; on a host
+# where the attach succeeds (measured: a GitHub ubuntu-latest runner) that child
+# can outlive the parent, keep the write end open, and block the reading shell
+# forever -- CI sat on this for its six-hour limit. A file has no such
+# rendezvous: the caller waits for CMD, the timeout bounds CMD, and a stray
+# descendant can only hold a file nobody is reading. Every probe that spawns
+# externally goes through here.
+sh_detect_probe_out() {
+    sh_dpo_secs=$1
+    shift
+    sh_dpo_file=''
+    for sh_dpo_dir in ${SH_HOME_TMP:-} ${TMPDIR:-} /tmp; do
+        [ -n "$sh_dpo_dir" ] || continue
+        { [ -d "$sh_dpo_dir" ] && [ -w "$sh_dpo_dir" ]; } || continue
+        sh_dpo_file="$sh_dpo_dir/.sandhome-probe.$$.out"
+        : > "$sh_dpo_file" 2>/dev/null && break
+        sh_dpo_file=''
+    done
+    [ -n "$sh_dpo_file" ] || sh_dpo_file=/dev/null
+    sh_run_bounded "$sh_dpo_secs" "$@" > "$sh_dpo_file" 2>/dev/null
+    sh_dpo_line=''
+    if [ "$sh_dpo_file" != /dev/null ]; then
+        IFS= read -r sh_dpo_line < "$sh_dpo_file" || :
+        rm -f "$sh_dpo_file" 2>/dev/null
+    fi
+    printf '%s' "$sh_dpo_line"
+}
+
 # sh_detect_ptrace -> yes when the ptrace syscall class works here, no when it is
 # denied, unknown when it cannot be probed.
 #
@@ -221,10 +254,14 @@ sh_detect_passwd() {
 # stops itself).
 sh_detect_ptrace() {
     if sh_have python3; then
-        _sh_dp=$(python3 -c 'import os,ctypes,signal,errno
+        _sh_dp=$(sh_detect_probe_out 10 python3 -c 'import os,ctypes,signal,errno
 libc = ctypes.CDLL("libc.so.6", use_errno=True)
 pid = os.fork()
 if pid == 0:
+    # The fork inherits the caller capture; close it BEFORE the stop, so a child
+    # left stopped past our exit can never be why a reader waits.
+    os.close(1)
+    os.close(2)
     os.kill(os.getpid(), signal.SIGSTOP)
     os._exit(0)
 os.waitpid(pid, os.WUNTRACED)
@@ -234,15 +271,22 @@ for req in (0, 16, 0x4206, 0x9999):
     target = 0 if req == 0 else pid
     libc.ptrace(req, target, 0, 0)
     results.append(ctypes.get_errno())
+# Reap to a real death: a SIGKILL to a tracee is reported as a ptrace stop
+# before the exit status, so a single waitpid would return while the child is
+# still alive and about to be left behind.
 os.kill(pid, signal.SIGKILL)
-os.waitpid(pid, 0)
+while True:
+    wpid, st = os.waitpid(pid, 0)
+    if os.WIFEXITED(st) or os.WIFSIGNALED(st):
+        break
+    os.kill(pid, signal.SIGKILL)
 if all(e == 0 for e in results):
     print("yes")
 elif all(e == errno.EPERM for e in results):
     print("no")
 else:
     print("partial")
-' 2>/dev/null)
+')
         case "$_sh_dp" in
             yes|no|partial) printf '%s' "$_sh_dp"; return 0 ;;
         esac
@@ -269,13 +313,13 @@ int main(void){
     pid_t pid = fork();
     int st, e0, e1, e2;
     if (pid < 0) return 2;
-    if (pid == 0) { kill(getpid(), SIGSTOP); _exit(0); }
+    if (pid == 0) { close(1); close(2); kill(getpid(), SIGSTOP); _exit(0); }
     if (waitpid(pid, &st, WUNTRACED) < 0) return 2;
     errno = 0; ptrace((enum __ptrace_request)0, 0, 0, 0); e0 = errno;
     errno = 0; ptrace((enum __ptrace_request)16, pid, 0, 0); e1 = errno;
     errno = 0; ptrace((enum __ptrace_request)0x9999, pid, 0, 0); e2 = errno;
     kill(pid, SIGKILL);
-    waitpid(pid, &st, 0);
+    while (waitpid(pid, &st, 0) > 0 && !WIFEXITED(st) && !WIFSIGNALED(st)) kill(pid, SIGKILL);
     if (e0 == 0 && e1 == 0 && e2 == 0) puts("yes");
     else if (e0 == EPERM && e1 == EPERM && e2 == EPERM) puts("no");
     else puts("partial");
@@ -283,7 +327,9 @@ int main(void){
 }
 EOF
         then
-            _sh_dp=$( ("$_sh_dp_cc" -O2 -o "$_sh_dp_bin" "$_sh_dp_src" 2>/dev/null && "$_sh_dp_bin" 2>/dev/null) )
+            _sh_dp=$(sh_detect_probe_out 10 sh -c \
+                '"$1" -O2 -o "$2" "$3" 2>/dev/null && "$2" 2>/dev/null' \
+                sh "$_sh_dp_cc" "$_sh_dp_bin" "$_sh_dp_src")
             rm -f "$_sh_dp_src" "$_sh_dp_bin" 2>/dev/null
             case "$_sh_dp" in
                 yes|no|partial) printf '%s' "$_sh_dp"; return 0 ;;
@@ -308,7 +354,7 @@ EOF
 # a caller can tell "no sockets at all" from "only TCP is denied".
 sh_detect_bind() {
     if sh_have python3; then
-        _sh_db=$(python3 -c 'import socket,errno,os,tempfile
+        _sh_db=$(sh_detect_probe_out 10 python3 -c 'import socket,errno,os,tempfile
 def probe(fam, typ, addr, alt=None):
     try:
         s = socket.socket(fam, typ)
@@ -343,7 +389,7 @@ elif tcp == "yes":
     print("tcp")
 else:
     print("no")
-' 2>/dev/null)
+')
         case "$_sh_db" in
             yes|unix|tcp) printf '%s' "$_sh_db"; return 0 ;;
             no)           printf 'no'; return 0 ;;

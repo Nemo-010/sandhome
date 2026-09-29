@@ -620,15 +620,42 @@ sh_toolchain_bins() {
 # with no home tree. This is the mapping a `/memfd:sandhome` path in a trace
 # is explained against (issue #83): launch means /proc/self/exe is the
 # anonymous memfd, copy and direct mean it is a real file.
-sh_toolchain_view_kind() {
-    if [ -d "$(sh_toolchain_root "$1")" ]; then
-        if command -v sh_report_view >/dev/null 2>&1; then
-            sh_report_view 2>/dev/null || printf 'copy'
-        else
-            printf '%s' "${SH_VIEW_MODE:-copy}"
-        fi
-    else
-        printf 'direct'
+sh_toolchain_view_measured() {
+    sh_tvm_name=$1
+    [ -d "$(sh_toolchain_root "$sh_tvm_name")" ] || { printf ''; return 0; }
+    command -v sh_view_kind_of >/dev/null 2>&1 || { printf ''; return 0; }
+    [ -n "${SH_EXEC_BIN:-}" ] || { printf ''; return 0; }
+    if command -v sh_toolchain_load >/dev/null 2>&1; then
+        sh_toolchain_load "$sh_tvm_name" >/dev/null 2>&1
     fi
+    sh_tvm_bins=''
+    eval "sh_tvm_bins=\${TC_${sh_tvm_name}_BINS:-}"
+    for sh_tvm_b in $sh_tvm_bins; do
+        sh_tvm_base=${sh_tvm_b##*/}
+        [ -n "$sh_tvm_base" ] || continue
+        if [ -e "$SH_EXEC_BIN/$sh_tvm_base" ]; then
+            sh_view_kind_of "$SH_EXEC_BIN/$sh_tvm_base"
+            return 0
+        fi
+    done
+    printf ''
+    return 0
+}
+
+# sh_toolchain_view_kind NAME -> how this toolchain runs: launch or copy for
+# an installed tree, direct for an adopted copy. The measured file wins; the
+# machine mode is only the fallback for a tree whose bins are not linked yet,
+# because that is a tree with no view to read.
+sh_toolchain_view_kind() {
+    sh_tvk_m=$(sh_toolchain_view_measured "$1")
+    if [ -n "$sh_tvk_m" ]; then
+        printf '%s' "$sh_tvk_m"
+        return 0
+    fi
+    if [ -d "$(sh_toolchain_root "$1")" ]; then
+        printf '%s' "${SH_VIEW_MODE:-copy}"
+        return 0
+    fi
+    printf 'direct'
     return 0
 }

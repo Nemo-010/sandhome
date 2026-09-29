@@ -124,8 +124,22 @@ sh_home_default() {
 sh_exec_candidates() {
     sh_ec_seen=' '
     sh_ec_out=''
+    # # STOP: THE WORKING TREE IS A CANDIDATE (issue #114). The list was a
+    # hardcoded set, so a machine whose scratch roots are small or refuse
+    # execve but whose checkout sits on a roomy, exec-capable mount never
+    # considered it: `/workspace` ran binaries and had gigabytes free and the
+    # planner still handed out a 245MB /dev/shm. The candidate is a dedicated
+    # `.sandhome/exec` under the tree, not the tree itself, so a chosen root
+    # writes bin/ and views/ into a namespaced directory instead of littering
+    # a project root. `/` is skipped: `/.sandhome` is not a working tree.
+    sh_ec_pwd=''
+    case "${PWD:-}" in
+        ''|/) ;;
+        *) sh_ec_pwd=$PWD/.sandhome/exec ;;
+    esac
     for sh_ec_c in \
         ${SANDHOME_EXEC:+"$SANDHOME_EXEC"} \
+        ${sh_ec_pwd:+"$sh_ec_pwd"} \
         "$SH_HOME" \
         /dev/shm \
         /tmp \
@@ -797,22 +811,32 @@ sh_view_current() {
             # In launch mode mtime cannot tell a launcher from a real copy,
             # so a module that newly names a copy-list entry (or a rebuilt
             # helper) would leave a working-looking view holding the wrong
-            # bytes. cmp closes it. A copy-listed entry must byte-match its
-            # home payload. Any other executable is current when it matches
-            # the helper (a launcher stamped from it) or is newer than the
-            # helper (a wrapper the module wrote after the mirror, like
-            # rust's --sysroot wrapper); older-and-different means the
-            # helper was rebuilt since the stamp. Without cmp, or without a
-            # helper to compare against, the mtime verdict above stands. In
-            # copy mode the mirror is byte-exact by construction and mtime
-            # suffices.
-            if [ "${SH_VIEW_MODE:-copy}" = launch ] && sh_have cmp && sh_is_exec_file "$sh_vc_e"; then
+            # bytes. cmp closes it, AND IT CLOSES THE MODE FLIP BOTH WAYS: a
+            # launcher stamped under launch mode is not a copy-mode view, and
+            # a real copy left by copy mode is not a launch-mode view, so
+            # `SANDHOME_VIEW_MODE=copy sandhome install NAME` (or the reverse)
+            # rebuilds instead of being told the view is already current
+            # (issue #113). A file that matches neither the helper nor its
+            # home source is a wrapper the module wrote after the mirror
+            # (rust's --sysroot wrapper), and stays current while it is newer
+            # than the helper. Without cmp the mtime verdict above stands.
+            if sh_have cmp && sh_is_exec_file "$sh_vc_e"; then
                 if sh_copy_listed "$sh_vc_rel"; then
                     cmp -s "$sh_vc_e" "$sh_vc_dst/$sh_vc_rel" 2>/dev/null || { sh_vc_ok=1; break; }
                 else
                     sh_vc_help=${SH_EXEC_BIN:-}/sandhome-memexec
-                    if [ -f "$sh_vc_help" ] && ! cmp -s "$sh_vc_help" "$sh_vc_dst/$sh_vc_rel" 2>/dev/null; then
-                        [ "$sh_vc_dst/$sh_vc_rel" -nt "$sh_vc_help" ] || { sh_vc_ok=1; break; }
+                    if [ -f "$sh_vc_help" ]; then
+                        if [ "${SH_VIEW_MODE:-copy}" = launch ]; then
+                            if cmp -s "$sh_vc_help" "$sh_vc_dst/$sh_vc_rel" 2>/dev/null; then
+                                :
+                            elif cmp -s "$sh_vc_e" "$sh_vc_dst/$sh_vc_rel" 2>/dev/null; then
+                                sh_vc_ok=1; break
+                            elif [ ! "$sh_vc_dst/$sh_vc_rel" -nt "$sh_vc_help" ]; then
+                                sh_vc_ok=1; break
+                            fi
+                        elif cmp -s "$sh_vc_help" "$sh_vc_dst/$sh_vc_rel" 2>/dev/null; then
+                            sh_vc_ok=1; break
+                        fi
                     fi
                 fi
             fi
