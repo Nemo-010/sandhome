@@ -1097,4 +1097,58 @@ done
 sh_toolchain_load zig >/dev/null 2>&1
 t_contains "$(tc_zig_copy_bins 2>/dev/null)" 'zig' 'zig is a real copy in launch mode (issue #77)'
 
+# Requested rust targets are owed on every path that skips the install, not
+# just the adopt one: a managed tree asked for a new --target answered
+# "adopting it" and added nothing (naive consumer run), and the wasm build
+# then died on a missing std. A stub rustup records what it was asked, so the
+# add, the skip-when-present, and the RUSTUP_HOME scoping are all offline.
+sh_toolchain_load rust >/dev/null 2>&1
+cat > "$work/stub-rustup" <<'EOF'
+#!/bin/sh
+log=${RUSTUP_STUB_LOG:-/dev/null}
+if [ "$1" = target ] && [ "$2" = list ]; then
+    printf 'x86_64-unknown-linux-gnu\n'
+    [ -n "${RUSTUP_STUB_HAS:-}" ] && printf '%s\n' "$RUSTUP_STUB_HAS"
+    # Targets added by earlier calls persist through the log, the way a real
+    # rustup home does: without this every call looks like the first one and
+    # idempotency cannot be observed.
+    if [ -r "$log" ]; then
+        while read -r logged _; do
+            [ -n "$logged" ] && printf '%s\n' "$logged"
+        done < "$log"
+    fi
+    exit 0
+fi
+if [ "$1" = target ] && [ "$2" = add ]; then
+    printf '%s home=%s\n' "$3" "${RUSTUP_HOME:-unset}" >> "$log"
+    exit 0
+fi
+exit 1
+EOF
+chmod 0755 "$work/stub-rustup"
+RUSTUP_STUB_LOG="$work/rustup.log"
+export RUSTUP_STUB_LOG
+: > "$work/rustup.log"
+SH_RUST_TARGETS='wasm32-unknown-unknown,x86_64-unknown-linux-gnu'
+export SH_RUST_TARGETS
+tc_rust_ensure_targets "$work/stub-rustup" "$work/stub-home" >/dev/null 2>&1
+t_contains "$(cat "$work/rustup.log" 2>/dev/null)" 'wasm32-unknown-unknown' 'a missing target is added through the scoped rustup'
+case "$(cat "$work/rustup.log" 2>/dev/null)" in
+    *'x86_64-unknown-linux-gnu home='*) t_ok 1 'a present target is not re-added' ;;
+    *) t_ok 0 'a present target is not re-added' ;;
+esac
+t_contains "$(cat "$work/rustup.log" 2>/dev/null)" "home=$work/stub-home" 'the add is scoped to the passed RUSTUP_HOME'
+# No truncation before the second run: the log IS the stub's memory of what
+# is installed, the way a rustup home is. A second call must observe the
+# first call's add through `target list` and add nothing.
+sh_ret_logged=$(cat "$work/rustup.log" 2>/dev/null)
+tc_rust_ensure_targets "$work/stub-rustup" "$work/stub-home" >/dev/null 2>&1
+t_is "$(cat "$work/rustup.log" 2>/dev/null)" "$sh_ret_logged" 'a second run adds nothing (idempotent)'
+RUSTUP_STUB_HAS='wasm32-unknown-unknown'
+export RUSTUP_STUB_HAS
+: > "$work/rustup.log"
+tc_rust_ensure_targets "$work/stub-rustup" "$work/stub-home" >/dev/null 2>&1
+t_is "$(cat "$work/rustup.log" 2>/dev/null)" '' 'a target added out-of-band is not re-added'
+unset RUSTUP_STUB_HAS RUSTUP_STUB_LOG SH_RUST_TARGETS
+
 t_end

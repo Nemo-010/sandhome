@@ -389,6 +389,61 @@ export LD_LIBRARY_PATH
 EOF
 }
 
+# tc_rust_ensure_targets [RUSTUP_BIN [RUSTUP_HOME]] -> add every target in
+# SH_RUST_TARGETS the toolchain does not already have. Present targets are
+# skipped, so re-runs are no-ops; missing ones are added and named. Without
+# a rustup the request is named rather than silently dropped. RUSTUP_BIN
+# defaults to the rustup on PATH (the adopted toolchain's own); a managed
+# tree passes its proxy with its RUSTUP_HOME scoped, so the add lands in the
+# sandhome home and never in the operator's own rustup home.
+#
+# STOP: PROBE-GREEN NEVER RUNS tc_rust_install, ON ANY PATH. The adopt branch
+# was fixed first (issue #80), and a naive consumer run then showed the same
+# hole one level deeper: a MANAGED tree asked for a new --target answered
+# "adopting it" in 0.8s and added nothing, and the wasm build died on a
+# missing std. Requested targets are owed on every path that skips the
+# install, so both call this.
+tc_rust_ensure_targets() {
+    [ -n "${SH_RUST_TARGETS:-}" ] || return 0
+    sh_ret_bin=${1:-rustup}
+    sh_ret_home=${2:-}
+    if [ -n "${1:-}" ]; then
+        if [ ! -x "$sh_ret_bin" ]; then
+            sh_warn "--target was requested ($SH_RUST_TARGETS) but $sh_ret_bin is not executable"
+            return 0
+        fi
+    elif ! sh_have rustup; then
+        sh_warn "--target was requested ($SH_RUST_TARGETS) but no rustup answers here; run 'sandhome install --force rust --target $SH_RUST_TARGETS' for a managed toolchain"
+        return 0
+    fi
+    if [ -n "$sh_ret_home" ]; then
+        sh_ret_have=$(RUSTUP_HOME="$sh_ret_home" "$sh_ret_bin" target list --installed 2>/dev/null)
+    else
+        sh_ret_have=$("$sh_ret_bin" target list --installed 2>/dev/null)
+    fi
+    for sh_ret_t in $(sh_split_on ',' "$SH_RUST_TARGETS"); do
+        [ -n "$sh_ret_t" ] || continue
+        case "$sh_ret_have" in
+            *"$sh_ret_t"*) continue ;;
+        esac
+        if [ -n "$sh_ret_home" ]; then
+            if RUSTUP_HOME="$sh_ret_home" "$sh_ret_bin" target add "$sh_ret_t" >/dev/null 2>&1; then
+                sh_step "added rust target $sh_ret_t"
+                sh_ret_have="$sh_ret_have $sh_ret_t"
+            else
+                sh_warn "rustup could not add target $sh_ret_t"
+            fi
+        else
+            if "$sh_ret_bin" target add "$sh_ret_t" >/dev/null 2>&1; then
+                sh_step "added rust target $sh_ret_t"
+                sh_ret_have="$sh_ret_have $sh_ret_t"
+            else
+                sh_warn "rustup could not add target $sh_ret_t"
+            fi
+        fi
+    done
+    return 0
+}
 tc_rust_env() {
     : "${SH_RUST_TARGETS:=${SANDHOME_RUST_TARGETS:-}}"
     sh_re_root=$(sh_toolchain_root rust)
@@ -484,23 +539,10 @@ SHIMEOF
         # STOP: AN ADOPTED RUST STILL OWES ITS REQUESTED TARGETS (issue #80).
         # `install rust --target T` on the adopt path used to exit 0 having
         # added nothing: tc_rust_install (which runs `rustup target add`)
-        # never runs for a working copy that is already here. The targets are
-        # added here, against the adopted toolchain, when a rustup answers;
-        # without one there is nothing to add through, and that is said out
-        # loud rather than exiting 0 over a request that went nowhere.
-        if [ -n "${SH_RUST_TARGETS:-}" ] && [ "$sh_re_installed" = no ]; then
-            if sh_have rustup; then
-                for sh_re_t in $(sh_split_on ',' "$SH_RUST_TARGETS"); do
-                    [ -n "$sh_re_t" ] || continue
-                    if rustup target add "$sh_re_t" >/dev/null 2>&1; then
-                        sh_step "added rust target $sh_re_t to the adopted toolchain"
-                    else
-                        sh_warn "rustup could not add target $sh_re_t to the adopted toolchain"
-                    fi
-                done
-            else
-                sh_warn "--target was requested ($SH_RUST_TARGETS) but the adopted rust has no rustup to add it through; run 'sandhome install --force rust --target $SH_RUST_TARGETS' for a managed toolchain"
-            fi
+        # never runs for a working copy that is already here. Against the
+        # adopted toolchain's own rustup, which manages the adopted home.
+        if [ "$sh_re_installed" = no ]; then
+            tc_rust_ensure_targets
         fi
         [ "$sh_re_installed" = yes ] || return 0
     fi
@@ -541,6 +583,15 @@ SHIMEOF
                 fi
             done
         fi
+    fi
+    # Requested targets are owed here too, against this tree's own rustup
+    # with its home scoped: probe-green skips tc_rust_install on the managed
+    # path exactly the way it skips it on the adopt path, and a bare rustup
+    # here would manage the operator's own home instead of this tree's.
+    if [ -x "$sh_re_cargo/bin/rustup" ]; then
+        tc_rust_ensure_targets "$sh_re_cargo/bin/rustup" "$sh_re_rustup"
+    elif [ -n "${SH_RUST_TARGETS:-}" ]; then
+        tc_rust_ensure_targets
     fi
     # The view bin is searched first: on a split root it is the only copy that
     # can execve, and it is where the copied gcc-ld/ld.lld sits, so its sysroot
@@ -644,6 +695,18 @@ EOF
             #   4. for a musl target rustc passes its own self-contained crt
             #      objects AND -nostartfiles while zig links its own musl, so
             #      _start and _init are defined twice
+            #   5. rustc names its linker dialect first (`-flavor wasm` +
+            #      value, or `-flavor=...` joined): zig cc is clang, and an
+            #      lld `-flavor` is an "Unknown Clang option", so the pair
+            #      goes together -- dropping the flag but keeping its value
+            #      would hand zig a stray `wasm` to link. Measured on a
+            #      wasm32-unknown-unknown build that died naming -flavor.
+            #   6. `wasm32-unknown-unknown` is freestanding to zig: the generic
+            #      `-unknown-` strip makes `wasm32-unknown`, which zig reads as
+            #      an unknown OS. The wasm triples are rewritten first, before
+            #      the generic strip runs. The wasm lld dialect (--export,
+            #      -z, --no-entry and friends) is dropped in the wrapper
+            #      itself, scoped to wasm triples so ELF keeps its flags.
             # The -B<sysroot> drop matters twice over: it is the flag that put
             # the noexec sysroot back on a link that otherwise would have worked.
             cat > "$sh_re_wrap" 2>/dev/null <<WRAP || continue
@@ -652,19 +715,55 @@ EOF
 # -m64 on x86_64), so the target is baked in here and every host-shaped flag
 # rustc adds is dropped in favour of zig's linker and libc.
 triple=\$(printf '%s' '$sh_re_t' | sed \\
+  -e 's/^wasm32-unknown-unknown$/wasm32-freestanding/' \\
+  -e 's/^wasm64-unknown-unknown$/wasm64-freestanding/' \\
   -e 's/-unknown-/-/' \\
   -e 's/^i[3-6]86-/x86-/' \\
   -e 's/^armv7[a-z0-9]*-/arm-/' \\
   -e 's/^thumb[a-z0-9]*-/arm-/')
 case "\$1" in -m64|-m32) shift ;; esac
+# wasm32/wasm64 speak an lld dialect zig cc does not take: --export and -z
+# carry a value each, the rest are bare. Dropping them lets zig link wasm
+# its own way; keeping any one of them aborts the link on the first
+# unknown option (measured: -flavor, then --export). Scoped to wasm so ELF
+# targets keep their -z hardening flags.
+case "\$triple" in wasm32-*|wasm64-*) wasm_lld=1 ;; *) wasm_lld=0 ;; esac
 args=""
+skip=0
+pend=""
 for a in "\$@"; do
+  if [ "\$skip" = 1 ]; then skip=0; continue; fi
+  # A --export value arrives as the NEXT argument: it is rewritten onto the
+  # one -Wl, form, not dropped, because the guest's entry point is the
+  # export (measured: -Wl,--export,main links; dropping it links a module
+  # with nothing to call).
+  if [ -n "\$pend" ]; then
+    args="\$args -Wl,--export,\$a"
+    pend=""
+    continue
+  fi
   case "\$a" in
     -B*|-fuse-ld=*|-nodefaultlibs|-m64|-m32) continue ;;
     -Wl,--fix-cortex*|--fix-cortex*) continue ;;
     -nostartfiles) continue ;;
+    -flavor) skip=1; continue ;;
+    -flavor=*) continue ;;
     *self-contained/crt*.o|*self-contained/rcrt*.o) continue ;;
   esac
+  if [ "\$wasm_lld" = 1 ]; then
+    # NOTE: REWRITE, NOT DROP, FOR WHAT wasm-ld NEEDS. zig cc rejects the
+    # bare lld spellings but forwards -Wl, forms (measured one by one):
+    # --no-entry becomes -Wl,--no-entry, --export X becomes
+    # -Wl,--export,X. Bare -z forwards untouched and is kept. Only what zig
+    # names unknown AND carries nothing (--stack-first, --no-demangle,
+    # --gc-sections: cosmetics and size) is dropped.
+    case "\$a" in
+      --export) pend=1; continue ;;
+      --export=*) args="\$args -Wl,\$a"; continue ;;
+      --no-entry) args="\$args -Wl,--no-entry"; continue ;;
+      --stack-first|--no-demangle|--gc-sections) continue ;;
+    esac
+  fi
   args="\$args \$a"
 done
 exec zig cc -target "\$triple" \$args
