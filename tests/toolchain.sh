@@ -1027,4 +1027,19 @@ if command -v qemu-x86_64 >/dev/null 2>&1; then
     t_ok "$([ $? -ne 0 ]; echo $?)" 'a launcher does not report success for a guest it cannot run'
 fi
 
+
+# The module must honour its guest set on the "payload already present, rebuild
+# the view" path too, not only inside install. That path skips tc_qemuuser_install
+# entirely, so a guest whose payload is on disk was dropped from BINS on every
+# re-run and its launcher vanished from the view even though the payload still
+# backed it. Reading the bin directory at load time is what fixes it.
+case "$(cat "$ROOT/tools/qemuuser.sh")" in
+    *'tc_qemuuser_bins_from_disk'*) t_ok 0 'BINS is rebuilt from the payload on every load, not only on install' ;;
+    *) t_ok 1 'BINS is rebuilt from the payload on every load, not only on install' ;;
+esac
+case "$(cat "$ROOT/tools/qemuuser.sh")" in
+    *'not installed; run'*) t_ok 0 'a guest that is requested but absent is named with the remedy' ;;
+    *) t_ok 1 'a guest that is requested but absent is named with the remedy' ;;
+esac
+
 t_end

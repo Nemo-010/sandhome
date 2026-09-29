@@ -36,6 +36,43 @@ TC_qemuuser_DESC='qemu-user, the static user-mode emulators (run a guest ELF, tr
 TC_qemuuser_BINS='bin/qemu-x86_64'
 TC_qemuuser_EXEC_MB=12
 
+# tc_qemuuser_bins_from_disk -> BINS listing what is actually in the bin
+# directory, host emulator first. Called at load time as well as after an
+# install, because the install function does NOT run on the "payload already
+# present, rebuild the view" path: without this, an opt-in guest whose payload
+# is already on disk was dropped from BINS on every re-run, so the view lost a
+# launcher that the payload still backed (and `command -v` then found nothing).
+# Reading the directory is also the honest answer -- it names what exists, not
+# what was once requested.
+tc_qemuuser_bins_from_disk() {
+    sh_qbd_root=$(sh_toolchain_root qemuuser 2>/dev/null)
+    [ -d "$sh_qbd_root/bin" ] || return 0
+    for sh_qbd_e in "$sh_qbd_root/bin/"*; do
+        [ -f "$sh_qbd_e" ] || continue
+        sh_qbd_b=${sh_qbd_e##*/}
+        case " $TC_qemuuser_BINS " in
+            *" bin/$sh_qbd_b "*) ;;
+            *) TC_qemuuser_BINS="$TC_qemuuser_BINS bin/$sh_qbd_b" ;;
+        esac
+    done
+}
+
+# Honour the requested extras even when the payload is already here. A guest
+# that is requested but absent cannot be copied on this path (the archive is
+# gone), so it is named rather than silently ignored: `install --force` is the
+# only way to add one, and saying so is the difference between a warning and a
+# mystery.
+tc_qemuuser_bins_from_disk
+if [ -n "${SANDHOME_QEMUUSER_EXTRA:-}" ]; then
+    for sh_qbd_x in ${SANDHOME_QEMUUSER_EXTRA}; do
+        case "$sh_qbd_x" in qemu-*) sh_qbd_n=$sh_qbd_x ;; *) sh_qbd_n=qemu-$sh_qbd_x ;; esac
+        case " $TC_qemuuser_BINS " in
+            *" bin/$sh_qbd_n "*) ;;
+            *) sh_warn "SANDHOME_QEMUUSER_EXTRA names $sh_qbd_x, but it is not installed; run 'sandhome install --force qemuuser' to fetch it" ;;
+        esac
+    done
+fi
+
 tc_qemuuser_probe() {
     sh_have qemu-x86_64 && qemu-x86_64 --version >/dev/null 2>&1
 }
@@ -127,17 +164,9 @@ tc_qemuuser_install() {
         fi
     done
     # BINS is read as a plain variable by the promote step, so the set that
-    # actually reached disk is what it must list. Appending here, after the
-    # copies, keeps the two in step: a guest that failed to copy is not
-    # promised on PATH, and one that copied is.
-    for sh_qu_bins in "$sh_qu_root/bin/"*; do
-        [ -f "$sh_qu_bins" ] || continue
-        sh_qu_binsname=${sh_qu_bins##*/}
-        case " $TC_qemuuser_BINS " in
-            *" bin/$sh_qu_binsname "*) ;;
-            *) TC_qemuuser_BINS="$TC_qemuuser_BINS bin/$sh_qu_binsname" ;;
-        esac
-    done
+    # actually reached disk is what it must list. The same helper the module
+    # uses at load time does this, so the two cannot disagree about what exists.
+    tc_qemuuser_bins_from_disk
     export TC_qemuuser_BINS
     # The host emulator is the one this module promises. Checking for it by name
     # after the copies means an archive that did not contain it is caught here
