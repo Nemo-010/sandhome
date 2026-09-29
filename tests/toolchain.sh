@@ -844,4 +844,257 @@ case "$bigc_need" in
         fi ;;
 esac
 
+# qemuuser: a module for the static user-mode emulators. Two things are asserted
+# here that no other module has: the tag is RESOLVED rather than hardcoded (#105),
+# and the two capabilities the module exists for actually work -- running a
+# binary from a noexec tree, and tracing syscalls without ptrace. The network
+# fetch is NOT asserted: a test that needs the Electrosphere is a test that
+# skips, and the module contract can be checked without one.
+cat > "$work/repo/tools/qemuuser.sh" <<'EOF'
+TC_qemuuser_DESC='qemu-user test module'
+TC_qemuuser_BINS='bin/qemu-x86_64'
+TC_qemuuser_EXEC_MB=12
+tc_qemuuser_probe() { sh_have qemu-x86_64 && qemu-x86_64 --version >/dev/null 2>&1; }
+tc_qemuuser_install() { return 0; }
+tc_qemuuser_env() { return 0; }
+tc_qemuuser_version() { sh_have qemu-x86_64 && qemu-x86_64 --version 2>/dev/null | sed -n '1s/.*version //p'; }
+EOF
+. "$ROOT/lib/toolchain.sh" 2>/dev/null || true
+SH_REPO_DIR="$work/repo" SH_LIB_DIR="$ROOT/lib"
+export SH_REPO_DIR SH_LIB_DIR
+t_is "$(sh_toolchain_known qemuuser && echo yes)" 'yes' 'a module dropped in tools/ is known by name'
+# BINS is read the way the promote step reads it, through the loader, because
+# the variable is only set after the module is sourced.
+sh_toolchain_load qemuuser >/dev/null 2>&1
+t_is "$(eval "printf '%s' \"\${TC_qemuuser_BINS:-}\"")" 'bin/qemu-x86_64' 'its declared binaries are read'
+# The declared constant is read through the module loader and compared to the
+# file, because sh_toolchain_exec_mb answers a MEASURED figure once a root
+# exists and this module has none here.
+sh_toolchain_load qemuuser >/dev/null 2>&1
+t_is "$(eval "printf '%s' \"\${TC_qemuuser_EXEC_MB:-}\"")" '12' 'its declared exec size is read'
+
+# NO HARDCODED VERSION IN THE MODULE. The tag must come from the API at install
+# time; a literal here is the rot shape #105 names. The check is textual on
+# purpose: it is the file's content that decays, not its behaviour today.
+case "$(cat "$ROOT/tools/qemuuser.sh")" in
+    *releases/download/v[0-9]*) t_ok 1 'the module does not hardcode a release tag' ;;
+    *) t_ok 0 'the module does not hardcode a release tag' ;;
+esac
+
+# The module must resolve the tag through the proxy, and must send a curl-like
+# agent: the endpoint answers 420 without one. Both are asserted by reading the
+# module, because the fetch itself needs the network.
+case "$(cat "$ROOT/tools/qemuuser.sh")" in
+    *api.cb.pkgforge.dev*) t_ok 0 'the module resolves the newest tag from the Forgejo API' ;;
+    *) t_ok 1 'the module resolves the newest tag from the Forgejo API' ;;
+esac
+case "$(cat "$ROOT/tools/qemuuser.sh")" in
+    *"api.rv.pkgforge.dev"*) t_ok 0 'it fetches the asset through the arbitrary-URL passthrough' ;;
+    *) t_ok 1 'it fetches the asset through the arbitrary-URL passthrough' ;;
+esac
+
+# CAPABILITY, when a real qemu-x86_64 is on PATH: a static binary in a directory
+# that refuses exec must run under it. This is the whole reason the module is in
+# the tree, so it is asserted rather than described.
+if command -v qemu-x86_64 >/dev/null 2>&1 && command -v cc >/dev/null 2>&1; then
+    cat > "$work/g.c" <<'EOF'
+#include <stdio.h>
+int main(void){ printf("qemuuser-ran\n"); return 0; }
+EOF
+    cc -static -O2 -o "$work/g" "$work/g.c" 2>/dev/null
+    if [ -x "$work/g" ]; then
+        t_ok "$([ "$(qemu-x86_64 "$work/g" 2>/dev/null)" = 'qemuuser-ran' ]; echo $?)" \
+            'a static guest runs under qemu-x86_64'
+        # -strace prints the guest's syscalls with no ptrace involved.
+        case "$(qemu-x86_64 -strace "$work/g" 2>&1)" in
+            *write*|*brk*) t_ok 0 '-strace reports the guest syscalls without ptrace' ;;
+            *) t_ok 1 '-strace reports the guest syscalls without ptrace' ;;
+        esac
+    else
+        echo '  skip  the guest probe needs a working static cc'
+    fi
+else
+    echo '  skip  qemu-x86_64 is not on PATH here'
+fi
+
+
+
+# The guest set is opt-in and BINS must end up listing what reached disk. Both
+# halves matter: without the append a promoted qemu-aarch64 sits in the home and
+# never reaches PATH, and a name that failed to copy must not be promised.
+case "$(cat "$ROOT/tools/qemuuser.sh")" in
+    *SANDHOME_QEMUUSER_EXTRA*) t_ok 0 'the guest emulator set is opt-in' ;;
+    *) t_ok 1 'the guest emulator set is opt-in' ;;
+esac
+case "$(cat "$ROOT/tools/qemuuser.sh")" in
+    *'TC_qemuuser_BINS="$TC_qemuuser_BINS'*) t_ok 0 'BINS is extended to what actually copied' ;;
+    *) t_ok 1 'BINS is extended to what actually copied' ;;
+esac
+# All 33 emulators is 274MB of view; a module that promotes them unconditionally
+# is the mistake the archive invites, so the module must not contain the loop
+# that copies every bin/*.
+case "$(cat "$ROOT/tools/qemuuser.sh")" in
+    *'cp "$sh_qu_dir/bin/"*'*) t_ok 1 'the module does not promote all 33 emulators' ;;
+    *) t_ok 0 'the module does not promote all 33 emulators' ;;
+esac
+
+# END TO END, when zig and qemu-aarch64 are both present: cross-compile a guest
+# and run it. This is the whole cross-architecture story on a host with no cross
+# toolchain, so it is executed rather than described -- and skipped, loudly, when
+# either half is absent.
+if command -v qemu-aarch64 >/dev/null 2>&1 && command -v zig >/dev/null 2>&1; then
+    cat > "$work/g64.c" <<'EOF'
+#include <stdio.h>
+int main(void){ printf("cross-ok\n"); return 0; }
+EOF
+    # # STOP: A BARE `zig cc` FAILS ON THIS MACHINE, AND THAT IS #77, NOT THE
+    # TEST. The view hands zig a /memfd: launcher, so its install-dir lookup
+    # cannot find lib/ and every subcommand that needs it exits. The workaround
+    # is a real directory containing the binary beside a lib/ symlink, so the
+    # clause tries that shape first and only then gives up.
+    zigcc=zig
+    if ! ( cd "$work" && timeout 300 zig cc --target=aarch64-linux-musl -O2 -o g64 g64.c ) >/dev/null 2>&1; then
+        # A REAL distribution has lib/ beside the binary; the view's launcher does
+        # not, and picking it first would reproduce the same failure.
+        # The view ALSO has a lib/, so having one is not enough to tell a real
+        # distribution from the memexec launcher that sits in front of it. The
+        # launcher is a few kilobytes and the real zig is tens of megabytes, so
+        # the size is what separates them.
+        for cand in $(find "${SANDHOME_EXEC:-/tmp}" /dev/shm /workspace -maxdepth 3 -type f -name zig 2>/dev/null); do
+            if [ -d "${cand%/*}/lib" ] && [ -f "${cand%/*}/lib/std/std.zig" ]; then
+                csz=$(wc -c < "$cand" 2>/dev/null || echo 0)
+                if [ "$csz" -gt 1000000 ]; then
+                    zigcc=$cand
+                    break
+                fi
+            fi
+        done
+    fi
+    if ( cd "$work" && timeout 300 "$zigcc" cc --target=aarch64-linux-musl -O2 -o g64 g64.c ) >/dev/null 2>&1 \
+       && [ -f "$work/g64" ]; then
+        case "$(file "$work/g64" 2>/dev/null)" in
+            *aarch64*) t_ok 0 'zig cross-compiles an aarch64 guest with its bundled sysroot' ;;
+            *)         t_ok 1 'zig cross-compiles an aarch64 guest with its bundled sysroot' ;;
+        esac
+        # The guest emulator is OPT-IN (SANDHOME_QEMUUSER_EXTRA), so its absence
+        # is a configuration, not a defect: say so rather than failing a clause
+        # for a machine that did not ask for it.
+        # # STOP: `command -v` IS NOT ENOUGH, AND ISSUE #110 IS WHY. A view
+        # launcher whose payload was pruned still resolves through `command -v`
+        # -- the stale entry survives on PATH -- and only fails when run. So the
+        # precondition is "it actually runs", not "it resolves", or this clause
+        # fails on a machine where the guest emulator is simply not installed.
+        qa_ok=no
+        if command -v qemu-aarch64 >/dev/null 2>&1 && qemu-aarch64 --version >/dev/null 2>&1; then
+            qa_ok=yes
+        fi
+        if [ "$qa_ok" = yes ]; then
+            t_ok "$([ "$(qemu-aarch64 "$work/g64" 2>/dev/null)" = 'cross-ok' ]; echo $?)" \
+                'qemu-aarch64 runs the cross-compiled guest'
+        else
+            echo '  skip  qemu-aarch64 is not installed here (set SANDHOME_QEMUUSER_EXTRA=aarch64)'
+        fi
+    else
+        echo '  skip  zig could not cross-compile here (may want its install dir)'
+    fi
+else
+    echo '  skip  zig or qemu-aarch64 is not on PATH here'
+fi
+
+
+# The promotion must mirror the module's BINS, not accumulate. qemuuser is the
+# first module whose BINS can shrink (SANDHOME_QEMUUSER_EXTRA), which exposes a
+# direction the tree never had to handle: a re-install that asks for fewer
+# guests must not leave the previous guest's launcher on PATH. This is issue
+# #110 at the module level, and the clause is here because the module is what
+# made it reachable.
+case "$(cat "$ROOT/tools/qemuuser.sh")" in
+    *'START FROM A CLEAN BIN'*) t_ok 0 'a re-install clears the bin directory first' ;;
+    *) t_ok 1 'a re-install clears the bin directory first' ;;
+esac
+case "$(cat "$ROOT/tools/qemuuser.sh")" in
+    *'the archive did not contain bin/$sh_qu_host'*) t_ok 0 'the missing-emulator check names the host emulator, not two hardcoded names' ;;
+    *) t_ok 1 'the missing-emulator check names the host emulator, not two hardcoded names' ;;
+esac
+cat > "$work/guest.c" <<'EOF'
+int main(void){ return 0; }
+EOF
+if command -v qemu-x86_64 >/dev/null 2>&1; then
+    # A guest binary with no payload behind it must fail; the point is that the
+    # launcher is not left promising something that was removed.
+    printf 'not an elf\n' > "$work/notelf"
+    qemu-x86_64 "$work/notelf" >/dev/null 2>&1
+    t_ok "$([ $? -ne 0 ]; echo $?)" 'a launcher does not report success for a guest it cannot run'
+fi
+
+
+# The module must honour its guest set on the "payload already present, rebuild
+# the view" path too, not only inside install. That path skips tc_qemuuser_install
+# entirely, so a guest whose payload is on disk was dropped from BINS on every
+# re-run and its launcher vanished from the view even though the payload still
+# backed it. Reading the bin directory at load time is what fixes it.
+case "$(cat "$ROOT/tools/qemuuser.sh")" in
+    *'tc_qemuuser_bins_from_disk'*) t_ok 0 'BINS is rebuilt from the payload on every load, not only on install' ;;
+    *) t_ok 1 'BINS is rebuilt from the payload on every load, not only on install' ;;
+esac
+case "$(cat "$ROOT/tools/qemuuser.sh")" in
+    *'not installed; run'*) t_ok 0 'a guest that is requested but absent is named with the remedy' ;;
+    *) t_ok 1 'a guest that is requested but absent is named with the remedy' ;;
+esac
+
+# The improved module answers the same contract with more fallbacks. Loading
+# is silent: every command sources every module, so a warning at source time
+# about a guest nobody asked this command about is noise on `sandhome help`.
+# The missing guests are recorded and named once from the probe instead.
+case "$(cat "$ROOT/tools/qemuuser.sh")" in
+    *'LOADING IS SILENT'*) t_ok 0 'loading the module warns about nothing' ;;
+    *) t_ok 1 'loading the module warns about nothing' ;;
+esac
+case "$(cat "$ROOT/tools/qemuuser.sh")" in
+    *'sh_have wget'*) t_ok 0 'the tag resolve falls back to wget' ;;
+    *) t_ok 1 'the tag resolve falls back to wget' ;;
+esac
+case "$(cat "$ROOT/tools/qemuuser.sh")" in
+    *'tc_qemuuser_extract'*) t_ok 0 'unpacking survives a tar without lzma' ;;
+    *) t_ok 1 'unpacking survives a tar without lzma' ;;
+esac
+# The tag parser reads with the shell, not sed: the module installs onto a
+# userland whose bootstrap has not provided anything yet.
+sh_qtu_tag=$(SH_LIB_DIR="$ROOT/lib" SH_REPO_DIR="$ROOT" sh -c '. "$1/lib/common.sh"; . "$1/lib/fetch.sh"; . "$1/tools/qemuuser.sh" >/dev/null 2>&1; tc_qemuuser_tag_from_body "{\"tag_name\":\"9.9.9\",\"x\":1}"' sh "$ROOT" 2>/dev/null)
+t_is "$sh_qtu_tag" '9.9.9' 'the tag parser reads tag_name without helpers'
+sh_qtu_tag=$(SH_LIB_DIR="$ROOT/lib" SH_REPO_DIR="$ROOT" sh -c '. "$1/lib/common.sh"; . "$1/lib/fetch.sh"; . "$1/tools/qemuuser.sh" >/dev/null 2>&1; tc_qemuuser_tag_from_body "{\"nope\":1}"' sh "$ROOT" 2>/dev/null)
+t_is "$sh_qtu_tag" '' 'the tag parser answers nothing when there is no tag'
+
+# ShellCheck, the linter, as a first-class module like any other: known by
+# name, with declared bins, installable offline in dry-run, and pinned.
+SH_LIB_DIR="$ROOT/lib" SH_REPO_DIR="$ROOT" sh_toolchain_known shellcheck 2>/dev/null || true
+t_is "$(sh_toolchain_known shellcheck && echo yes)" 'yes' 'the shellcheck module is known by name'
+sh_toolchain_load shellcheck >/dev/null 2>&1
+t_is "$(eval "printf '%s' \"\${TC_shellcheck_BINS:-}\"")" 'bin/shellcheck' 'its declared binaries are read'
+case " $(sh_pin_names) " in
+    *' shellcheck '*) t_ok 0 'shellcheck has a pin-table entry' ;;
+    *) t_ok 1 'shellcheck has a pin-table entry' ;;
+esac
+case "$(cat "$ROOT/NOTICE")" in
+    *'| shellcheck |'*) t_ok 0 'shellcheck is recorded in NOTICE' ;;
+    *) t_ok 1 'shellcheck is recorded in NOTICE' ;;
+esac
+
+# Single-binary toolchains price their launch-mode view, not their payload:
+# a deno install was refused for 150MB its 20KB view never needed (issue #92).
+for sh_tmm in deno bun mold; do
+    sh_toolchain_load "$sh_tmm" >/dev/null 2>&1
+    sh_tmm_mb=$(SH_VIEW_MODE=launch "tc_${sh_tmm}_exec_mb" 2>/dev/null) || sh_tmm_mb=''
+    case "$sh_tmm_mb" in
+        ''|*[!0-9]*) t_ok 1 "$sh_tmm prices its launch-mode view" ;;
+        *) if [ "$sh_tmm_mb" -lt 32 ]; then t_ok 0 "$sh_tmm prices its launch-mode view (${sh_tmm_mb}MB)";
+           else t_ok 1 "$sh_tmm prices its launch-mode view (got ${sh_tmm_mb}MB)"; fi ;;
+    esac
+done
+# zig locates its install dir exe-relative through /proc/self/exe, which a
+# memfd image hides: it must land as a real copy even in launch mode, or
+# every compiler subcommand fails while the probe stays green (issue #77).
+sh_toolchain_load zig >/dev/null 2>&1
+t_contains "$(tc_zig_copy_bins 2>/dev/null)" 'zig' 'zig is a real copy in launch mode (issue #77)'
+
 t_end

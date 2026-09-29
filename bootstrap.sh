@@ -199,6 +199,7 @@ usage: sh bootstrap.sh [options]
   --no-shims          do not build the LD_PRELOAD shims
   --require-shims     refuse to finish when a needed shim could not be built
   --no-shell          do not install errandsh
+  --no-skills         do not install the skills into ~/.agents/skills
   --no-profile        do not install the profile fragment or touch login files
   --no-path-line      do not add the exec bin directory to the login files
   --dry-run           print what would be done and change nothing
@@ -267,6 +268,7 @@ SH_EXEC_ARG=''
 SH_SHIMS=build
 SH_NEED_SHIMS=0
 SH_SHELL=install
+SH_SKILLS=install
 SH_PROFILE=install
 SH_PATH_LINE=install
 SH_JSON=0
@@ -304,6 +306,7 @@ sh_bootstrap_args() {
             --no-shims)        SH_SHIMS=none; shift ;;
             --require-shims)   SH_NEED_SHIMS=1; shift ;;
             --no-shell)        SH_SHELL=none; shift ;;
+            --no-skills)        SH_SKILLS=none; shift ;;
             --no-profile)      SH_PROFILE=none; shift ;;
             --no-path-line)    SH_PATH_LINE=none; shift ;;
             --dry-run)         SH_DRY_RUN=1; shift ;;
@@ -381,6 +384,55 @@ sh_bootstrap_install_command() {
     }
     chmod 0755 "$SH_EXEC_BIN/sandhome" 2>/dev/null || true
     sh_step "installed $SH_EXEC_BIN/sandhome"
+    return 0
+}
+
+# sh_bootstrap_install_skills -> put the skills where harnesses discover them
+# ($HOME/.agents/skills, plus $HOME/.pi/agent/skills when Pi state exists).
+# A skill already there -- a directory or a symlink from an earlier run -- is
+# left alone, so a hand-maintained skill is never overwritten. From a clone
+# the skill is symlinked (later pulls update it, as ROUTE.md says); from a
+# fetched tree it is copied (the staging tree is removed at the end of this
+# run, so a link into it would dangle). Without a HOME there is nowhere to
+# put them, and that is said rather than guessed.
+sh_bootstrap_install_skills() {
+    if [ "$SH_SKILLS" = none ]; then
+        return 0
+    fi
+    if [ -z "${HOME:-}" ]; then
+        sh_warn 'no HOME here, so the skills were not installed; fetch them by URL as ROUTE.md says'
+        return 0
+    fi
+    if [ "$SH_DRY_RUN" = 1 ]; then
+        sh_step "would install the skills into $HOME/.agents/skills"
+        return 0
+    fi
+    sh_bis_link=0
+    if [ -d "$SH_REPO_DIR/.git" ]; then
+        sh_bis_link=1
+    fi
+    for sh_bis_s in sandhome errandsh sealed-sandbox; do
+        [ -d "$SH_REPO_DIR/skills/$sh_bis_s" ] || continue
+        for sh_bis_base in "$HOME/.agents/skills" "$HOME/.pi/agent/skills"; do
+            case "$sh_bis_base" in
+                "$HOME/.pi/agent/skills") [ -d "$HOME/.pi" ] || continue ;;
+            esac
+            if [ -e "$sh_bis_base/$sh_bis_s" ] || [ -L "$sh_bis_base/$sh_bis_s" ]; then
+                continue
+            fi
+            mkdir -p "$sh_bis_base" 2>/dev/null || continue
+            if [ "$sh_bis_link" = 1 ]; then
+                if ln -s "$SH_REPO_DIR/skills/$sh_bis_s" "$sh_bis_base/$sh_bis_s" 2>/dev/null; then
+                    sh_step "linked $sh_bis_base/$sh_bis_s"
+                fi
+            else
+                if mkdir -p "$sh_bis_base/$sh_bis_s" 2>/dev/null && \
+                   cp -f "$SH_REPO_DIR/skills/$sh_bis_s/SKILL.md" "$sh_bis_base/$sh_bis_s/SKILL.md" 2>/dev/null; then
+                    sh_step "installed $sh_bis_base/$sh_bis_s/SKILL.md"
+                fi
+            fi
+        done
+    done
     return 0
 }
 
@@ -523,7 +575,7 @@ sandhome_bootstrap_main() {
         # when a shim is PRESENT but older than its source, which is a different
         # defect and which this check could not see at all.
         if [ "$SH_NEED_SHIMS" = 1 ]; then
-            for sh_mb_shim in fakepty fakepwd; do
+            for sh_mb_shim in $(sh_shim_names); do
                 if [ "$(sh_shim_need "$sh_mb_shim")" = yes ] && [ -f "$(sh_shims_dir)/$sh_mb_shim.so" ]; then
                     if [ "$(sh_shims_dir)/$sh_mb_shim.so" -ot "$SH_REPO_DIR/shims/$sh_mb_shim.c" ]; then
                         sh_fail "the $sh_mb_shim shim is older than its source and --require-shims is set"
@@ -535,6 +587,7 @@ sandhome_bootstrap_main() {
 
     sh_bootstrap_install_shell || true
     sh_bootstrap_install_command || true
+    sh_bootstrap_install_skills || true
     # Durable library (issue #20): the network-only path runs from a scratch
     # tree under /tmp that the reaper, a reboot, or gc removes, after which
     # every `sandhome` call exits 2. See sh_repo_persist in lib/env.sh.

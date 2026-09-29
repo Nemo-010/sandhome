@@ -13,6 +13,8 @@ usage: sandhome COMMAND [args]
   env                    print the environment, for `eval "$(sandhome env)"`
   path                   print the exec-view bin directory
   space [--probe]        where the two roots are, and every candidate tried
+  space --largest [N]    the N biggest entries on the exec root (default 10)
+  space --reclaim        reclaimable cache bytes without removing anything
   toolchains             name, one-line description, PATH binaries, versions
   install NAME...        adopt or install each toolchain, then write the env
   install --force NAME   install NAME even when a working copy is on PATH
@@ -34,10 +36,14 @@ usage: sandhome COMMAND [args]
   pty CMD...             run CMD with a userspace pty (no /dev/ptmx needed)
   exec CMD...            run CMD with the sandhome environment loaded
   report [--json]        the full report
-  gc [DAYS] [--dry-run]   remove staging older than DAYS (default 7).
+  gc [DAYS] [--dry-run]   remove staging and caches older than DAYS (default 7).
                          DAYS=0 (or --now) removes everything sandhome owns
-                         in its caches, however fresh. Views are never
-                         removed; `repair` rebuilds them
+                         in its caches, however fresh, except what a live
+                         install holds (SANDHOME_GC_FORCE=1 overrides).
+                         Views are never removed; `repair` rebuilds them.
+                         Prints the entry count and the bytes reclaimed.
+  prune [NAME...]        drop exec-view entries whose payload is gone.
+                         No names means every toolchain sandhome knows.
   version                print the schema version
   help [CMD]             this text, or the help for CMD
 
@@ -103,6 +109,7 @@ usage: sh bootstrap.sh [options]
   --no-shims          do not build the LD_PRELOAD shims
   --require-shims     refuse to finish when a needed shim could not be built
   --no-shell          do not install errandsh
+  --no-skills         do not install the skills into ~/.agents/skills
   --no-profile        do not install the profile fragment or touch login files
   --no-path-line      do not add the exec bin directory to the login files
   --dry-run           print what would be done and change nothing
@@ -170,6 +177,7 @@ usage: sh bootstrap.sh [options]
 | `SANDHOME_FETCH_CHUNK_MB` | fetch.sh | `256` |
 | `SANDHOME_FETCH_DIR` | bootstrap.sh | `$SH_FETCH_DIR` |
 | `SANDHOME_FORCE` | toolchain.sh bootstrap.sh sandhome rust.sh | `unset, and the feature is off until it is set` |
+| `SANDHOME_GC_FORCE` | space.sh sandhome | `unset, and the feature is off until it is set` |
 | `SANDHOME_GO_DL_JSON_URL` | sandhome go.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_GO_VERSION_URL` | sandhome go.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_HERE` | profile.sh | `unset, and the feature is off until it is set` |
@@ -187,6 +195,7 @@ usage: sh bootstrap.sh [options]
 | `SANDHOME_PASSWD_USERS` | shim.sh sandhome | `unset, and the feature is off until it is set` |
 | `SANDHOME_PCT_MEANINGFUL_MB` | space.sh sandhome | `unset, and the feature is off until it is set` |
 | `SANDHOME_PROFILE` | profile.sh | `1` |
+| `SANDHOME_QEMUUSER_EXTRA` | qemuuser.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_REF` | bootstrap.sh sandhome | `unset, and the feature is off until it is set` |
 | `SANDHOME_REPO` | env.sh bootstrap.sh sandhome | `unset, and the feature is off until it is set` |
 | `SANDHOME_REPO_DIR` | env.sh bootstrap.sh sandhome | `unset, and the feature is off until it is set` |
@@ -206,8 +215,10 @@ usage: sh bootstrap.sh [options]
 | `SANDHOME_SHA256_MOLD` | fetch.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_SHA256_NODE` | fetch.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_SHA256_PYTHON` | fetch.sh | `unset, and the feature is off until it is set` |
+| `SANDHOME_SHA256_QEMUUSER` | fetch.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_SHA256_RIPGREP` | fetch.sh bootstrap.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_SHA256_RUST` | fetch.sh | `unset, and the feature is off until it is set` |
+| `SANDHOME_SHA256_SHELLCHECK` | fetch.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_SHA256_ZIG` | fetch.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_SHIMS` | env.sh shim.sh sandhome | `unset, and the feature is off until it is set` |
 | `SANDHOME_WANTED_TOOLCHAINS` | env.sh report.sh | `*)` |
@@ -246,8 +257,10 @@ usage: sh bootstrap.sh [options]
 | `mold` | `bin/mold bin/ld.mold` | mold, a fast ELF linker (gcc/clang/rust via -fuse-ld=mold) |
 | `node` | `bin/node bin/npm bin/npx` | Node.js with the bundled npm, from the official nodejs.org tarball |
 | `python` | `(via its own PATH fragment)` | CPython, installed by uv (uv is always left on PATH) |
+| `qemuuser` | `bin/qemu-x86_64` | qemu-user, the static user-mode emulators (run a guest ELF, trace its syscalls without ptrace) |
 | `ripgrep` | `bin/rg` | ripgrep (rg), the fast recursive search tool |
 | `rust` | `cargo/bin/rustup cargo/bin/cargo` | Rust via rustup (rustc, cargo, rustup; minimal profile) |
+| `shellcheck` | `bin/shellcheck` | ShellCheck, the shell script linter (single static binary) |
 | `zig` | `zig` | zig cc cross compiler and linker, from the official tarball |
 
 ## Tests

@@ -4,6 +4,19 @@ TC_deno_DESC='Deno, a TypeScript/JavaScript runtime (single binary, from GitHub)
 TC_deno_BINS='deno'
 TC_deno_EXEC_MB=150
 
+# tc_deno_exec_mb -> the fresh-install exec need in MB: 8 in launch mode (one
+# launcher copy for the single binary), 150 in copy mode (the full binary).
+# Read by the install gate below and the feasibility plan so the two never
+# disagree. Without it a launch-mode install was refused for 150MB of exec
+# space its 20KB view never needed (issue #92).
+tc_deno_exec_mb() {
+    if [ "${SH_VIEW_MODE:-copy}" = launch ]; then
+        printf '8'
+    else
+        printf '150'
+    fi
+}
+
 tc_deno_probe() {
     sh_have deno && deno --version >/dev/null 2>&1
 }
@@ -28,7 +41,7 @@ tc_deno_install() {
     sh_di_stage=${SH_HOME_TMP:-${TMPDIR:-/tmp}}
     mkdir -p "$sh_di_stage" 2>/dev/null || return 1
     sh_space_need 300 home || return 1
-    sh_space_need "$TC_deno_EXEC_MB" exec || return 1
+    sh_space_need "$(tc_deno_exec_mb)" exec || return 1
     if [ "$SH_DRY_RUN" = 1 ]; then
         sh_step "would install $sh_di_url into $sh_di_root"
         return 0

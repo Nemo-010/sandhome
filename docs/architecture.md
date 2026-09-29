@@ -51,10 +51,11 @@ plus the few real copies below).
 A launcher copy maps itself back to its home payload at runtime (the
 `views/<name>` to `toolchains/<name>` convention, argv unchanged), so
 exe-relative tools keep working: clang finds its resource dir and re-execs
-`-cc1` through the view path. Two shapes cannot run from a memfd image and
+`-cc1` through the view path. Three shapes cannot run from a memfd image and
 stay real copies, named per module by `tc_<name>_copy_bins`: a binary that
 is *spawned by path and locates its siblings exe-relative* (gcc's `ld.lld`
-wrapping, `cargo-clippy` finding `clippy-driver`), and the sysroot rustc
+wrapping, `cargo-clippy` finding `clippy-driver`), zig, which locates its
+install dir through `/proc/self/exe` that a memfd image hides, and the sysroot rustc
 reports, which still needs the `--sysroot` wrapper because the driver loads
 from the home path in every mode. `SH_VIEW_MODE` is `launch` when the helper
 is built and passes its probe here, `copy` otherwise; `copy` is the old
@@ -93,11 +94,11 @@ bin/sandhome          the command. Copied to $SANDHOME_EXEC/bin by a bootstrap.
   lib/fetch.sh        one download path, one digest path, one unpack path
   lib/env.sh          the environment, written once and read everywhere
   lib/toolchain.sh    the contract every tools/<name>.sh obeys
-  lib/shim.sh         the two LD_PRELOAD interposers
+  lib/shim.sh         the three LD_PRELOAD interposers
   lib/report.sh       the report, read from probes
   lib/profile.sh      the login fragment (fetched never, aliased never)
   tools/<name>.sh     one module per toolchain
-  shims/*.c           fakepty, fakepwd
+  shims/*.c           fakepty, fakepwd, antiptrace
   shell/errandsh      a line discipline for a session with no kernel pty
   shell/faketty       run one command under the userspace pty
 ```

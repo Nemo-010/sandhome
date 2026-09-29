@@ -145,13 +145,15 @@ done
 t_is "$bad_flags" '' 'every flag a document names is accepted by an argument parser'
 
 # --- 3: every SANDHOME_/ERRANDSH_ variable a document names must be real ----
-# Real means the identifier appears somewhere in the shell sources.
+# Real means the identifier appears somewhere in the shell sources or the shim
+# sources: the antiptrace switches (SANDHOME_ANTIPTRACE_*) are read by
+# shims/antiptrace.c and nowhere else, so shims/ is searched too.
 bad_vars=''
 for doc in $DOCS $(decision_docs); do
     [ -r "$doc" ] || continue
     for var in $(tr '`' '\n' < "$doc" | grep -E '^(SANDHOME|ERRANDSH)_[A-Z0-9_]+$' 2>/dev/null | sort -u); do
         if grep -rlq "$var" "$ROOT"/lib "$ROOT"/tools "$ROOT"/bootstrap.sh \
-                      "$ROOT"/bin/sandhome "$ROOT"/shell 2>/dev/null; then
+                      "$ROOT"/bin/sandhome "$ROOT"/shell "$ROOT"/shims 2>/dev/null; then
             :
         else
             bad_vars="$bad_vars ${doc##*/}:$var"

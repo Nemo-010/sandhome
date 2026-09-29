@@ -481,6 +481,27 @@ SHIMEOF
                 sh_re_installed=yes
             fi
         fi
+        # STOP: AN ADOPTED RUST STILL OWES ITS REQUESTED TARGETS (issue #80).
+        # `install rust --target T` on the adopt path used to exit 0 having
+        # added nothing: tc_rust_install (which runs `rustup target add`)
+        # never runs for a working copy that is already here. The targets are
+        # added here, against the adopted toolchain, when a rustup answers;
+        # without one there is nothing to add through, and that is said out
+        # loud rather than exiting 0 over a request that went nowhere.
+        if [ -n "${SH_RUST_TARGETS:-}" ] && [ "$sh_re_installed" = no ]; then
+            if sh_have rustup; then
+                for sh_re_t in $(sh_split_on ',' "$SH_RUST_TARGETS"); do
+                    [ -n "$sh_re_t" ] || continue
+                    if rustup target add "$sh_re_t" >/dev/null 2>&1; then
+                        sh_step "added rust target $sh_re_t to the adopted toolchain"
+                    else
+                        sh_warn "rustup could not add target $sh_re_t to the adopted toolchain"
+                    fi
+                done
+            else
+                sh_warn "--target was requested ($SH_RUST_TARGETS) but the adopted rust has no rustup to add it through; run 'sandhome install --force rust --target $SH_RUST_TARGETS' for a managed toolchain"
+            fi
+        fi
         [ "$sh_re_installed" = yes ] || return 0
     fi
     # Proxies before the view search: a tree installed before they were

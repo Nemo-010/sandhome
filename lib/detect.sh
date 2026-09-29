@@ -203,24 +203,152 @@ sh_detect_passwd() {
     printf 'no'
 }
 
+# sh_detect_ptrace -> yes when the ptrace syscall class works here, no when it is
+# denied, unknown when it cannot be probed.
+#
+# # WHY A BOGUS REQUEST IS SENT TOO. A blanket EPERM from ptrace is answered by
+# several different things, and they mean different things for a tracee:
+#   - a seccomp filter refuses the whole syscall class BEFORE the kernel looks at
+#     the request, so even a request number that does not exist answers EPERM;
+#   - YAMA and an LSM answer AFTER argument validation, so a bogus request gets
+#     EIO/ESRCH instead.
+# The distinction decides which shim answers it: a filter cannot be interposed
+# into at all (it runs before libc), but a program that only SELF-CHECKS with
+# PTRACE_TRACEME can still be satisfied by shims/antiptrace.so. Sending the bogus
+# request is what tells the two apart. The method is the one strace-appimage's
+# experiments/10-probe-host.sh uses; this is the same measurement, in the shape
+# sandhome needs it (no compiler on the host, so python3 spawns a child that
+# stops itself).
+sh_detect_ptrace() {
+    if sh_have python3; then
+        _sh_dp=$(python3 -c 'import os,ctypes,signal,errno
+libc = ctypes.CDLL("libc.so.6", use_errno=True)
+pid = os.fork()
+if pid == 0:
+    os.kill(os.getpid(), signal.SIGSTOP)
+    os._exit(0)
+os.waitpid(pid, os.WUNTRACED)
+results = []
+for req in (0, 16, 0x4206, 0x9999):
+    ctypes.set_errno(0)
+    target = 0 if req == 0 else pid
+    libc.ptrace(req, target, 0, 0)
+    results.append(ctypes.get_errno())
+os.kill(pid, signal.SIGKILL)
+os.waitpid(pid, 0)
+if all(e == 0 for e in results):
+    print("yes")
+elif all(e == errno.EPERM for e in results):
+    print("no")
+else:
+    print("partial")
+' 2>/dev/null)
+        case "$_sh_dp" in
+            yes|no|partial) printf '%s' "$_sh_dp"; return 0 ;;
+        esac
+    fi
+    # FALLBACK: no python3, but a C compiler answers the same question with
+    # the same rule. The child stops itself; the parent sends TRACEME (request
+    # 0), a real attach (16) and the bogus request (0x9999), and reports
+    # yes/no/partial off errno exactly like the python probe above. A host
+    # with neither gets unknown, and says so rather than guessing.
+    if sh_have cc || sh_have gcc; then
+        _sh_dp_cc=cc
+        sh_have cc || _sh_dp_cc=gcc
+        _sh_dp_dir=${SH_HOME_TMP:-${TMPDIR:-/tmp}}
+        _sh_dp_src="$_sh_dp_dir/.ptrace-probe.$$.c"
+        _sh_dp_bin="$_sh_dp_dir/.ptrace-probe.$$"
+        if cat > "$_sh_dp_src" 2>/dev/null <<'EOF'
+#include <stdio.h>
+#include <unistd.h>
+#include <errno.h>
+#include <signal.h>
+#include <sys/ptrace.h>
+#include <sys/wait.h>
+int main(void){
+    pid_t pid = fork();
+    int st, e0, e1, e2;
+    if (pid < 0) return 2;
+    if (pid == 0) { kill(getpid(), SIGSTOP); _exit(0); }
+    if (waitpid(pid, &st, WUNTRACED) < 0) return 2;
+    errno = 0; ptrace((enum __ptrace_request)0, 0, 0, 0); e0 = errno;
+    errno = 0; ptrace((enum __ptrace_request)16, pid, 0, 0); e1 = errno;
+    errno = 0; ptrace((enum __ptrace_request)0x9999, pid, 0, 0); e2 = errno;
+    kill(pid, SIGKILL);
+    waitpid(pid, &st, 0);
+    if (e0 == 0 && e1 == 0 && e2 == 0) puts("yes");
+    else if (e0 == EPERM && e1 == EPERM && e2 == EPERM) puts("no");
+    else puts("partial");
+    return 0;
+}
+EOF
+        then
+            _sh_dp=$( ("$_sh_dp_cc" -O2 -o "$_sh_dp_bin" "$_sh_dp_src" 2>/dev/null && "$_sh_dp_bin" 2>/dev/null) )
+            rm -f "$_sh_dp_src" "$_sh_dp_bin" 2>/dev/null
+            case "$_sh_dp" in
+                yes|no|partial) printf '%s' "$_sh_dp"; return 0 ;;
+            esac
+            return 1
+        fi
+        rm -f "$_sh_dp_src" "$_sh_dp_bin" 2>/dev/null
+    fi
+    printf 'unknown'
+}
+
 # sh_detect_bind -> yes when a socket can be bound at all. A seccomp profile can
 # deny bind(2) while allowing connect(2), which is the whole reason podssh dials
 # out and never listens.
+#
+# # STOP: TCP IS THE WRONG PROBE, AND IT ANSWERED `no` ON A MACHINE THAT CAN
+# BIND. This asked for AF_INET on 127.0.0.1 and nothing else. Measured here: that
+# bind is refused (EACCES) while AF_UNIX stream and dgram binds both succeed, and
+# AF_UNIX is the transport X11, Wayland, sshd, a dev server and every local
+# socket in the Electrosphere actually use. A `no` from that probe was then read
+# as "nothing here listens", which is false. The probe now reports WHAT binds, so
+# a caller can tell "no sockets at all" from "only TCP is denied".
 sh_detect_bind() {
     if sh_have python3; then
-        if python3 -c 'import socket,sys
-s=socket.socket()
-try:
-    s.bind(("127.0.0.1",0))
-except OSError:
-    sys.exit(1)
-finally:
-    s.close()
-' >/dev/null 2>&1; then
-            printf 'yes'
-            return 0
-        fi
-        printf 'no'
+        _sh_db=$(python3 -c 'import socket,errno,os,tempfile
+def probe(fam, typ, addr, alt=None):
+    try:
+        s = socket.socket(fam, typ)
+    except OSError:
+        return "nosock"
+    try:
+        s.bind(addr)
+        return "yes"
+    except OSError as e:
+        if alt is not None and e.errno not in (errno.EACCES, errno.EPERM):
+            try:
+                s.close()
+                s = socket.socket(fam, typ)
+                s.bind(alt)
+                try: os.unlink(alt)
+                except OSError: pass
+                return "yes"
+            except OSError as e2:
+                try: os.unlink(alt)
+                except OSError: pass
+                return "denied" if e2.errno in (errno.EACCES, errno.EPERM) else "error"
+        return "denied" if e.errno in (errno.EACCES, errno.EPERM) else "error"
+    finally:
+        s.close()
+tmp = tempfile.gettempdir()
+unix = probe(socket.AF_UNIX, socket.SOCK_STREAM, "\0sandhome-detect-bind", os.path.join(tmp, "sandhome-bind-probe"))
+unixd = probe(socket.AF_UNIX, socket.SOCK_DGRAM, "\0sandhome-detect-bind-d")
+tcp = probe(socket.AF_INET, socket.SOCK_STREAM, ("127.0.0.1", 0))
+if unix == "yes" or unixd == "yes":
+    print("unix" if tcp != "yes" else "yes")
+elif tcp == "yes":
+    print("tcp")
+else:
+    print("no")
+' 2>/dev/null)
+        case "$_sh_db" in
+            yes|unix|tcp) printf '%s' "$_sh_db"; return 0 ;;
+            no)           printf 'no'; return 0 ;;
+        esac
+        printf 'unknown'
         return 0
     fi
     printf 'unknown'
@@ -238,8 +366,10 @@ sh_detect_all() {
     SH_PROVIDER=$(sh_detect_provider)
     SH_PTY=$(sh_detect_pty)
     SH_PASSWD=$(sh_detect_passwd)
+    SH_PTRACE=$(sh_detect_ptrace)
+    SH_BIND=$(sh_detect_bind)
     export SH_OS_ID SH_KERNEL SH_ARCH SH_LIBC SH_WSL SH_PRIVILEGE SH_PROVIDER
-    export SH_PTY SH_PASSWD
+    export SH_PTY SH_PASSWD SH_PTRACE SH_BIND
 }
 
 # sh_arch_go -> the GOARCH spelling of this machine.

@@ -94,6 +94,17 @@ tc_zig_probe() {
     sh_have zig && zig version >/dev/null 2>&1
 }
 
+# tc_zig_copy_bins -> the executables that must be REAL copies in the view
+# even in launch mode: just `zig`. The compiler locates its install directory
+# (lib/, the builtin sysroot) exe-relative through /proc/self/exe, and a
+# launcher copy runs from a memfd image whose path is the anonymous
+# `/memfd:sandhome (deleted)`, so every compiler subcommand fails while the
+# probe stays green (issue #77). A real copy keeps its directory and finds
+# its siblings; the gate prices it at its real size through this list.
+tc_zig_copy_bins() {
+    printf 'zig '
+}
+
 tc_zig_install() {
     sh_zi_root=$(sh_toolchain_root zig)
     case "${SH_KERNEL:-unknown}:${SH_ARCH:-unknown}" in

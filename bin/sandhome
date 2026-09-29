@@ -161,6 +161,8 @@ usage: sandhome COMMAND [args]
   env                    print the environment, for `eval "$(sandhome env)"`
   path                   print the exec-view bin directory
   space [--probe]        where the two roots are, and every candidate tried
+  space --largest [N]    the N biggest entries on the exec root (default 10)
+  space --reclaim        reclaimable cache bytes without removing anything
   toolchains             name, one-line description, PATH binaries, versions
   install NAME...        adopt or install each toolchain, then write the env
   install --force NAME   install NAME even when a working copy is on PATH
@@ -182,10 +184,14 @@ usage: sandhome COMMAND [args]
   pty CMD...             run CMD with a userspace pty (no /dev/ptmx needed)
   exec CMD...            run CMD with the sandhome environment loaded
   report [--json]        the full report
-  gc [DAYS] [--dry-run]   remove staging older than DAYS (default 7).
+  gc [DAYS] [--dry-run]   remove staging and caches older than DAYS (default 7).
                          DAYS=0 (or --now) removes everything sandhome owns
-                         in its caches, however fresh. Views are never
-                         removed; `repair` rebuilds them
+                         in its caches, however fresh, except what a live
+                         install holds (SANDHOME_GC_FORCE=1 overrides).
+                         Views are never removed; `repair` rebuilds them.
+                         Prints the entry count and the bytes reclaimed.
+  prune [NAME...]        drop exec-view entries whose payload is gone.
+                         No names means every toolchain sandhome knows.
   version                print the schema version
   help [CMD]             this text, or the help for CMD
 
@@ -269,19 +275,33 @@ HELP
             return 0 ;;
         space)
             cat <<'HELP'
-usage: sandhome space [--probe]
+usage: sandhome space [--probe] [--largest [N]] [--reclaim]
 Print the chosen roots with free and total megabytes, the exec-space state,
 and the ceiling across exec-capable candidates (max_exec_free_mb and
 exec_ceiling). --probe lists every candidate with writable/exec/free.
+--largest [N] lists the N biggest top-level entries on the exec root, which
+is what to remove first when the root fills with build output. --reclaim
+prints the cache bytes `gc --now` would reclaim, removing nothing.
 HELP
             return 0 ;;
         gc)
             cat <<'HELP'
 usage: sandhome gc [DAYS] [--dry-run] [--now]
-Remove staging older than DAYS (default 7). DAYS=0, or --now, removes
-everything sandhome owns in its caches however fresh. --dry-run names what
-would be removed and removes nothing. Toolchain views are never removed;
-`sandhome repair` rebuilds them.
+Remove staging and caches older than DAYS (default 7). DAYS=0, or --now,
+removes everything sandhome owns in its caches however fresh, except what a
+live install holds (SANDHOME_GC_FORCE=1 overrides that too). --dry-run names
+what would be removed and removes nothing, and the run prints the entry
+count with the bytes actually reclaimed. Toolchain views are never removed;
+`sandhome prune` drops their stale entries and `sandhome repair` rebuilds them.
+HELP
+            return 0 ;;
+        prune)
+            cat <<'HELP'
+usage: sandhome prune [NAME...]
+Drop exec-view entries whose payload is gone, for the named toolchains or
+for every toolchain sandhome knows when no names are given. An entry whose
+home file was deleted survives every reinstall on PATH pointing at nothing;
+this removes it, downloading nothing. Prints the count pruned.
 HELP
             return 0 ;;
         project)
@@ -319,11 +339,29 @@ cmd_path()   { printf '%s\n' "$SH_EXEC_BIN"; }
 cmd_space() {
     case "${1:-}" in
         -h|--help) cmd_help space; return 0 ;;
+        --largest) sh_space_largest "${2:-10}"; return 0 ;;
+        --reclaim)
+            # Reclaimable bytes without removing anything: a dry run over
+            # everything however fresh, read off its count line. Live and
+            # fresh entries are excluded the same way the real run excludes
+            # them, so the number is what `gc --now` would actually free.
+            SH_GC_DRY_RUN=1
+            export SH_GC_DRY_RUN
+            sh_rc_out=$(sh_space_gc 0 2>/dev/null) || return $?
+            sh_rc_kb=${sh_rc_out##* }
+            case "$sh_rc_kb" in
+                ''|*[!0-9]*) sh_rc_kb=0 ;;
+            esac
+            printf 'reclaimable_kb=%s\n' "$sh_rc_kb"
+            return 0 ;;
     esac
     if [ "${1:-}" = --probe ]; then
         sh_space_probe_report
         return 0
     fi
+    case "${1:-}" in
+        -*) sh_die "space does not take '$1'; run 'sandhome help space' for the form it takes" ;;
+    esac
     sh_space_report
 }
 # cmd_toolchains [--json] -> name, description, declared PATH binaries, the
@@ -589,6 +627,15 @@ cmd_report() {
 # full exec root, and a count says nothing about bytes. `--dry-run` names what
 # it would remove and removes nothing, which a command that deletes should have
 # had from the start.
+#
+# # STOP: THE BYTES ARE COUNTED, NOT DIFFERENCED. The old line diffed df before
+# and after on the home tmp filesystem, which is three wrong answers at once:
+# it measured the wrong filesystem when the exec root is elsewhere, it read 0
+# whenever the kernel had not yet flushed the unlink, and sh_gc_bytes -- the
+# variable that existed for exactly this -- was never incremented, so the
+# recovery command reported "0KB (0MB) reclaimed" however much it deleted
+# (issue #85). sh_space_gc measures each entry before removal and exports the
+# total; this prints it.
 cmd_gc() {
     sh_cg_days=7
     sh_cg_dry=0
@@ -610,40 +657,63 @@ cmd_gc() {
             sh_die "gc needs a whole number of days, not '$sh_cg_days'"
             ;;
     esac
-    sh_cg_before=$(sh_free_kb "$SH_HOME_TMP")
     if [ "$sh_cg_dry" = 1 ]; then
         SH_GC_DRY_RUN=1
         export SH_GC_DRY_RUN
     fi
-    sh_cg_removed=$(sh_space_gc "$sh_cg_days") || return $?
+    # sh_space_gc prints two words: the entry count and the kilobytes actually
+    # removed. Both cross the command substitution as text, because assignments
+    # inside it (a subshell) would not reach this shell.
+    sh_cg_out=$(sh_space_gc "$sh_cg_days") || return $?
+    sh_cg_removed=${sh_cg_out%% *}
+    sh_cg_kb=${sh_cg_out##* }
+    case "$sh_cg_removed" in
+        ''|*[!0-9]*) sh_cg_removed=0 ;;
+    esac
+    case "$sh_cg_kb" in
+        ''|*[!0-9]*) sh_cg_kb=0 ;;
+    esac
     if [ "$sh_cg_dry" = 1 ]; then
         sh_say "dry run: nothing was removed; the entries above are what gc $sh_cg_days would delete"
         return 0
     fi
-    sh_cg_after=$(sh_free_kb "$SH_HOME_TMP")
-    sh_cg_line="removed $sh_cg_removed staging entries"
-    case "$sh_cg_before" in
-        ''|*[!0-9]*) ;;
-        *)
-            case "$sh_cg_after" in
-                ''|*[!0-9]*) ;;
-                *)
-                    sh_cg_kb=$((sh_cg_after - sh_cg_before))
-                    [ "$sh_cg_kb" -lt 0 ] && sh_cg_kb=0
-                    sh_cg_mb=$((sh_cg_kb / 1024))
-                    # # STOP: THE BRACES GO ROUND THE VARIABLE AND NOT ROUND IT
-                    # AND THE UNIT. `${x}MB` is `sh_xMB` to the shell, which is a
-                    # name nothing ever set, so the line died under `set -u` with
-                    # "sh_cg_mbMB: parameter not set" on the very first `gc` a
-                    # caller ran. Measured here, on the fix for the argument check
-                    # in the same function: a guard that breaks the happy path it
-                    # was added to protect.
-                    sh_cg_line="$sh_cg_line, ${sh_cg_kb}KB (${sh_cg_mb}MB) reclaimed"
-                    ;;
-            esac
-            ;;
-    esac
-    sh_say "$sh_cg_line"
+    sh_cg_mb=$((sh_cg_kb / 1024))
+    sh_say "removed $sh_cg_removed entries, ${sh_cg_kb}KB (${sh_cg_mb}MB) reclaimed"
+    return 0
+}
+
+# cmd_prune [NAME...] -> drop exec-view entries whose payload is gone.
+# No names means every toolchain the tree knows. Unknown names are refused
+# by name rather than silently skipped: a prune that misspells a toolchain
+# and reports zero is a success that did nothing.
+cmd_prune() {
+    sh_pr_total=0
+    sh_pr_names=''
+    for sh_pr_arg in "$@"; do
+        case "$sh_pr_arg" in
+            -h|--help) cmd_help prune; return 0 ;;
+            -*) sh_die "prune does not take '$sh_pr_arg'; run 'sandhome help prune' for the form it takes" ;;
+            *) sh_pr_names="$sh_pr_names $sh_pr_arg" ;;
+        esac
+    done
+    if [ -z "$sh_pr_names" ]; then
+        sh_pr_names=$(sh_toolchain_available)
+    fi
+    for sh_pr_name in $sh_pr_names; do
+        [ -n "$sh_pr_name" ] || continue
+        if ! sh_toolchain_known "$sh_pr_name"; then
+            sh_die "unknown toolchain $sh_pr_name; run 'sandhome toolchains' for the list"
+        fi
+        sh_pr_n=$(sh_view_prune "$sh_pr_name" 2>/dev/null)
+        case "$sh_pr_n" in
+            ''|*[!0-9]*) sh_pr_n=0 ;;
+        esac
+        if [ "$sh_pr_n" -gt 0 ]; then
+            sh_say "pruned $sh_pr_n stale view entries for $sh_pr_name"
+        fi
+        sh_pr_total=$((sh_pr_total + sh_pr_n))
+    done
+    sh_say "pruned $sh_pr_total stale view entries"
     return 0
 }
 # cmd_project NAME [--python|--node] [--no-link] -> a project that runs on
@@ -725,8 +795,24 @@ cmd_project() {
         if [ -d "$sh_pj_dir/.venv" ]; then
             sh_say "python: .venv already present"
         elif sh_have uv; then
-            if uv venv "$sh_pj_dir/.venv" >/dev/null 2>&1; then
+            # STOP: A VENV WITH NO pip IS A VENV NOTHING CAN INSTALL INTO
+            # (issue #79). `uv venv` seeds no pip by default, and the old
+            # line then told the consumer to use a venv whose first
+            # dependency install dies with "No module named pip". --seed
+            # puts pip in; when the uv at hand predates the flag, pip is
+            # installed into the venv afterwards, and a venv that still has
+            # no working pip is reported rather than announced as ready.
+            if uv venv --seed "$sh_pj_dir/.venv" >/dev/null 2>&1 || \
+               uv venv "$sh_pj_dir/.venv" >/dev/null 2>&1; then
                 sh_say "python: uv venv $sh_pj_dir/.venv"
+                if [ -x "$sh_pj_dir/.venv/bin/python" ] && \
+                   ! "$sh_pj_dir/.venv/bin/python" -m pip --version >/dev/null 2>&1; then
+                    if uv pip install --python "$sh_pj_dir/.venv/bin/python" pip >/dev/null 2>&1; then
+                        sh_say 'python: pip installed into the venv'
+                    else
+                        sh_warn 'the venv has no working pip; run `<venv>/bin/python -m ensurepip` before installing dependencies'
+                    fi
+                fi
             else
                 sh_warn 'uv venv failed; python half skipped'
             fi
@@ -807,6 +893,50 @@ sh_cmd_needs_roots() {
     return 0
 }
 
+# sh_cmd_needs_roots_recover -> roots for the recovery commands (gc, prune).
+# gc is the recovery for a full exec root, and prune deletes too, so both must
+# run where the create plan refuses: a full root is exactly the state it refuses.
+# the exec probe cannot write its file, so ENOSPC reads as "not writable or
+# does not allow exec" and the documented recovery dies precisely because the
+# root is full (issue #81). The create plan is probed in a subshell first --
+# sh_die exits, so it cannot be caught in-process -- and on refusal the plan
+# falls back to read-only plus the recorded exec root, which gc then empties.
+sh_cmd_needs_roots_recover() {
+    if [ "${SH_PLAN_CREATED:-0}" = 1 ]; then
+        return 0
+    fi
+    if ( sh_space_plan >/dev/null 2>&1 ); then
+        sh_space_plan || return 2
+        : "${SANDHOME_HOME:=$SH_HOME}"
+        : "${SANDHOME_EXEC:=$SH_EXEC}"
+        export SANDHOME_HOME SANDHOME_EXEC
+        if [ "${SH_EXEC_UNUSABLE:-0}" = 1 ]; then
+            sh_die 'no writable mount here both allows exec and can be written; set SANDHOME_EXEC to one'
+        fi
+        return 0
+    fi
+    sh_space_plan --no-create >/dev/null 2>&1 || true
+    if [ -z "${SH_EXEC:-}" ] || [ ! -d "$SH_EXEC" ]; then
+        sh_gc_rec=$(sh_space_recorded_exec)
+        if [ -n "$sh_gc_rec" ] && [ -d "$sh_gc_rec" ]; then
+            SH_EXEC=$sh_gc_rec
+        fi
+    fi
+    if [ -z "${SH_EXEC:-}" ] || [ ! -d "$SH_EXEC" ]; then
+        sh_die 'no writable mount here both allows exec and can be written; set SANDHOME_EXEC to one'
+    fi
+    SH_EXEC_BIN="$SH_EXEC/bin"
+    SH_EXEC_VIEWS="$SH_EXEC/views"
+    SH_HOME_TOOLCHAINS="$SH_HOME/toolchains"
+    SH_HOME_TMP="$SH_HOME/tmp"
+    export SH_EXEC SH_EXEC_BIN SH_EXEC_VIEWS SH_HOME_TOOLCHAINS SH_HOME_TMP
+    : "${SANDHOME_HOME:=$SH_HOME}"
+    : "${SANDHOME_EXEC:=$SH_EXEC}"
+    export SANDHOME_HOME SANDHOME_EXEC
+    sh_warn 'the exec root is full or unusable; running gc against the recorded roots to recover it'
+    return 0
+}
+
 # STOP: `selftest` AND `test` RUN WHAT IS IN THE CHECKOUT, AND WERE NAMED IN THE
 # USAGE WITHOUT EXISTING. An agent that reads `sandhome help`, picks the obvious
 # subcommand to check a change and gets "unknown command" has been told the tool
@@ -882,7 +1012,7 @@ cmd_test() {
 case "${2:-}" in
     -h|--help)
         case "${1:-}" in
-            doctor|env|path|space|toolchains|install|ensure|repair|shims|shell|pty|exec|report|gc|project|test|selftest|version|help)
+            doctor|env|path|space|toolchains|install|ensure|repair|shims|shell|pty|exec|report|gc|prune|project|test|selftest|version|help)
                 cmd_help "${1:-help}"
                 exit 0 ;;
         esac ;;
@@ -901,7 +1031,8 @@ case "${1:-help}" in
     pty)         shift; cmd_pty "$@" ;;
     exec)        shift; cmd_exec "$@" ;;
     report)      shift; cmd_report "$@" ;;
-    gc) case "${2:-}" in -h|--help) shift; cmd_gc "$@" ;; *) sh_cmd_needs_roots gc; shift; cmd_gc "$@" ;; esac ;;
+    gc) case "${2:-}" in -h|--help) shift; cmd_gc "$@" ;; *) sh_cmd_needs_roots_recover; shift; cmd_gc "$@" ;; esac ;;
+    prune) case "${2:-}" in -h|--help) shift; cmd_prune "$@" ;; *) sh_cmd_needs_roots_recover; shift; cmd_prune "$@" ;; esac ;;
     project) case "${2:-}" in -h|--help) shift; cmd_project "$@" ;; *) sh_cmd_needs_roots project; shift; cmd_project "$@" ;; esac ;;
     test)        cmd_test ;;
     selftest)    shift; cmd_selftest "${1:-}" ;;

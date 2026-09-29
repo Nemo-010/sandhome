@@ -4,6 +4,16 @@ TC_bun_DESC='Bun, a JavaScript/TypeScript runtime and toolkit (single binary)'
 TC_bun_BINS='bun'
 TC_bun_EXEC_MB=200
 
+# tc_bun_exec_mb -> the fresh-install exec need in MB: 12 in launch mode (one
+# launcher copy for the single binary), 200 in copy mode (issue #92).
+tc_bun_exec_mb() {
+    if [ "${SH_VIEW_MODE:-copy}" = launch ]; then
+        printf '12'
+    else
+        printf '200'
+    fi
+}
+
 tc_bun_probe() {
     sh_have bun && bun --version >/dev/null 2>&1
 }
@@ -24,7 +34,7 @@ tc_bun_install() {
     esac
     sh_bi_url="https://github.com/oven-sh/bun/releases/download/${sh_bi_tag}/bun-linux-${sh_bi_arch}${sh_bi_extra}.zip"
     sh_space_need 400 home || return 1
-    sh_space_need "$TC_bun_EXEC_MB" exec || return 1
+    sh_space_need "$(tc_bun_exec_mb)" exec || return 1
     if [ "$SH_DRY_RUN" = 1 ]; then
         sh_step "would install $sh_bi_url into $sh_bi_root"
         return 0

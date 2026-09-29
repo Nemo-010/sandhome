@@ -21,7 +21,12 @@ export SH_REPO_DIR SH_LIB_DIR
 t_begin space
 
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/sandhome-space.XXXXXX")
-trap 'rm -rf "$tmp"' EXIT
+# STOP: THE TRAP READS A NAME NOTHING REASSIGNS. Line ~354 repoints $tmp into a
+# subdirectory for the roomiest-candidate fixtures, so a trap on $tmp removed
+# only that subdir and every suite run leaked its top temp dir. The trap reads
+# a dedicated name set once here.
+sh_space_test_tmp=$tmp
+trap 'rm -rf "$sh_space_test_tmp"' EXIT
 
 # --- writable and exec probes -------------------------------------------------
 mkdir -p "$tmp/writable" "$tmp/ro" 2>/dev/null
@@ -186,7 +191,10 @@ if [ -d "$SH_HOME_TMP/old" ]; then
 else
     t_ok "$([ -d "$SH_HOME_TMP/fresh" ]; echo $?)" 'gc keeps a fresh temp directory'
 fi
-t_ok "$(case $gc_n in ''|*[!0-9]*) echo 1;; *) echo 0;; esac)" 'gc answers a plain count'
+t_ok "$(case $gc_n in [0-9]*' '[0-9]*) echo 0;; *) echo 1;; esac)" 'gc answers a count and a byte total'
+gc_n_removed=${gc_n%% *}
+gc_n_bytes=${gc_n##* }
+t_ok "$(case $gc_n_bytes in ''|*[!0-9]*) echo 1;; *) echo 0;; esac)" 'the gc byte total is a number, not a claim (issue #85)'
 
 # # STOP: GC REFUSES AN ARGUMENT THAT IS NOT A WHOLE NUMBER OF DAYS, AND SAYS
 # WHICH ARGUMENT. The value went straight into `find -mtime +"$days"`, so
@@ -336,8 +344,8 @@ touch -d '10 days ago' "$SH_EXEC/cache/old/f" 2>/dev/null || touch -t 2020010100
 SH_GC_DRY_RUN=1 sh_space_gc 7 >/dev/null 2>&1
 gc_dry=$(SH_GC_DRY_RUN=1 sh_space_gc 7 2>/dev/null)
 case "$gc_dry" in
-    *[!0-9]*|'') t_ok 1 'gc dry-run counts entries (#33)' ;;
-    *) t_ok 0 'gc dry-run counts entries (#33)' ;;
+    [0-9]*' '[0-9]*) t_ok 0 'gc dry-run counts entries (#33)' ;;
+    *) t_ok 1 'gc dry-run counts entries (#33)' ;;
 esac
 
 # --- class H: the exec root is the ROOMIEST candidate, not the first ---------
@@ -889,5 +897,83 @@ t_contains "$lb_out" 'wrapper-current' 'a module wrapper newer than the helper c
 t_contains "$lb_out" 'listed-wrapper-stale' 'a copy-listed entry holding other bytes is stale'
 t_contains "$lb_out" 'listed-real-current' 'a copy-listed entry holding its payload is current'
 rm -rf "$lb"
+
+# --- gc counts bytes, reclaims node-gyp scratch, and spares live installs -----
+# A failed node-gyp build leaves node-gyp-tmp-* scratch where the build ran.
+# No scan named it, so gc reclaimed 0 bytes while the root stayed full
+# (issues #86, #102). Backdated below so the age rule is not what removes it.
+gb="$tmp/gc-bytes"
+rm -rf "$gb"
+mkdir -p "$gb/home/.staging" "$gb/home/tmp" "$gb/exec/cache"
+SH_HOME="$gb/home"; SH_EXEC="$gb/exec"; SH_HOME_TMP="$gb/home/tmp"
+export SH_HOME SH_EXEC SH_HOME_TMP
+mkdir -p "$gb/exec/node-gyp-tmp-dead"
+: > "$gb/exec/node-gyp-tmp-dead/y"
+mkdir -p "$gb/exec/cache/oldc"
+: > "$gb/exec/cache/oldc/f"
+for gbe in "$gb/exec/node-gyp-tmp-dead" "$gb/exec/cache/oldc"; do
+    touch -d '10 days ago' "$gbe" 2>/dev/null || touch -t 202001010000 "$gbe" 2>/dev/null || true
+done
+gb_out=$(sh_space_gc 7)
+gb_n=${gb_out%% *}; gb_b=${gb_out##* }
+t_ok "$([ ! -e "$gb/exec/node-gyp-tmp-dead" ]; echo $?)" 'gc reclaims node-gyp-tmp-* scratch (issues #86, #102)'
+t_ok "$(case $gb_b in ''|*[!0-9]*) echo 1;; *) echo 0;; esac)" 'gc reports its bytes as a number (issue #85)'
+
+# A live install's staging survives even `gc 0`: the entry holds a
+# .sandhome-live-PID marker whose process still runs (this shell), so a
+# concurrent gc cannot delete a running download and blame the URL afterwards
+# (issue #103). A stale marker (a dead pid) protects nothing.
+mkdir -p "$gb/home/.staging/live" "$gb/home/.staging/stale"
+: > "$gb/home/.staging/live/.sandhome-live-$$"
+: > "$gb/home/.staging/stale/.sandhome-live-99999999"
+touch -d '10 days ago' "$gb/home/.staging/stale" 2>/dev/null || touch -t 202001010000 "$gb/home/.staging/stale" 2>/dev/null || true
+gb_out=$(sh_space_gc 0)
+t_ok "$([ -d "$gb/home/.staging/live" ]; echo $?)" 'gc 0 keeps a live install staging (issue #103)'
+t_ok "$([ ! -d "$gb/home/.staging/stale" ]; echo $?)" 'gc 0 still clears a staging whose install is dead'
+# And the operator's explicit override deletes regardless.
+SANDHOME_GC_FORCE=1 sh_space_gc 0 >/dev/null 2>&1
+t_ok "$([ ! -d "$gb/home/.staging/live" ]; echo $?)" 'SANDHOME_GC_FORCE=1 overrides the live-install guard'
+unset SANDHOME_GC_FORCE
+rm -rf "$gb"
+
+# --- the exec view is pruned of entries whose payload is gone --------------
+# The mirror only adds and the current-check compares home-to-view, so a
+# view-only entry is invisible to both and stays on PATH pointing at nothing
+# (issue #110). Prune removes exactly those.
+vp="$tmp/view-prune"
+rm -rf "$vp"
+mkdir -p "$vp/home/toolchains/jq" "$vp/exec/views/jq" "$vp/exec/bin" "$vp/home/tmp"
+printf '#!/bin/sh\nexit 0\n' > "$vp/home/toolchains/jq/real"
+chmod 0755 "$vp/home/toolchains/jq/real"
+ln -s "$vp/home/toolchains/jq/real" "$vp/home/toolchains/jq/link-alive" 2>/dev/null || true
+cp "$vp/home/toolchains/jq/real" "$vp/exec/views/jq/real"
+: > "$vp/exec/views/jq/gone-away"
+ln -s "$vp/home/toolchains/jq/real" "$vp/exec/views/jq/link-alive" 2>/dev/null || true
+ln -s "$vp/home/toolchains/jq/deleted" "$vp/exec/views/jq/link-dead" 2>/dev/null || true
+SH_HOME="$vp/home"; SH_EXEC="$vp/exec"; SH_HOME_TMP="$vp/home/tmp"
+SH_EXEC_BIN="$vp/exec/bin"; SH_EXEC_VIEWS="$vp/exec/views"
+SH_HOME_TOOLCHAINS="$vp/home/toolchains"
+export SH_HOME SH_EXEC SH_HOME_TMP SH_EXEC_BIN SH_EXEC_VIEWS SH_HOME_TOOLCHAINS
+vp_n=$(sh_view_prune jq)
+t_is "$vp_n" '2' 'prune removes the stale file and the dangling link, nothing else'
+t_ok "$([ -f "$vp/exec/views/jq/real" ] && [ -L "$vp/exec/views/jq/link-alive" ]; echo $?)" 'prune keeps live entries'
+rm -rf "$vp"
+
+# --- space --largest names what holds the exec root -------------------------
+sl="$tmp/largest"
+rm -rf "$sl"
+mkdir -p "$sl/home" "$sl/exec/big" "$sl/exec/small" "$sl/home/tmp"
+head -c 50000 /dev/urandom > "$sl/exec/big/f" 2>/dev/null
+: > "$sl/exec/small/f"
+SH_HOME="$sl/home"; SH_EXEC="$sl/exec"; SH_HOME_TMP="$sl/home/tmp"
+export SH_HOME SH_EXEC SH_HOME_TMP
+sl_out=$(sh_space_largest 10)
+t_contains "$sl_out" "$sl/exec/big" 'space --largest names the entry holding the space'
+case "$sl_out" in
+    *KB"$sl"*) t_ok 1 "space --largest prints sizes (got: $sl_out)" ;;
+    *KB*) t_ok 0 'space --largest prints sizes' ;;
+    *) t_ok 1 "space --largest prints sizes (got: $sl_out)" ;;
+esac
+rm -rf "$sl"
 
 t_end

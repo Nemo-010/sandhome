@@ -83,6 +83,9 @@ sh_dg_dead=''
 for sh_dg_v in $(cat "$ROOT"/lib/*.sh "$ROOT"/bootstrap.sh "$ROOT"/bin/sandhome \
         "$ROOT"/tools/*.sh "$ROOT"/shell/errandsh 2>/dev/null | \
         grep -o '\<SH_[A-Z][A-Z0-9_]*\>' | sort -u); do
+    # No array here either: the brackets are a grep character class matching
+    # a literal : or = after the flag name.
+    # shellcheck disable=SC1087
     if grep -rq "$sh_dg_v[:=]" "$ROOT"/lib "$ROOT"/bootstrap.sh \
             "$ROOT"/bin/sandhome "$ROOT"/tools "$ROOT"/shell 2>/dev/null; then
         :
@@ -149,5 +152,25 @@ sh_src_noise=$(for f in "$ROOT"/lib/*.sh "$ROOT"/tools/*.sh; do
     sh -c '. "$1"' sh "$f" 2>&1
  done)
 t_is "$sh_src_noise" '' 'sourcing every library and tool module prints nothing'
+
+# ShellCheck over the tree, when it is here to run. The module in tools/
+# provides it (`sandhome install shellcheck`); without it the clause reports it could not run
+# rather than passing blind. Severity error: warnings are advisory and differ
+# across ShellCheck versions, while an error is a defect on any version.
+if command -v shellcheck >/dev/null 2>&1; then
+    sh_sc_out=$(shellcheck -S error -s sh \
+        "$ROOT"/bootstrap.sh "$ROOT"/bin/sandhome "$ROOT"/lib/*.sh \
+        "$ROOT"/tools/*.sh "$ROOT"/tests/*.sh "$ROOT"/shell/errandsh 2>&1) || true
+    # The linter names the file and line for every finding; the clause holds
+    # when it printed nothing. The output is quoted in full on failure, because
+    # a lint failure without its lines is a direction, not a defect.
+    if [ -z "$sh_sc_out" ]; then
+        t_ok 0 'shellcheck -S error is clean over the tree'
+    else
+        t_ok 1 "shellcheck -S error over the tree: $sh_sc_out"
+    fi
+else
+    t_skip 'no shellcheck on PATH to lint with (sandhome install shellcheck)'
+fi
 
 t_end

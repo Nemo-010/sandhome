@@ -1110,7 +1110,18 @@ sh_promote_toolchain() {
     if [ -d "$sh_ptc_root" ]; then
         if [ "$SH_HOME_EXEC" = yes ]; then
             sh_ptc_view=$sh_ptc_root
-        elif sh_view_current "$sh_ptc_root" "$sh_ptc_view"; then
+        else
+            # Prune before comparing: a view-only entry (payload deleted
+            # since, half-finished earlier run) is invisible to the
+            # current-check, which compares home-to-view and never
+            # view-to-home, so without this it survives every reinstall on
+            # PATH pointing at nothing (issue #110).
+            sh_ptc_pruned=$(sh_view_prune "$sh_ptc_name" 2>/dev/null)
+            case "$sh_ptc_pruned" in
+                ''|0) ;;
+                *) sh_step "pruned $sh_ptc_pruned stale view entries for $sh_ptc_name" ;;
+            esac
+            if sh_view_current "$sh_ptc_root" "$sh_ptc_view"; then
             # The view already mirrors the payload: rebuilding it would
             # change nothing, so the size gate is not consulted at all. A
             # no-op re-run on a drained exec root stays green (issue #71),
@@ -1119,6 +1130,7 @@ sh_promote_toolchain() {
             sh_step "the $sh_ptc_name view is current; leaving it in place"
         else
             sh_promote_tree "$sh_ptc_root" "$sh_ptc_view" || sh_fail "could not build the exec view for $sh_ptc_name"
+        fi
         fi
     else
         # Adopted: no home tree. Link the probe's answer, or the module's own
@@ -1301,6 +1313,102 @@ sh_space_probe_report() {
     done
 }
 
+# sh_gc_entry_kb PATH -> the size in KB, or 0 when it cannot be measured.
+# sh_dir_size answers nothing without du; a gc that priced off nothing would
+# report nothing reclaimed however much it deleted (issue #85), so the
+# unmeasurable entry prices at zero and the total stays a number.
+sh_gc_entry_kb() {
+    sh_gek_k=$(sh_dir_size "$1" 2>/dev/null)
+    case "$sh_gek_k" in
+        ''|*[!0-9]*) printf '0' ;;
+        *) printf '%s' "$sh_gek_k" ;;
+    esac
+}
+
+# sh_gc_live DIR -> 0 when a live install holds DIR: it contains a
+# .sandhome-live-PID file whose process still runs. A concurrent `gc 0` must
+# not delete the staging of a live install and blame the URL afterwards
+# (issue #103). A stale marker (dead pid, killed run) protects nothing, so a
+# previous session's wreckage is still reclaimed.
+sh_gc_live() {
+    for sh_gl_m in "$1"/.sandhome-live-*; do
+        [ -e "$sh_gl_m" ] || continue
+        sh_gl_pid=${sh_gl_m##*.sandhome-live-}
+        case "$sh_gl_pid" in
+            ''|*[!0-9]*) continue ;;
+        esac
+        if kill -0 "$sh_gl_pid" 2>/dev/null; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+# sh_gc_fresh PATH -> 0 when PATH was modified within the last 30 minutes.
+# find -mmin answers it; without find nothing is fresh, and the caller says
+# find is missing rather than deleting blindly.
+sh_gc_fresh() {
+    sh_have find || return 1
+    [ -n "$(find "$1" -maxdepth 0 -mmin -30 2>/dev/null)" ]
+}
+
+# sh_gc_keep ENTRY -> 0 when ENTRY must survive this run. Two cases, and
+# neither is the age rule below: a live install holds it (any DAYS -- a `gc 0`
+# that kills a running install destroys a working toolchain to fix a full
+# root), or it is younger than 30 minutes on a run that asked for everything
+# (top-level DAYS=0, read off the caller's sh_gc_days). SANDHOME_GC_FORCE=1
+# deletes regardless; it is the operator saying "I know what is running here".
+sh_gc_keep() {
+    # The operator's explicit override deletes regardless, even past a live
+    # install: it is the operator saying "I know what is running here".
+    if [ "${SANDHOME_GC_FORCE:-0}" = 1 ]; then
+        return 1
+    fi
+    if sh_gc_live "$1"; then
+        return 0
+    fi
+    if [ "${sh_gc_days:-7}" = 0 ] && sh_gc_fresh "$1"; then
+        return 0
+    fi
+    return 1
+}
+
+# sh_gc_rm ENTRY DAYS -> remove one gc entry, counting bytes. DAYS is the age
+# gate, or `always` for scans with no age rule (staging: a killed run's
+# leftovers are exactly what that scan clears). The liveness/freshness guard
+# above applies to every scan. Sets sh_gc_removed/sh_gc_bytes in the caller;
+# prints nothing itself except in dry-run, where it names what would go.
+sh_gc_rm() {
+    [ -e "$1" ] || [ -L "$1" ] || return 0
+    if sh_gc_keep "$1"; then
+        sh_step "keeping $1 (live or fresh; SANDHOME_GC_FORCE=1 overrides)"
+        return 0
+    fi
+    if [ "$2" != always ] && [ "$2" != 0 ]; then
+        if ! sh_have find; then
+            return 0
+        fi
+        if [ -z "$(find "$1" -maxdepth 0 -mtime +"$2" 2>/dev/null)" ]; then
+            return 0
+        fi
+    fi
+    if [ "${SH_GC_DRY_RUN:-0}" = 1 ]; then
+        sh_step "would remove $1 ($(sh_gc_entry_kb "$1")KB)"
+        return 0
+    fi
+    sh_gc_kb=$(sh_gc_entry_kb "$1")
+    if rm -rf "$1" 2>/dev/null; then
+        sh_gc_removed=$((sh_gc_removed + 1))
+        # STOP: THE COUNTER IS INCREMENTED, BECAUSE ZERO IS A CLAIM. sh_gc_bytes
+        # was initialised and never touched, so `sandhome gc` always reported
+        # "0KB (0MB) reclaimed" however much it deleted (issue #85) -- the
+        # recovery command grading its own work as nothing done. The size is
+        # measured before the removal, off du, so the number is what left.
+        sh_gc_bytes=$((sh_gc_bytes + sh_gc_kb))
+    fi
+    return 0
+}
+
 # sh_space_gc [DAYS] -> remove work directories older than DAYS (default 7) and
 # every staging directory. A bootstrap leaves staging behind when it is killed,
 # and on a small exec root that is the difference between the next install
@@ -1327,17 +1435,16 @@ sh_space_gc() {
     esac
     sh_gc_removed=0
     sh_gc_bytes=0
-    # The named staging areas are ours and are always safe to clear.
+    # The named staging areas are ours and are always safe to clear, subject
+    # to the live-install guard above: staging is never age-gated (a killed
+    # run's leftovers are exactly what this clears), so the scan passes
+    # `always` and only liveness -- or a fresh DAYS=0 entry -- holds it back.
     for sh_gc_dir in "$SH_HOME/.staging" "$SH_EXEC/.staging"; do
         [ -n "$sh_gc_dir" ] || continue
         [ -d "$sh_gc_dir" ] || continue
         for sh_gc_e in "$sh_gc_dir"/* "$sh_gc_dir"/.[!.]*; do
-            [ -e "$sh_gc_e" ] || continue
-            if [ "${SH_GC_DRY_RUN:-0}" = 1 ]; then
-                sh_step "would remove $sh_gc_e ($(sh_dir_size "$sh_gc_e"))"
-            else
-                rm -rf "$sh_gc_e" 2>/dev/null && sh_gc_removed=$((sh_gc_removed + 1))
-            fi
+            [ -e "$sh_gc_e" ] || [ -L "$sh_gc_e" ] || continue
+            sh_gc_rm "$sh_gc_e" always
         done
     done
     # Build caches and targets on the exec root (issue #33): GOCACHE, the exec
@@ -1354,23 +1461,21 @@ sh_space_gc() {
             [ -n "$sh_gc_dir" ] || continue
             [ -d "$sh_gc_dir" ] || continue
             for sh_gc_e in "$sh_gc_dir"/* "$sh_gc_dir"/.[!.]*; do
-                [ -e "$sh_gc_e" ] || continue
-                sh_gc_old=1
-                if [ "$sh_gc_days" != 0 ]; then
-                    sh_gc_old=0
-                    if [ -n "$(find "$sh_gc_e" -maxdepth 0 -mtime +"$sh_gc_days" 2>/dev/null)" ]; then
-                        sh_gc_old=1
-                    fi
-                fi
-                if [ "$sh_gc_old" = 1 ]; then
-                    if [ "${SH_GC_DRY_RUN:-0}" = 1 ]; then
-                        sh_step "would remove $sh_gc_e ($(sh_dir_size "$sh_gc_e"))"
-                    else
-                        rm -rf "$sh_gc_e" 2>/dev/null && sh_gc_removed=$((sh_gc_removed + 1))
-                    fi
-                fi
+                [ -e "$sh_gc_e" ] || [ -L "$sh_gc_e" ] || continue
+                sh_gc_rm "$sh_gc_e" "$sh_gc_days"
             done
         done
+        # A failed node-gyp build leaves ~70MB of node-gyp-tmp-* scratch where
+        # the build ran, and no scan above names it, so `gc` reclaimed 0 bytes
+        # while the root stayed full (issues #86, #102). The pattern is
+        # scanned at the exec root's top level, where such builds land; views
+        # are still never scanned.
+        if [ -n "$SH_EXEC" ] && [ -d "$SH_EXEC" ]; then
+            for sh_gc_e in "$SH_EXEC"/node-gyp-tmp-* "$SH_EXEC"/.node-gyp-tmp-*; do
+                [ -e "$sh_gc_e" ] || [ -L "$sh_gc_e" ] || continue
+                sh_gc_rm "$sh_gc_e" "$sh_gc_days"
+            done
+        fi
     else
         sh_warn "no find; leaving $SH_EXEC/cache and $SH_EXEC/tmp alone"
     fi
@@ -1380,32 +1485,112 @@ sh_space_gc() {
     if [ -d "$SH_HOME_TMP" ]; then
         if sh_have find; then
             for sh_gc_e in "$SH_HOME_TMP"/* "$SH_HOME_TMP"/.[!.]*; do
-                [ -e "$sh_gc_e" ] || continue
-                sh_gc_old=1
-                if [ "$sh_gc_days" != 0 ]; then
-                    sh_gc_old=0
-                    if [ -n "$(find "$sh_gc_e" -maxdepth 0 -mtime +"$sh_gc_days" 2>/dev/null)" ]; then
-                        sh_gc_old=1
-                    fi
-                fi
-                if [ "$sh_gc_old" = 1 ]; then
-                    if [ "${SH_GC_DRY_RUN:-0}" = 1 ]; then
-                        sh_step "would remove $sh_gc_e ($(sh_dir_size "$sh_gc_e"))"
-                    else
-                        rm -rf "$sh_gc_e" 2>/dev/null && sh_gc_removed=$((sh_gc_removed + 1))
-                    fi
-                fi
+                [ -e "$sh_gc_e" ] || [ -L "$sh_gc_e" ] || continue
+                sh_gc_rm "$sh_gc_e" "$sh_gc_days"
             done
         else
             sh_warn "no find; leaving $SH_HOME_TMP alone rather than deleting a running bootstrap's work"
         fi
     fi
-    # The reason to run gc is space. A count of entries is not a number of
-    # bytes: the two things it removes are a directory of unpacked files and a
-    # tarball, and those differ by two orders of magnitude. The bytes are
-    # measured off the filesystem before and after rather than estimated from
-    # the entry list, so the number is what actually changed.
-    printf '%s' "$sh_gc_removed"
+    # The reason to run gc is space, and a count of entries is not a number of
+    # bytes. The bytes are measured per entry before removal and accumulated
+    # above. Both cross to the caller as text -- `REMOVED BYTES_KB` on stdout
+    # -- because a command substitution runs in a subshell and assignments
+    # inside it would not reach the caller. The exports beside it serve
+    # callers that source rather than capture.
+    SH_GC_REMOVED=$sh_gc_removed
+    SH_GC_BYTES=$sh_gc_bytes
+    export SH_GC_REMOVED SH_GC_BYTES
+    printf '%s %s' "$sh_gc_removed" "$sh_gc_bytes"
+    return 0
+}
+
+# sh_view_prune NAME -> remove view entries whose payload is gone, printing
+# the count. An entry whose home file was deleted (or never promoted on a
+# half-finished run) survives every reinstall: the mirror only adds, and the
+# current-check only compares home-to-view, so a view-only entry is invisible
+# to both and stays on PATH pointing at nothing (issue #110). The walk is a
+# queue like every other walk here. Adopted toolchains have no home tree and
+# are skipped: there is nothing to compare against, and their links are
+# managed by the adopt path itself.
+sh_view_prune() {
+    sh_vp_name=$1
+    sh_vp_root=$(sh_toolchain_root "$sh_vp_name")
+    sh_vp_view=$(sh_toolchain_view "$sh_vp_name")
+    sh_vp_pruned=0
+    if [ ! -d "$sh_vp_view" ] || [ ! -d "$sh_vp_root" ]; then
+        printf '0'
+        return 0
+    fi
+    sh_vp_queue="${SH_HOME_TMP:-${TMPDIR:-/tmp}}/.viewprune.$$"
+    printf '%s\n' "$sh_vp_view" > "$sh_vp_queue" 2>/dev/null || {
+        printf '0'
+        return 0
+    }
+    while IFS= read -r sh_vp_d; do
+        [ -n "$sh_vp_d" ] || continue
+        for sh_vp_e in "$sh_vp_d"/* "$sh_vp_d"/.[!.]* "$sh_vp_d"/..?*; do
+            [ -e "$sh_vp_e" ] || [ -L "$sh_vp_e" ] || continue
+            sh_vp_rel=${sh_vp_e#"$sh_vp_view"/}
+            if [ -d "$sh_vp_e" ] && [ ! -L "$sh_vp_e" ]; then
+                if [ ! -d "$sh_vp_root/$sh_vp_rel" ]; then
+                    rm -rf "$sh_vp_e" 2>/dev/null && sh_vp_pruned=$((sh_vp_pruned + 1))
+                else
+                    printf '%s\n' "$sh_vp_e" >> "$sh_vp_queue"
+                fi
+                continue
+            fi
+            if [ ! -e "$sh_vp_root/$sh_vp_rel" ] && [ ! -L "$sh_vp_root/$sh_vp_rel" ]; then
+                rm -f "$sh_vp_e" 2>/dev/null && sh_vp_pruned=$((sh_vp_pruned + 1))
+            fi
+        done
+    done < "$sh_vp_queue"
+    rm -f "$sh_vp_queue" 2>/dev/null
+    printf '%s' "$sh_vp_pruned"
+    return 0
+}
+
+# sh_space_largest [N] -> the N biggest top-level entries under the exec root,
+# one `SIZE_KB PATH` line each, biggest first. This is the answer `du -sh
+# $SH_EXEC/* | sort -h | tail` gives in the space advice, as a command: the
+# exec root fills with the consumer's own build output first, and gc only
+# reclaims sandhome's own caches, so naming what holds the space is the first
+# step of every recovery. Without du there is no portable measure, and that
+# is said rather than guessed.
+sh_space_largest() {
+    sh_sl_n=${1:-10}
+    case "$sh_sl_n" in
+        ''|*[!0-9]*) sh_sl_n=10 ;;
+    esac
+    if [ -z "${SH_EXEC:-}" ] || [ ! -d "$SH_EXEC" ]; then
+        return 0
+    fi
+    if ! sh_have du; then
+        sh_warn 'no du here, so entry sizes are unavailable'
+        return 0
+    fi
+    # Without sort the entries still print, unsorted: a missing tool degrades
+    # the listing rather than refusing it.
+    if sh_have sort; then
+        sh_sl_sort='sort -rn'
+    else
+        sh_sl_sort='cat'
+    fi
+    for sh_sl_e in "$SH_EXEC"/* "$SH_EXEC"/.[!.]*; do
+        [ -e "$sh_sl_e" ] || [ -L "$sh_sl_e" ] || continue
+        sh_sl_k=$(sh_dir_size "$sh_sl_e" 2>/dev/null)
+        case "$sh_sl_k" in
+            ''|*[!0-9]*) continue ;;
+        esac
+        printf '%s\t%s\n' "$sh_sl_k" "$sh_sl_e"
+    done | $sh_sl_sort 2>/dev/null | {
+        sh_sl_i=0
+        while IFS="	" read -r sh_sl_k sh_sl_p; do
+            sh_sl_i=$((sh_sl_i + 1))
+            [ "$sh_sl_i" -le "$sh_sl_n" ] || break
+            printf '%sKB\t%s\n' "$sh_sl_k" "$sh_sl_p"
+        done
+    }
     return 0
 }
 

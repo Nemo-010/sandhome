@@ -114,11 +114,17 @@ tc_python_env() {
 : "\${SANDHOME_EXEC:=$SH_EXEC}"
 export SANDHOME_HOME SANDHOME_EXEC
 UV_CACHE_DIR="\$SANDHOME_EXEC/cache/uv"
+UV_TOOL_DIR="\$SANDHOME_EXEC/uv-tools"
+UV_TOOL_BIN_DIR="\$SANDHOME_EXEC/uv-bin"
 PIP_DISABLE_PIP_VERSION_CHECK=1
-export UV_CACHE_DIR PIP_DISABLE_PIP_VERSION_CHECK
+export UV_CACHE_DIR UV_TOOL_DIR UV_TOOL_BIN_DIR PIP_DISABLE_PIP_VERSION_CHECK
 case ":\$PATH:" in
   *":$sh_pe_view/bin:"*) ;;
   *) PATH="$sh_pe_view/bin:\$PATH" ;;
+esac
+case ":\$PATH:" in
+  *":\$SANDHOME_EXEC/uv-bin:"*) ;;
+  *) PATH="\$SANDHOME_EXEC/uv-bin:\$PATH" ;;
 esac
 export PATH
 EOF
@@ -143,15 +149,22 @@ EOF
     # and not one fragment.
     sh_env_write_fragment python <<EOF
 : "\${SANDHOME_HOME:=$SH_HOME}"
-export SANDHOME_HOME
+: "\${SANDHOME_EXEC:=$SH_EXEC}"
+export SANDHOME_HOME SANDHOME_EXEC
 UV_PYTHON_INSTALL_DIR="$sh_pe_root/python"
 UV_CACHE_DIR="\$SANDHOME_HOME/cache/uv"
+UV_TOOL_DIR="\$SANDHOME_EXEC/uv-tools"
+UV_TOOL_BIN_DIR="\$SANDHOME_EXEC/uv-bin"
 UV_PYTHON_DOWNLOADS=never
 PIP_DISABLE_PIP_VERSION_CHECK=1
-export UV_PYTHON_INSTALL_DIR UV_CACHE_DIR UV_PYTHON_DOWNLOADS PIP_DISABLE_PIP_VERSION_CHECK
+export UV_PYTHON_INSTALL_DIR UV_CACHE_DIR UV_TOOL_DIR UV_TOOL_BIN_DIR UV_PYTHON_DOWNLOADS PIP_DISABLE_PIP_VERSION_CHECK
 case ":\$PATH:" in
   *":$sh_pe_view/bin:"*) ;;
   *) PATH="$sh_pe_view/bin:\$PATH" ;;
+esac
+case ":\$PATH:" in
+  *":\$SANDHOME_EXEC/uv-bin:"*) ;;
+  *) PATH="\$SANDHOME_EXEC/uv-bin:\$PATH" ;;
 esac
 export PATH
 EOF

@@ -4,6 +4,16 @@ TC_mold_DESC='mold, a fast ELF linker (gcc/clang/rust via -fuse-ld=mold)'
 TC_mold_BINS='bin/mold bin/ld.mold'
 TC_mold_EXEC_MB=60
 
+# tc_mold_exec_mb -> the fresh-install exec need in MB: 8 in launch mode
+# (launcher copies for the two small binaries), 60 in copy mode (issue #92).
+tc_mold_exec_mb() {
+    if [ "${SH_VIEW_MODE:-copy}" = launch ]; then
+        printf '8'
+    else
+        printf '60'
+    fi
+}
+
 tc_mold_probe() {
     sh_have mold && mold --version >/dev/null 2>&1
 }
@@ -27,7 +37,7 @@ tc_mold_install() {
     sh_mi_name="mold-${sh_mi_ver#v}-${sh_mi_arch}-linux"
     sh_mi_url="https://github.com/rui314/mold/releases/download/${sh_mi_ver}/${sh_mi_name}.tar.gz"
     sh_space_need 120 home || return 1
-    sh_space_need "$TC_mold_EXEC_MB" exec || return 1
+    sh_space_need "$(tc_mold_exec_mb)" exec || return 1
     if [ "$SH_DRY_RUN" = 1 ]; then
         sh_step "would install $sh_mi_url into $sh_mi_root"
         return 0

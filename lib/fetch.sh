@@ -452,6 +452,13 @@ sh_pin_for() {
             ripgrep) [ -n "${SANDHOME_SHA256_RIPGREP:-}" ] && { printf '%s' "$SANDHOME_SHA256_RIPGREP"; return 0; } ;;
             rust)    [ -n "${SANDHOME_SHA256_RUST:-}" ] && { printf '%s' "$SANDHOME_SHA256_RUST"; return 0; } ;;
             zig)     [ -n "${SANDHOME_SHA256_ZIG:-}" ] && { printf '%s' "$SANDHOME_SHA256_ZIG"; return 0; } ;;
+            # qemuuser resolves its tag from the forge API at install time, so the
+            # pin cannot be a literal in the tree: it is whatever the operator
+            # recorded for the build they fetched. tests/unit.sh requires the
+            # NAME to be here, and that is the point of the list -- a module
+            # cannot be added without somewhere for its digest to live.
+            qemuuser) [ -n "${SANDHOME_SHA256_QEMUUSER:-}" ] && { printf '%s' "$SANDHOME_SHA256_QEMUUSER"; return 0; } ;;
+            shellcheck) [ -n "${SANDHOME_SHA256_SHELLCHECK:-}" ] && { printf '%s' "$SANDHOME_SHA256_SHELLCHECK"; return 0; } ;;
         esac
     fi
     case "$(sh_pin_key "$sh_pf_url")" in
@@ -522,7 +529,7 @@ sh_pin_for() {
 # sh_pin_names -> every toolchain name a `SANDHOME_SHA256_<NAME>` pin answers to.
 # Printed so tests/unit.sh can require one entry per module in tools/, which is
 # what keeps the closed `case` above from going stale when a module is added.
-sh_pin_names() { printf ' fd go jq node python ripgrep rust zig mold clang deno bun\n'; }
+sh_pin_names() { printf ' fd go jq node python ripgrep rust zig mold clang deno bun qemuuser shellcheck\n'; }
 
 # sh_pin_from URL [NAME] [PUBLISHED] -> the NAME of the pin that answered for
 # this URL, or nothing. The provenance line in the report names it, because a
@@ -1155,7 +1162,7 @@ for i in z.infolist():
             rm -f "$sh_sut_zip" 2>/dev/null
             return $sh_sut_rc ;;
         tar.gz|tgz|gz)
-            sh_stream_cat "$sh_sut_dir" | tar -xzf - -C "$sh_sut_dest" ;;
+            sh_stream_cat "$sh_sut_dir" | sh_tar -xzf - -C "$sh_sut_dest" ;;
         tar.xz|txz|xz)
             # # STOP: xz IS GUARDED LIKE bzip2 AND zstd, AND FALLS BACK TO python3.
             # `tar -xJf` shells out to a decompressor that may simply not be
@@ -1167,7 +1174,7 @@ for i in z.infolist():
             #   sandhome: [-] toolchain zig could not be installed
             # after the download had already matched Zig's published digest.
             if sh_have xz; then
-                sh_stream_cat "$sh_sut_dir" | tar -xJf - -C "$sh_sut_dest"
+                sh_stream_cat "$sh_sut_dir" | sh_tar -xJf - -C "$sh_sut_dest"
             elif sh_have python3; then
                 sh_sut_xz="$sh_sut_dir/.archive.tar.xz"
                 sh_stream_cat "$sh_sut_dir" > "$sh_sut_xz" || return 1
@@ -1184,7 +1191,7 @@ with lzma.open(sys.argv[1],"rb") as z:
             fi ;;
         tar.bz2|tbz2|tbz)
             if sh_have bzip2; then
-                sh_stream_cat "$sh_sut_dir" | tar -xjf - -C "$sh_sut_dest"
+                sh_stream_cat "$sh_sut_dir" | sh_tar -xjf - -C "$sh_sut_dest"
             else
                 sh_warn 'a bzip2 stream arrived and no bzip2 is present'
                 return 1
@@ -1200,17 +1207,32 @@ with lzma.open(sys.argv[1],"rb") as z:
                 # The flag only raises the ALLOWED window; the decoder still
                 # allocates the frame's own window, so a small archive costs
                 # nothing.
-                sh_stream_cat "$sh_sut_dir" | zstd -dc --long=30 | tar -xf - -C "$sh_sut_dest"
+                sh_stream_cat "$sh_sut_dir" | zstd -dc --long=30 | sh_tar -xf - -C "$sh_sut_dest"
             else
                 sh_warn 'a zstd stream arrived and no zstd is present'
                 return 1
             fi ;;
         tar|'')
-            sh_stream_cat "$sh_sut_dir" | tar -xf - -C "$sh_sut_dest" ;;
+            sh_stream_cat "$sh_sut_dir" | sh_tar -xf - -C "$sh_sut_dest" ;;
         *)
             sh_warn "cannot pick a decompressor for the stream suffix '$sh_sut_suffix'"
             return 1 ;;
     esac
+}
+
+# sh_tar ARGS... -> run tar, without preserving archive ownership when tar
+# knows how. Running as uid 0, tar restores the archive's uid/gid on every
+# entry, and a sandbox root without CAP_CHOWN refuses that chown: measured
+# here, every entry warned "Cannot change ownership" and tar exited 2, so
+# every tarball install died on the unpack AFTER the download had verified.
+# --no-same-owner is tried first (GNU and modern bsdtar both take it); when
+# the flag itself is refused the plain invocation runs, so an old tar is not
+# broken by the workaround for a new sandbox.
+sh_tar() {
+    if tar --no-same-owner "$@" 2>/dev/null; then
+        return 0
+    fi
+    tar "$@"
 }
 
 # sh_untar TARBALL DEST -> unpack .tar.gz, .tgz, .tar.xz, .txz, .tar.zst or .zip
@@ -1281,7 +1303,7 @@ with lzma.open(sys.argv[1],"rb") as z:
             ;;
     esac
     # shellcheck disable=SC2086
-    tar $sh_ut_flags "$sh_ut_file" -C "$sh_ut_dest"
+    sh_tar $sh_ut_flags "$sh_ut_file" -C "$sh_ut_dest"
     return $?
 }
 
@@ -1307,6 +1329,10 @@ sh_fetch_unpack() {
     sh_fu_tmp="$sh_fu_stage/.fetch.$$"
     rm -rf "$sh_fu_tmp" 2>/dev/null
     mkdir -p "$sh_fu_tmp/parts" 2>/dev/null || return 1
+    # A live marker for a concurrent gc: this staging belongs to a running
+    # install, and `gc 0` from another shell must not delete it mid-download
+    # (issue #103). Stale markers (dead pid) protect nothing.
+    : > "$sh_fu_tmp/.sandhome-live-$$" 2>/dev/null || true
     if ! sh_fetch_verified_stream "$sh_fu_url" "$sh_fu_tmp/parts" "$(sh_pin_for "$sh_fu_url" "${4:-}" "$sh_fu_expected")"; then
         rm -rf "$sh_fu_tmp" 2>/dev/null
         return 1

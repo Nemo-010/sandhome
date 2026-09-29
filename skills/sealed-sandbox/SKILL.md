@@ -40,9 +40,13 @@ afterwards.
 
 ## No bind
 
-Both ends must dial out: nothing here listens, and nothing needs to. A sandbox
-that cannot `bind(2)` can still `connect(2)`, so any transport where both peers
-initiate is available and any where one side listens is not. A rendezvous relay
+Both ends must dial out: no TCP listener starts here, and nothing needs one.
+A sandbox that cannot `bind(2)` a TCP socket can still `connect(2)`, so any
+transport where both peers initiate is available and any where one side
+listens on TCP is not. Measured refinement (issue #97): `AF_UNIX` stream and
+dgram binds succeed where `AF_INET` is refused (`sandhome report` says
+`bind=unix` then), so local sockets in the X11/Wayland style can bind while
+TCP cannot. A rendezvous relay
 that both peers dial is the shape that works; a public one is perishable, so
 re-measure latency and failure modes rather than trusting a recorded table.
 
@@ -74,9 +78,12 @@ cannot reach is a STATICALLY LINKED program, which carries its own libc.
 ## No listen
 
 A local dev server, `npm run dev`, `python3 -m http.server`, or any process
-that calls `bind(2)` cannot start here: nothing listens. Do not retry bind
-variants. Either dial out to a relay both ends connect to (per the no-bind row
-above) or emit static output instead of serving it.
+that calls `bind(2)` on TCP cannot start here: no TCP listener starts. Do not
+retry TCP bind variants. Either dial out to a relay both ends connect to (per
+the no-bind row
+above) or emit static output instead of serving it. `AF_UNIX` binds are the
+exception: they succeed here (see the no-bind row), so a local socket path is
+a transport and a TCP port is not.
 
 ## No /etc/passwd
 

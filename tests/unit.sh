@@ -441,7 +441,7 @@ t_is "$(SANDHOME_SHA256_JQ_LINUX_ARM64=arm64d sh_pin_for 'https://x/jq-linux-arm
 # version with them reads the wrong variable for a differently-named asset.
 t_is "$(SANDHOME_SHA256_JQ_LINUX_AMD64=amd64d sh_pin_for 'https://x/jq-linux-i386' jq)" '' \
     'an amd64 asset pin does not answer for the i386 download' 
-t_is "$(sh_pin_names | tr -s ' \n' ' ')" ' fd go jq node python ripgrep rust zig mold clang deno bun ' \
+t_is "$(sh_pin_names | tr -s ' \n' ' ')" ' fd go jq node python ripgrep rust zig mold clang deno bun qemuuser shellcheck ' \
     'the pin-name list is the shape the clause above assumes'
 t_is "$(SANDHOME_SHA256_MOLD=moldd sh_pin_for 'https://x/mold-2.4-x86_64-linux.tar.gz' mold)" 'moldd' \
     'a mold pin answers for the mold tarball'

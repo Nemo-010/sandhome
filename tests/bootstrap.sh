@@ -231,11 +231,20 @@ t_contains "$dryout" 'feas jq need_mb=' 'a dry run prices each requested toolcha
 t_contains "$dryout" 'total_exec_need_mb=' 'a dry run totals the request against the ceiling (#75)'
 t_contains "$dryout" 'shims=' 'a dry run reports no built shims'
 case "$dryout" in
-    *'shims=fakepty'*|*'shims=fakepwd'*) t_ok 1 'a dry run names no built shim' ;;
+    *'shims=fakepty'*|*'shims=fakepwd'*|*'shims=antiptrace'*) t_ok 1 'a dry run names no built shim' ;;
     *)                                  t_ok 0 'a dry run names no built shim' ;;
 esac
 t_ok "$([ ! -e "$dryhome/shims/fakepty.so" ]; echo $?)" 'a dry run writes no shim object'
 t_ok "$([ ! -d "$dryhome/toolchains/jq" ]; echo $?)" 'a dry run downloads no toolchain'
+# The skills ride the same flag discipline: installed by default, suppressed
+# by --no-skills, and only announced on a dry run (issue #89).
+t_contains "$dryout" 'would install the skills' 'a dry run announces the skills install'
+skillsout=$(SANDHOME_HOME="$dryhome" SANDHOME_EXEC="$work/dry-exec" \
+         sh "$ROOT/bootstrap.sh" --toolset minimal --no-profile --no-path-line --no-skills --dry-run 2>&1)
+case "$skillsout" in
+    *'would install the skills'*) t_ok 1 '--no-skills suppresses the skills install' ;;
+    *)                            t_ok 0 '--no-skills suppresses the skills install' ;;
+esac
 # A dry run persists no durable library either (issue #70): sh_repo_persist
 # was the one write step with no dry-run branch, so a preview from a pipe
 # (SH_REPO_DIR under a scratch dir) left 39 files in a fresh home. Driven

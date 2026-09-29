@@ -221,8 +221,8 @@ esac
 #   shims=
 # Three clauses, one per way the old field was empty, plus the negative: a
 # machine that needs nothing reports nothing and does not claim it does.
-SH_PTY=no; SH_PASSWD=no
-export SH_PTY SH_PASSWD
+SH_PTY=no; SH_PASSWD=no; SH_PTRACE=no
+export SH_PTY SH_PASSWD SH_PTRACE
 # The rep2 clauses above removed fakepwd.so to prove the report does not claim
 # it, and this block asserts against the reader, so the state is rebuilt first.
 # Every clause below then SETS UP its own state and reads it back: a version
@@ -231,12 +231,15 @@ export SH_PTY SH_PASSWD
 # exactly that reason before they were given their own setup.
 sh_shim_build fakepty "$ROOT/shims/fakepty.c" >/dev/null 2>&1
 sh_shim_build fakepwd "$ROOT/shims/fakepwd.c" >/dev/null 2>&1
-t_is "$(sh_shim_present)" 'fakepty fakepwd' 'the present-shim reader names both objects on disk'
+sh_shim_build antiptrace "$ROOT/shims/antiptrace.c" >/dev/null 2>&1
+t_is "$(sh_shim_present)" 'fakepty fakepwd antiptrace' 'the present-shim reader names every object on disk'
 rm -f "$(sh_shims_dir)/fakepty.so"
-t_is "$(sh_shim_present)" 'fakepwd' 'removing one object is reflected by the reader'
+t_is "$(sh_shim_present)" 'fakepwd antiptrace' 'removing one object is reflected by the reader'
 rm -f "$(sh_shims_dir)/fakepwd.so"
+t_is "$(sh_shim_present)" 'antiptrace' 'the reader tracks removals one at a time'
+rm -f "$(sh_shims_dir)/antiptrace.so"
 t_is "$(sh_shim_present)" '' 'the present-shim reader names nothing when nothing is there'
-t_is "$(sh_shim_needed_missing)" 'fakepty fakepwd' 'the needed-and-missing reader names both'
+t_is "$(sh_shim_needed_missing)" 'fakepty fakepwd antiptrace' 'the needed-and-missing reader names each shim'
 # With nothing present and both needed, the report must say so rather than
 # reporting an empty list, which reads as "none were ever needed".
 t_contains "$(sh_shim_report)" 'fakepty_built=no' 'a missing shim is reported as not built'
@@ -244,13 +247,14 @@ t_contains "$(sh_shim_report)" 'fakepty_built=no' 'a missing shim is reported as
 # MISSING list is the right answer there - the same empty string as a machine
 # that needs two and has neither, and only the second is a problem. The two
 # fields exist so neither is read as the other.
-SH_PTY=yes; SH_PASSWD=yes
+SH_PTY=yes; SH_PASSWD=yes; SH_PTRACE=yes
 t_is "$(sh_shim_needed_missing)" '' 'a machine with a pty and a passwd database needs no shim'
 t_is "$(sh_shim_present)" '' 'and has none present, which is the right answer'
-SH_PTY=no; SH_PASSWD=no
+SH_PTY=no; SH_PASSWD=no; SH_PTRACE=no
 # Rebuilt for the LD_PRELOAD clauses below.
 sh_shim_build fakepty "$ROOT/shims/fakepty.c" >/dev/null 2>&1
 sh_shim_build fakepwd "$ROOT/shims/fakepwd.c" >/dev/null 2>&1
+sh_shim_build antiptrace "$ROOT/shims/antiptrace.c" >/dev/null 2>&1
 
 # The BOOTSTRAP COUNTS A NEEDED SHIM IT COULD NOT BUILD, AND SAYS SO. It used to
 # warn once on stderr and finish with `failures=0` and exit 0, because
@@ -467,5 +471,158 @@ case "$missing_err" in
     *fakepwd*passwd*) t_ok 0 'a SANDHOME_PASSWD that cannot be opened is reported on stderr' ;;
     *) t_ok 1 "a SANDHOME_PASSWD that cannot be opened is reported on stderr (got: $missing_err)" ;;
 esac
+
+# antiptrace: a program that self-checks with PTRACE_TRACEME, and reads TracerPid
+# from /proc/self/status, refuses to run where the ptrace syscall class is denied.
+# This shim is checked the way the other two are: built, then ACTUALLY USED, with
+# a probe that prints the same answers a guarded program would branch on.
+# STOP: THE STATUS PROBE USES open(), NOT fopen(). glibc's fopen reaches the
+# kernel through an internal alias that never crosses the PLT, so no
+# LD_PRELOAD interposer sees it: a fopen-based clause passes vacuously on a
+# host whose TracerPid is already 0 and proves nothing about the shim. open()
+# and openat() cross the PLT and are what cat, grep and python's io use, so
+# the probe reads with those and the fixture below carries a non-zero
+# TracerPid that only the shim can zero.
+cat > "$tmp/antiptrace.c" <<'EOF'
+#define _GNU_SOURCE
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/ptrace.h>
+static void dump(const char *path) {
+    char buf[4096];
+    ssize_t n;
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) { printf("open-fail\n"); return; }
+    n = read(fd, buf, sizeof buf - 1);
+    if (n < 0) { printf("read-fail\n"); close(fd); return; }
+    buf[n] = 0;
+    printf("%s", buf);
+    close(fd);
+}
+int main(int argc, char **argv){
+    int tr = ptrace(PTRACE_TRACEME, 0, 0, 0);
+    printf("traceme=%d errno=%d\n", tr, tr ? errno : 0);
+    dump(argc > 1 ? argv[1] : "/proc/self/status");
+    return 0;
+}
+EOF
+cc -O2 -o "$tmp/antiptrace-probe" "$tmp/antiptrace.c" 2>/dev/null || \
+    gcc -O2 -o "$tmp/antiptrace-probe" "$tmp/antiptrace.c" 2>/dev/null
+t_ok "$([ -x "$tmp/antiptrace-probe" ]; echo $?)" 'the antiptrace probe compiles'
+
+# The host's real answer, recorded so the shim clause is measured against it and
+# not against a constant. On a host that allows ptrace this is traceme=0 and the
+# shim clauses below still hold; on a host that denies it the difference is the
+# whole point.
+real_traceme=$( "$tmp/antiptrace-probe" 2>/dev/null | sed -n 's/^traceme=\([0-9-]*\).*/\1/p' )
+t_ok "$([ -n "$real_traceme" ]; echo $?)" 'the host answers the PTRACE_TRACEME self-check'
+
+# With the shim, the self-check SUCCEEDS. This is the clause that makes the shim
+# a capability: without it a guarded program exits before doing anything.
+out=$( LD_PRELOAD="$(sh_shims_dir)/antiptrace.so" "$tmp/antiptrace-probe" 2>/dev/null )
+t_contains "$out" 'traceme=0' 'antiptrace makes PTRACE_TRACEME report success'
+
+# The fixture carries a TracerPid only the shim can zero: 1234 without it,
+# zeros with it, through open() and through openat() (cat). A shim that
+# covered open() only would pass the first and fail the second, which is
+# exactly the gap the first version of this file shipped.
+mkdir -p "$tmp/fakeproc"
+printf 'Name:\tprobe\nTracerPid:\t1234\nwchan:\tptrace_stop\n' > "$tmp/fakeproc/status"
+out=$( LD_PRELOAD="$(sh_shims_dir)/antiptrace.so" "$tmp/antiptrace-probe" "$tmp/fakeproc/status" 2>/dev/null )
+t_contains "$out" 'TracerPid:	0000' 'antiptrace zeroes a non-zero TracerPid through open()'
+case "$out" in
+    *'TracerPid:	1234'*) t_ok 1 'the unedited value is gone through open()' ;;
+    *) t_ok 0 'the unedited value is gone through open()' ;;
+esac
+t_contains "$out" 'wchan:	00000000000' 'antiptrace zeroes wchan through open()'
+out=$( LD_PRELOAD="$(sh_shims_dir)/antiptrace.so" cat "$tmp/fakeproc/status" 2>/dev/null )
+t_contains "$out" 'TracerPid:	0000' 'antiptrace zeroes a non-zero TracerPid through openat() (cat)'
+case "$out" in
+    *'TracerPid:	1234'*) t_ok 1 'the unedited value is gone through openat()' ;;
+    *) t_ok 0 'the unedited value is gone through openat()' ;;
+esac
+
+# /proc files report size 0, and a shim that sized its buffer off fstat would
+# edit nothing on the real path while passing every fixture clause. The size
+# is measured first so the clause is about the machine, then the shim serves
+# the real file without breaking it.
+if [ -r /proc/self/status ] && command -v stat >/dev/null 2>&1; then
+    t_is "$(stat -c %s /proc/self/status 2>/dev/null)" '0' '/proc/self/status reports size 0 here'
+    out=$( LD_PRELOAD="$(sh_shims_dir)/antiptrace.so" cat /proc/self/status 2>/dev/null | grep -c '^TracerPid:' )
+    t_is "$out" '1' 'the shim still serves the size-0 real status file'
+else
+    t_skip 'no readable /proc/self/status to prove the size-0 path'
+fi
+
+# # STOP: THE EDITED FILE MUST BE A FILE THE CALLER CAN ACTUALLY USE. Handing
+# back a buffer without a descriptor, or a descriptor that does not seek, breaks
+# every consumer that fstat()s or lseek()s what it opened. The probe re-opens,
+# seeks and reads, and the clause requires the whole shape to work.
+cat > "$tmp/statusfd.c" <<'EOF'
+#include <stdio.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <string.h>
+int main(void){
+    int fd = open("/proc/self/status", O_RDONLY);
+    if (fd < 0) { printf("open=-1\n"); return 1; }
+    if (lseek(fd, 0, SEEK_SET) != 0) { printf("seek=fail\n"); return 1; }
+    char buf[4096];
+    ssize_t n = read(fd, buf, sizeof buf - 1);
+    printf("read=%ld\n", (long)n);
+    close(fd);
+    return 0;
+}
+EOF
+cc -O2 -o "$tmp/statusfd" "$tmp/statusfd.c" 2>/dev/null || gcc -O2 -o "$tmp/statusfd" "$tmp/statusfd.c" 2>/dev/null
+out=$( LD_PRELOAD="$(sh_shims_dir)/antiptrace.so" "$tmp/statusfd" 2>/dev/null )
+t_ok "$([ -x "$tmp/statusfd" ]; echo $?)" 'the status-fd probe compiles'
+out=$( LD_PRELOAD="$(sh_shims_dir)/antiptrace.so" "$tmp/statusfd" 2>/dev/null )
+t_ok "$([ -n "$out" ]; echo $?)" 'the status-fd probe produces output through the shim'
+t_ok "$(case "$out" in read=[1-9]*) echo 0 ;; *) echo 1 ;; esac)" 'the shim gives back a readable, seekable status file'
+
+# # STOP: THE THIRD ARGUMENT OF open() EXISTS ONLY WITH O_CREAT, AND READING IT
+# ANYWAY SEGFAULTS. The first version of the shim called va_arg for a mode_t on
+# every call. `cat /proc/self/status` opens WITHOUT O_CREAT, and the shim crashed
+# with SIGSEGV on the exact path it exists for, while a call that did pass a mode
+# happened to survive. The clause below drives the no-mode path and requires a
+# clean run, not a signal.
+out=$( LD_PRELOAD="$(sh_shims_dir)/antiptrace.so" cat /proc/self/status 2>/dev/null | grep -c '^TracerPid:' )
+t_is "$out" '1' 'opening status without O_CREAT does not crash the shim'
+# And a call that DOES pass a mode still works, so the flag test is not merely
+# skipping the argument.
+modeprobe=$( LD_PRELOAD="$(sh_shims_dir)/antiptrace.so" sh -c 'umask 022; : > "$1"; echo made; stat -c %a "$1"' sh "$tmp/made-by-mode" 2>/dev/null )
+t_contains "$modeprobe" 'made' 'a create with a mode still works through the shim'
+
+# The two behaviours are separately switchable, because faking the self-check is
+# a bigger change than zeroing a field.
+out=$( SANDHOME_ANTIPTRACE_TRACEME=0 LD_PRELOAD="$(sh_shims_dir)/antiptrace.so" "$tmp/antiptrace-probe" 2>/dev/null )
+t_ok "$(case "$out" in *'traceme=0'*) echo 1 ;; *) echo 0 ;; esac)" 'SANDHOME_ANTIPTRACE_TRACEME=0 restores the host answer'
+out=$( SANDHOME_ANTIPTRACE_STATUS=0 SANDHOME_ANTIPTRACE_WCHAN=0 LD_PRELOAD="$(sh_shims_dir)/antiptrace.so" "$tmp/antiptrace-probe" 2>/dev/null )
+t_contains "$out" 'traceme=0' 'with only the self-check faked, TRACEME still succeeds'
+
+# Detection: the probe this shim is gated on must answer, and must answer what
+# this host really is. A detection that always said 'no' would build the shim
+# everywhere and hide a host where it is not needed.
+det=$(sh_detect_ptrace)
+t_ok "$([ "$det" != unknown ]; echo $?)" 'the ptrace detector answers on this host'
+if [ "$real_traceme" = 0 ]; then
+    t_is "$det" 'yes' 'ptrace works here, and the detector says so'
+else
+    t_is "$det" 'no' 'ptrace is denied here, and the detector says so'
+fi
+
+# And the shim is NEEDED exactly when ptrace is denied, so a healthy host builds
+# nothing. This is the clause that keeps the shim off a machine that does not
+# want it.
+SH_PTRACE=yes; t_is "$(sh_shim_need antiptrace)" 'no' 'a host with ptrace does not need antiptrace'
+SH_PTRACE=no;  t_is "$(sh_shim_need antiptrace)" 'yes' 'a host without ptrace needs antiptrace'
+SH_PTRACE=partial; t_is "$(sh_shim_need antiptrace)" 'yes' 'a host with a partly-denied ptrace needs antiptrace too'
+SH_PTRACE=unknown; t_is "$(sh_shim_need antiptrace)" 'no' 'an unprobed host is not assumed broken'
+
 
 t_end

@@ -284,6 +284,18 @@ is about 1.9GB.
 (hundreds of MB) and it wants a roomy exec root; `zig`, `deno`, `bun` and `mold`
 are in the `languages` and `agent` toolsets.
 
+### qemu-user, shellcheck, and the long tail
+
+Two modules cover needs the base set does not. `qemuuser` ships the static
+user-mode emulators: the host one always (`qemu-x86_64` on x86_64), guests
+only when asked through `SANDHOME_QEMUUSER_EXTRA` (a name like `aarch64` or
+`qemu-aarch64`), because all 33 emulators are ~280MB of view for a machine
+that will run one or two. A static guest runs from a noexec tree under its
+emulator, and `qemu-x86_64 -strace` traces its syscalls with no ptrace at all
+(~2x native against ~21x for system-mode TCG). `shellcheck` is the shell
+linter as a single static binary, and the same binary `tests/syntax.sh` runs
+over this tree when it is present.
+
 ### Cross compilers and linkers
 
 `zig cc` is a complete C/C++ compiler and cross compiler, and it is also a
@@ -297,13 +309,25 @@ The mold archive ships both `mold` and `ld.mold`, and the latter is what
 
 ## 5. The shims
 
-Two `LD_PRELOAD` interposers, built only when the machine needs them:
+Three `LD_PRELOAD` interposers, built only when the machine needs them:
 
 - **`fakepty`**  -  a USERSPACE pty. It makes the session's descriptors look
   like a terminal (isatty, termios, window size, `/dev/tty`) where there is no
   `/dev/ptmx`, so readline, echo and full-screen programs work over a pipe.
 - **`fakepwd`**  -  answers `getpwnam`/`getpwuid` from a synthetic database, for a
   cage with no `/etc/passwd`. It reads `$SANDHOME_PASSWD`; `env.sh` exports it.
+- **`antiptrace`**  -  lets a program that self-checks with
+  `ptrace(PTRACE_TRACEME)`, or reads `TracerPid` from `/proc/self/status`,
+  run on a host whose seccomp profile denies the ptrace syscall class. The
+  detector (`ptrace=yes|no|partial|unknown` in the report) sends a bogus
+  request too, which tells a seccomp filter (refuses before looking) apart
+  from YAMA/LSM (refuse after validating). `TRACEME` is answered with
+  success; `TracerPid` and `wchan` are zeroed on `open`/`open64`/`openat`/
+  `openat64` reads handed back through a memfd. It cannot make a ptrace-based
+  tracer work (the filter runs before libc), and glibc-internal opens
+  (`fopen`) never cross the PLT, so no shim shaped like this one sees those.
+  `SANDHOME_ANTIPTRACE_TRACEME`, `SANDHOME_ANTIPTRACE_STATUS` and
+  `SANDHOME_ANTIPTRACE_WCHAN` switch the behaviours off separately (`=0`).
 
 Both are built into `$SANDHOME_HOME/shims/`. `env.sh` puts them in `LD_PRELOAD`
 only when `SANDHOME_SHIMS` is set to something other than `0`. `fakepty` is no
@@ -402,8 +426,9 @@ SANDHOME_FAKEPTY_SIZE=120x40 sandhome pty less big.log
 | a full-screen program runs in batch mode | it is statically linked (nothing to interpose into), or `faketty` is not built. `sandhome pty CMD` forces the userspace pty; `sandhome shims build` builds it |
 | `File size limit exceeded` on a download | `ulimit -f` pins a per-file cap; sandhome shards any download whose `Content-Length` exceeds it and unpacks a `.tar.*` from the stream. `SANDHOME_FETCH_CHUNK_MB` tunes the range size. A `.zip` above the cap is refused by name |
 | `mold` is on PATH but `-fuse-ld=mold` cannot find it | the mold archive ships both `mold` and `ld.mold`; both land on the exec bin. Check `command -v ld.mold`. Clang accepts `--ld-path=$(command -v mold)` as well |
-| `doctor` says `FAIL exec_space=low` or `=critical` | the exec root is draining. `sandhome space` names the state and the numbers, `sandhome space --probe` lists roomier candidates, `sandhome gc` reclaims sandhome's own caches, and re-running the setup with `--exec DIR` moves everything to a roomy path. See section 1 for the thresholds |
-| the exec root filled | `sandhome gc`; staging (any age), exec caches (`cache/`, `tmp/`, `go-bin/` entries older than DAYS; `gc 0` or `gc --now` removes them however fresh), and home tmp older than DAYS are removed, toolchain data stays. Views are never reclaimed: they are rebuilt by `sandhome repair`, not by `gc` (#67). `gc` returning 0 bytes on a full root means the space is in build output you own or in views, so `du -sh $SANDHOME_EXEC/* | sort -h | tail` names it first. `GOCACHE`, `GOBIN`, `NPM_CONFIG_PREFIX`, `CARGO_INSTALL_ROOT`, `CARGO_TARGET_DIR`, and `target/` all land on the exec root: heavy and multi-target builds need a roomy `--exec DIR`. If no candidate fits, the install names the constraint before writing anything |
+| `doctor` says `FAIL exec_space=low` or `=critical` | the exec root is draining. `sandhome space` names the state and the numbers, `sandhome space --probe` lists roomier candidates, `sandhome space --largest` names the entries holding the space, `sandhome gc` reclaims sandhome's own caches, and re-running the setup with `--exec DIR` moves everything to a roomy path. See section 1 for the thresholds |
+| the exec root filled | `sandhome gc` prints the entry count with the bytes reclaimed; staging (any age), exec caches (`cache/`, `tmp/`, `go-bin/`, `node-gyp-tmp-*` entries older than DAYS; `gc 0` or `gc --now` removes them however fresh), and home tmp older than DAYS are removed, toolchain data stays. What a live install holds survives even `gc 0` (`SANDHOME_GC_FORCE=1` overrides). Views are never reclaimed: stale view entries go with `sandhome prune`, views are rebuilt by `sandhome repair`, not by `gc` (#67). `gc` returning 0 bytes on a full root means the space is in build output you own or in views, so `sandhome space --largest` (or `space --reclaim` for the cache bytes `gc --now` would free) names it first. `GOCACHE`, `GOBIN`, `NPM_CONFIG_PREFIX`, `CARGO_INSTALL_ROOT`, `CARGO_TARGET_DIR`, and `target/` all land on the exec root: heavy and multi-target builds need a roomy `--exec DIR`. If no candidate fits, the install names the constraint before writing anything |
+| a tool is on PATH but its file is gone | the payload was deleted while its view entry survived; every reinstall leaves it because the mirror only adds. `sandhome prune <name>` drops view entries whose payload is gone, downloading nothing (#110) |
 | the exec root was cleared by a restart | the tmpfs exec view is gone while `env.sh` persists; re-run the setup, then run `sandhome repair` only if `doctor` still fails. Re-running the setup rebuilds the view on its own (measured); never run `install <name>` here, it re-runs the adopt path that broke 8 views in 8 rounds (#49, #43) |
 
 ## 8. The report

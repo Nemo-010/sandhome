@@ -390,6 +390,10 @@ LAST_RC=0
 LAST_DIR=$HOME
 prompt() {
     if [ "$LAST_RC" -eq 0 ]; then P=$C_GRN; else P=$C_RED; fi
+    # No array here: "$P[...]" is the colour variable followed by a literal
+    # "[rc]" prompt fragment. POSIX sh has no arrays and the brackets are
+    # prompt text, not an index.
+    # shellcheck disable=SC1087
     emit "$P[$LAST_RC]$C_RST ${ERRANDSH_NAME}:$C_BLU$(shortcwd)$C_RST$SP"
 }
 redraw() {
@@ -733,6 +737,11 @@ while :; do
     if [ "$FIRST" = 1 ]; then
         FIRST=0
         # Tell the child to survive SIGINT, and turn on bracketed paste.
+        # The two targets differ: ">&$CMD_FD" duplicates stdout onto the
+        # child fd (a number at runtime, not a file), while "2>/dev/null"
+        # silences this shell's stderr; nothing competes because only one
+        # of them touches stderr.
+        # shellcheck disable=SC2261
         printf 'trap "" INT\n' >&$CMD_FD 2>/dev/null || true
         emit "$(printf '\033[?2004h')"
     fi
