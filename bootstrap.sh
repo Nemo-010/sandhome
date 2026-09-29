@@ -550,7 +550,27 @@ sandhome_bootstrap_main() {
         done
     else
         for sh_mb_name in $SH_INFEASIBLE; do
-            sh_fail "toolchain $sh_mb_name does not fit the exec root (see the feas lines above); re-run with --exec DIR on a roomy exec-capable path, run 'sandhome gc' to reclaim caches, or ask for a smaller toolset"
+            # The shortfall is named, not just the refusal: the plan priced
+            # each name as name:need:free, so the reader sees which tool is
+            # blocked and by how many megabytes (issue #87).
+            sh_mb_why=''
+            for sh_mb_trip in $SH_INFEASIBLE_WHY; do
+                case "$sh_mb_trip" in
+                    "$sh_mb_name:"*)
+                        sh_mb_need=${sh_mb_trip#"$sh_mb_name:"}
+                        sh_mb_need=${sh_mb_need%%:*}
+                        sh_mb_free=${sh_mb_trip##*:}
+                        case "$sh_mb_need" in
+                            ''|*[!0-9]*) ;;
+                            *)
+                                case "$sh_mb_free" in
+                                    ''|*[!0-9]*) ;;
+                                    *) sh_mb_why=" (needs ${sh_mb_need}MB, ${sh_mb_free}MB free, short by $((sh_mb_need - sh_mb_free))MB)" ;;
+                                esac ;;
+                        esac ;;
+                esac
+            done
+            sh_fail "toolchain $sh_mb_name does not fit the exec root$sh_mb_why (see the feas lines above); re-run with --exec DIR on a roomy exec-capable path, run 'sandhome gc' to reclaim caches, or ask for a smaller toolset"
         done
         for sh_mb_name in $SH_FEASIBLE; do
             sh_toolchain_ensure "$sh_mb_name" || true

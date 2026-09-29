@@ -783,6 +783,8 @@ printf 'FEASIBLE=[%s]\n' "\$SH_FEASIBLE"
 printf 'INFEASIBLE=[%s]\n' "\$SH_INFEASIBLE"
 EOF
 feas_out=$(SH_LIB_DIR="$work/repo/lib" SH_REPO_DIR="$work/repo" sh "$work/feas-driver.sh" 2>&1)
+t_contains "$feas_out" 'requested=huge tiny nosuchmod' \
+    'the plan is printed back before it is judged (issue #87)'
 t_contains "$feas_out" 'feas huge need_mb=500 free_mb=100 fit=no' \
     'a toolchain bigger than the root is infeasible (#75)'
 t_contains "$feas_out" 'feas tiny need_mb=4 free_mb=100 fit=yes' \
@@ -799,6 +801,18 @@ case "$feas_out" in
     *'INFEASIBLE=[huge]'*) t_ok 0 'the no-fit name is refused up front' ;;
     *) t_ok 1 "the no-fit name is refused up front (got: $feas_out)" ;;
 esac
+# The refusal carries its own numbers: which tool, what it needs, what is
+# free (issue #87). The driver does not print WHY, so it is re-derived here
+# off the same stubbed figures through the exported triples.
+feas_why=$(SH_LIB_DIR="$work/repo/lib" SH_REPO_DIR="$work/repo" sh -c '
+for m in common detect space fetch env toolchain memexec; do . "$1/lib/$m.sh"; done
+sh_free_mb() { printf "100"; }
+sh_space_max_exec_free() { printf "100"; }
+SH_EXEC=/nowhere; SH_HOME_TOOLCHAINS=/nowhere-tc; SH_HOME_TMP="$2"; SH_EXEC_VIEWS=/nowhere-views; SH_VIEW_MODE=copy
+sh_feasibility_plan huge >/dev/null 2>&1
+printf "%s" "$SH_INFEASIBLE_WHY"
+' sh "$ROOT" "$work" 2>/dev/null)
+t_is "$feas_why" 'huge:500:100' 'the refused name carries need and free figures (issue #87)'
 # THE COPY LIST PRICES TOO. A copy-listed payload lands as real bytes, so
 # pricing it as a launcher under-reads a hundredfold (measured: rust priced
 # 198KB for a 17MB view, because the list resolves only inside the promote).

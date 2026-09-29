@@ -286,12 +286,21 @@ SANDHOME_HOME="$doc_home" SANDHOME_EXEC="$doc_exec" \
     sh "$ROOT/bootstrap.sh" --toolset minimal --no-profile --no-path-line --no-shell \
     >/dev/null 2>"$work/doc-err.txt"
 if [ -r "$doc_home/env.sh" ]; then
+    # STOP: THE SPACE THRESHOLDS ARE PINNED, BECAUSE THE EXEC ROOT IS NOT.
+    # $work lives under /tmp, so these clauses measured how much room was
+    # free in /tmp when the suite ran: on a small or busy /tmp doctor
+    # truthfully reported exec_space=low and the suite failed a sound home
+    # for a host fact, not a tree fact (issue #108). Zeroing the low/critical
+    # floors makes room unjudgeable here -- only a literally full root still
+    # fails -- so the clauses assert what the tree built, deterministically.
     doc_out=$(SANDHOME_REPO_DIR="$ROOT" SANDHOME_HOME="$doc_home" SANDHOME_EXEC="$doc_exec" \
+              SANDHOME_LOW_EXEC_MB=0 SANDHOME_CRIT_MB=0 \
               sh "$ROOT/bin/sandhome" doctor 2>/dev/null)
     doc_rc_line=$(printf '%s\n' "$doc_out" | tail -n 1)
     t_is "$doc_rc_line" 'doctor_failures=0' 'doctor reports no failures on a home that was just built'
     # # NOTE: AND IT EXITS 0/1, NEVER THE COUNT.
     SANDHOME_REPO_DIR="$ROOT" SANDHOME_HOME="$doc_home" SANDHOME_EXEC="$doc_exec" \
+        SANDHOME_LOW_EXEC_MB=0 SANDHOME_CRIT_MB=0 \
         sh "$ROOT/bin/sandhome" doctor >/dev/null 2>&1
     t_is "$?" 0 'doctor exits 0 on a sound home'
     # Break one invariant and it must name it and fail.

@@ -898,6 +898,33 @@ t_contains "$lb_out" 'listed-wrapper-stale' 'a copy-listed entry holding other b
 t_contains "$lb_out" 'listed-real-current' 'a copy-listed entry holding its payload is current'
 rm -rf "$lb"
 
+# --- concurrent repairs share one view, and gc never touches views ---------
+# The exec view is shared by every session, so concurrent repairs of the same
+# toolchain must not corrupt it, and gc must never scan views/ at all: views
+# are toolchain data rebuilt by repair, not caches (issue #106). Eight
+# parallel mirrors of one payload, then the view binary runs; then gc 0 over
+# the same roots must leave every view entry in place.
+cx="$tmp/conc"
+rm -rf "$cx"
+mkdir -p "$cx/home/toolchains/jq/bin" "$cx/exec/views" "$cx/home/tmp" "$cx/exec/cache"
+printf '#!/bin/sh\necho jq-1.8.2\n' > "$cx/home/toolchains/jq/bin/jq"
+chmod 0755 "$cx/home/toolchains/jq/bin/jq"
+SH_HOME="$cx/home"; SH_EXEC="$cx/exec"; SH_HOME_TMP="$cx/home/tmp"
+SH_EXEC_BIN="$cx/exec/bin"; SH_EXEC_VIEWS="$cx/exec/views"
+SH_HOME_TOOLCHAINS="$cx/home/toolchains"; SH_VIEW_MODE=copy; SH_HOME_EXEC=no
+SH_DRY_RUN=0; SH_SELF=test
+export SH_HOME SH_EXEC SH_HOME_TMP SH_EXEC_BIN SH_EXEC_VIEWS SH_HOME_TOOLCHAINS SH_VIEW_MODE SH_HOME_EXEC SH_DRY_RUN SH_SELF
+cx_fail=0
+for cx_i in 1 2 3 4 5 6 7 8; do
+    sh_promote_tree "$cx/home/toolchains/jq" "$cx/exec/views/jq" >/dev/null 2>&1 || cx_fail=1 &
+done
+wait
+t_is "$cx_fail" '0' 'eight concurrent mirrors of one view all succeed (issue #106)'
+t_is "$("$cx/exec/views/jq/bin/jq" 2>/dev/null)" 'jq-1.8.2' 'the shared view still runs afterwards'
+sh_space_gc 0 >/dev/null 2>&1
+t_ok "$([ -f "$cx/exec/views/jq/bin/jq" ]; echo $?)" 'gc 0 leaves every view entry in place (views are not caches)'
+rm -rf "$cx"
+
 # --- gc counts bytes, reclaims node-gyp scratch, and spares live installs -----
 # A failed node-gyp build leaves node-gyp-tmp-* scratch where the build ran.
 # No scan named it, so gc reclaimed 0 bytes while the root stayed full

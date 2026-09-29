@@ -257,13 +257,17 @@ sh_toolchain_exec_mb() {
 }
 
 # sh_feasibility_plan NAMES... -> price the whole request before anything is
-# downloaded or written (issue #75). Prints one line per toolchain on stderr
-# (stdout stays clean for --json):
+# downloaded or written (issue #75). Prints the plan back first, then one
+# line per toolchain on stderr (stdout stays clean for --json):
+#   requested=a b c
 #   feas NAME need_mb=N free_mb=F fit=yes|no|unknown
 # then a total line:
 #   total_exec_need_mb=T max_exec_free_mb=M
-# and sets SH_FEASIBLE (space-separated names to install) and SH_INFEASIBLE
-# (names refused up front). Needs are priced off the current free space for
+# and sets SH_FEASIBLE (space-separated names to install), SH_INFEASIBLE
+# (names refused up front) and SH_INFEASIBLE_WHY (`name:need:free` triples
+# for the refused names, so the caller can say by how much, issue #87).
+# Only the names passed in are priced: a tool that is merely available is
+# not part of the request. Needs are priced off the current free space for
 # every name, so the table is a snapshot: an install that fits now can still
 # fail later once earlier installs consume the root, and the per-install
 # gates stay the last word. Unknown names and unpriceable modules print
@@ -272,11 +276,19 @@ sh_toolchain_exec_mb() {
 sh_feasibility_plan() {
     SH_FEASIBLE=''
     SH_INFEASIBLE=''
+    SH_INFEASIBLE_WHY=''
     sh_fp_free=$(sh_free_mb "${SH_EXEC:-/tmp}" 2>/dev/null)
     case "$sh_fp_free" in ''|*[!0-9]*) sh_fp_free=0 ;; esac
     sh_fp_max=$(sh_space_max_exec_free 2>/dev/null)
     case "$sh_fp_max" in ''|*[!0-9]*) sh_fp_max=0 ;; esac
     sh_fp_total=0
+    sh_fp_req=''
+    for sh_fp_name in "$@"; do
+        [ -n "$sh_fp_name" ] || continue
+        sh_fp_req="$sh_fp_req $sh_fp_name"
+    done
+    sh_fp_req=$(sh_trim "$sh_fp_req")
+    printf 'requested=%s\n' "$sh_fp_req" >&2
     for sh_fp_name in "$@"; do
         [ -n "$sh_fp_name" ] || continue
         sh_fp_need=$(sh_toolchain_exec_mb "$sh_fp_name" 2>/dev/null) || sh_fp_need=''
@@ -293,6 +305,7 @@ sh_feasibility_plan() {
                 else
                     printf 'feas %s need_mb=%s free_mb=%s fit=no\n' "$sh_fp_name" "$sh_fp_need" "$sh_fp_free" >&2
                     SH_INFEASIBLE="$SH_INFEASIBLE $sh_fp_name"
+                    SH_INFEASIBLE_WHY="$SH_INFEASIBLE_WHY $sh_fp_name:$sh_fp_need:$sh_fp_free"
                 fi
                 ;;
         esac
@@ -300,7 +313,8 @@ sh_feasibility_plan() {
     printf 'total_exec_need_mb=%s max_exec_free_mb=%s\n' "$sh_fp_total" "$sh_fp_max" >&2
     SH_FEASIBLE=$(sh_trim "$SH_FEASIBLE")
     SH_INFEASIBLE=$(sh_trim "$SH_INFEASIBLE")
-    export SH_FEASIBLE SH_INFEASIBLE
+    SH_INFEASIBLE_WHY=$(sh_trim "$SH_INFEASIBLE_WHY")
+    export SH_FEASIBLE SH_INFEASIBLE SH_INFEASIBLE_WHY
     return 0
 }
 

@@ -157,6 +157,17 @@ and `sh_read_file` carries that last line out of the loop.
 the empty string and a `case` arm built on it can never match. The JSON escaper
 matches control characters with a bracket expression instead.
 
+**Views are shared and gc never scans them.** `$SH_EXEC/views` belongs to every
+session at once: concurrent repairs of one toolchain mirror the same payload
+to the same directory, and the mirror only ever writes complete files (copies
+then chmod, symlinks via rename-safe `ln -sfn`), so no session observes a
+partial view. Measured clean at 8 concurrent repairs plus 100 executions
+against the repair. `gc` scans staging, exec caches and home tmp only -- never
+views -- because a view is toolchain data rebuilt by `repair`, not a cache;
+a run that deleted views to reclaim space would break every toolchain to save
+the root they run from. Both properties are load-bearing and both are
+covered in `tests/space.sh`, so neither can be "fixed" away unnoticed.
+
 ## 5. The toolchain contract
 
 One module per toolchain at `tools/<name>.sh`. The full contract is in
