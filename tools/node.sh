@@ -9,6 +9,18 @@ TC_node_DESC='Node.js with the bundled npm, from the official nodejs.org tarball
 TC_node_BINS='bin/node bin/npm bin/npx'
 TC_node_EXEC_MB=200
 
+# tc_node_exec_mb -> the fresh-install exec need in MB: 16 in launch mode
+# (launcher copies for node, npm and npx; the tree measured 5MB), 200 in copy
+# mode (the full tree). Read by the install gate below and the feasibility
+# plan so the two never disagree (issues #92, #105).
+tc_node_exec_mb() {
+    if [ "${SH_VIEW_MODE:-copy}" = launch ]; then
+        printf '16'
+    else
+        printf '200'
+    fi
+}
+
 tc_node_probe() {
     sh_have node && node --version >/dev/null 2>&1
 }
@@ -69,8 +81,9 @@ tc_node_install() {
     # The exec view holds the node runtime plus npm/npx and their tree (about
     # 163MB measured, up to ~244MB with the bundled npm). Gate it the same way
     # as go (issue #66): a home-only check let the install succeed into a root
-    # the view did not fit.
-    sh_space_need "$TC_node_EXEC_MB" exec || return 1
+    # the view did not fit. Mode-aware: launch mode holds launcher copies
+    # (5MB measured), copy mode the tree above.
+    sh_space_need "$(tc_node_exec_mb)" exec || return 1
 
     sh_ni_sha=''
     if sh_have curl || sh_have wget; then

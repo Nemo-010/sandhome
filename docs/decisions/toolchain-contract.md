@@ -17,6 +17,10 @@ tc_<name>_env         write the env fragment (optional)
 tc_<name>_version     print a version (optional)
 tc_<name>_exec_mb     computed fresh-install exec need in MB (optional)
 tc_<name>_copy_bins   executables that stay real copies in launch mode (optional)
+tc_<name>_pin URL      digest for this download (optional): consulted after
+                    operator-set pins and before the published/default arms,
+                    so an outsider module is pinnable without editing
+                    `lib/fetch.sh`
 ```
 
 `TC_<name>_EXEC_MB` prices a fresh install for the up-front feasibility
@@ -45,6 +49,16 @@ modules defining `install` would silently shadow each other.
 - **Refuse with a reason.** A missing release asset, an unsupported kernel/arch
   pair, or a failed digest is `sh_warn` plus a non-zero return, never a silent
   skip that later reads as a transport failure.
+- **Resolve versions, do not type them.** An asset name carrying a literal
+  version is the shape that rots: the module keeps saying it installs while
+  upstream moves on. Ask the upstream what is current (`releases/latest`,
+  `index.json`, `VERSION?m=text`) and pin the fetched bytes instead of the
+  name. A literal is legitimate only where a digest must be held across
+  releases, and then it sits beside the pin that justifies it.
+- **Price the view mode you install into.** A static `TC_<name>_EXEC_MB`
+  prices copy mode; a module whose launch view costs less defines
+  `tc_<name>_exec_mb` and both the gate and the plan read it. The figure is
+  measured off a real view, with headroom, never guessed.
 
 ## The digest position
 

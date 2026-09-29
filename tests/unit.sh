@@ -441,7 +441,7 @@ t_is "$(SANDHOME_SHA256_JQ_LINUX_ARM64=arm64d sh_pin_for 'https://x/jq-linux-arm
 # version with them reads the wrong variable for a differently-named asset.
 t_is "$(SANDHOME_SHA256_JQ_LINUX_AMD64=amd64d sh_pin_for 'https://x/jq-linux-i386' jq)" '' \
     'an amd64 asset pin does not answer for the i386 download' 
-t_is "$(sh_pin_names | tr -s ' \n' ' ')" ' fd go jq node python ripgrep rust zig mold clang deno bun qemuuser shellcheck ' \
+t_is "$(sh_pin_names | tr -s ' \n' ' ')" ' fd go jq node python ripgrep rust zig mold clang deno bun qemuuser shellcheck shfmt yq ninja gh ' \
     'the pin-name list is the shape the clause above assumes'
 t_is "$(SANDHOME_SHA256_MOLD=moldd sh_pin_for 'https://x/mold-2.4-x86_64-linux.tar.gz' mold)" 'moldd' \
     'a mold pin answers for the mold tarball'
@@ -463,6 +463,25 @@ for m in "$ROOT"/tools/*.sh; do
     esac
 done
 t_is "$missing_pins" '' 'every toolchain module has a SANDHOME_SHA256_<name> pin'
+
+# AN OUTSIDER MODULE IS PINNABLE WITHOUT EDITING THE TABLE (issues #101,
+# #105). A name no arm has ever heard of answers its own SANDHOME_SHA256_<NAME>,
+# and a module-declared tc_<name>_pin answers first. Names outside the module
+# shape answer nothing, so no URL can be spliced into a command.
+t_is "$(SANDHOME_SHA256_OUTSIDER=outpin sh_pin_for 'https://x/outsider-1.0.tar.gz' outsider)" 'outpin' \
+    'an unlisted module name answers its own pin'
+t_is "$(SANDHOME_SHA256_JQ=pinjq sh_pin_for 'https://x/outsider-1.0.tar.gz' outsider)" '' \
+    'another module pin does not leak across names'
+t_is "$(SANDHOME_SHA256_EVIL=evil sh_pin_for 'https://x/e' 'a-b')" '' \
+    'a hyphenated name is not a module name'
+t_is "$(SANDHOME_SHA256_EVIL=evil sh_pin_for 'https://x/e' '../e')" '' \
+    'a path is not a module name'
+tc_pinstub_pin() { printf 'stubpin'; }
+t_is "$(sh_pin_for 'https://x/s' pinstub)" 'stubpin' \
+    'a module-declared pin answers without any table arm'
+# The stub stays defined: unsetting a function is not portable sh, and the
+# name cannot collide with a real module, so it is inert for the rest of the
+# file (it is only consulted when the requested name is pinstub).
 
 # # STOP: THE PROVENANCE LINE IS NAMED AND QUOTED, BECAUSE AN UNQUOTED VALUE WITH
 # A SPACE IN IT IS WORD-SPLIT BY dash INTO A COMMAND. `sh_fv_from=the release`

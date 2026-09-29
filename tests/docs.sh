@@ -25,6 +25,7 @@ DOCS="$ROOT/AGENTS.md
       $ROOT/ROUTE.md
       $ROOT/docs/guide.md
       $ROOT/docs/architecture.md
+      $ROOT/docs/toolchains.md
       $ROOT/skills/README.md
       $ROOT/skills/sandhome/SKILL.md
       $ROOT/skills/errandsh/SKILL.md

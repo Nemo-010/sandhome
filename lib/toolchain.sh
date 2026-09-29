@@ -35,19 +35,70 @@ sh_toolchains_dir() {
     printf '%s/tools' "${SH_REPO_DIR:-.}"
 }
 
-sh_toolchain_module() { printf '%s/%s.sh' "$(sh_toolchains_dir)" "$1"; }
+# sh_toolchains_local_dir -> the durable, user-owned module directory. Modules
+# here survive every reinstall and sync because they live outside the runtime
+# copy, and they are read AHEAD of the shipped tree so a local module wins a
+# name clash visibly (toolchains marks the origin). Unset or absent answers
+# nothing, and everything below degrades to the shipped tree alone.
+sh_toolchains_local_dir() {
+    if [ -n "${SH_HOME:-}" ] && [ -d "$SH_HOME/toolchains.d" ]; then
+        printf '%s/toolchains.d' "$SH_HOME"
+        return 0
+    fi
+    printf ''
+    return 1
+}
 
-# sh_toolchain_available -> every module name, sorted by the shell's own glob.
+# sh_toolchain_origin NAME -> `local` or `shipped`, by which tree holds the
+# module. Local wins so an override is possible; the mark keeps it visible.
+sh_toolchain_origin() {
+    sh_to_local=$(sh_toolchains_local_dir)
+    if [ -n "$sh_to_local" ] && [ -f "$sh_to_local/$1.sh" ]; then
+        printf 'local'
+        return 0
+    fi
+    printf 'shipped'
+    return 0
+}
+
+sh_toolchain_module() {
+    sh_tm_local=$(sh_toolchains_local_dir)
+    if [ -n "$sh_tm_local" ] && [ -f "$sh_tm_local/$1.sh" ]; then
+        printf '%s/%s.sh' "$sh_tm_local" "$1"
+        return 0
+    fi
+    printf '%s/%s.sh' "$(sh_toolchains_dir)" "$1"
+}
+
+# sh_toolchain_available -> every module name, local dir first so an override
+# keeps its name in place, then the shipped tree, each once. Sorted by the
+# shell's own glob per directory.
 sh_toolchain_available() {
-    for sh_ta_f in "$(sh_toolchains_dir)"/*.sh; do
-        [ -f "$sh_ta_f" ] || continue
-        sh_ta_b=${sh_ta_f##*/}
-        printf '%s ' "${sh_ta_b%.sh}"
+    sh_ta_seen=' '
+    sh_ta_local=$(sh_toolchains_local_dir 2>/dev/null)
+    # Quoted iteration: a home with a space in it is still one directory.
+    for sh_ta_dir in "$sh_ta_local" "$(sh_toolchains_dir)"; do
+        [ -n "$sh_ta_dir" ] || continue
+        [ -d "$sh_ta_dir" ] || continue
+        for sh_ta_f in "$sh_ta_dir"/*.sh; do
+            [ -f "$sh_ta_f" ] || continue
+            sh_ta_b=${sh_ta_f##*/}
+            sh_ta_b=${sh_ta_b%.sh}
+            case "$sh_ta_seen" in
+                *" $sh_ta_b "*) continue ;;
+            esac
+            sh_ta_seen="$sh_ta_seen$sh_ta_b "
+            printf '%s ' "$sh_ta_b"
+        done
     done
 }
 
 sh_toolchain_known() {
     sh_tk_want=$1
+    sh_tk_local=$(sh_toolchains_local_dir)
+    if [ -n "$sh_tk_local" ] && [ -f "$sh_tk_local/$sh_tk_want.sh" ]; then
+        return 0
+    fi
     for sh_tk_f in "$(sh_toolchains_dir)"/*.sh; do
         [ -f "$sh_tk_f" ] || continue
         sh_tk_b=${sh_tk_f##*/}

@@ -25,14 +25,25 @@ tc_shellcheck_probe() {
 tc_shellcheck_install() {
     sh_sc_root=$(sh_toolchain_root shellcheck)
     case "${SH_KERNEL:-unknown}:${SH_ARCH:-unknown}" in
-        Linux:x86_64|Linux:amd64)   sh_sc_asset='shellcheck-v0.11.0.linux.x86_64.tar.xz' ;;
-        Linux:aarch64|Linux:arm64)  sh_sc_asset='shellcheck-v0.11.0.linux.aarch64.tar.xz' ;;
-        Darwin:x86_64)              sh_sc_asset='shellcheck-v0.11.0.darwin.x86_64.tar.xz' ;;
-        Darwin:arm64)               sh_sc_asset='shellcheck-v0.11.0.darwin.aarch64.tar.xz' ;;
+        Linux:x86_64|Linux:amd64)   sh_sc_plat='linux.x86_64' ;;
+        Linux:aarch64|Linux:arm64)  sh_sc_plat='linux.aarch64' ;;
+        Darwin:x86_64)              sh_sc_plat='darwin.x86_64' ;;
+        Darwin:arm64)               sh_sc_plat='darwin.aarch64' ;;
         *) sh_warn "no shellcheck build for ${SH_KERNEL:-unknown} ${SH_ARCH:-unknown}"; return 1 ;;
     esac
+    # STOP: THE TAG IS RESOLVED, NOT TYPED. A literal version in the asset
+    # name is the shape that rots (issue #105): the module keeps saying it
+    # installs while upstream moves on. The GitHub latest redirect answers
+    # the current tag, and only the fetched bytes need a pin, not the name.
+    sh_sc_tag=${SANDHOME_SHELLCHECK_VERSION:-$(sh_github_latest_tag koalaman/shellcheck)}
+    case "$sh_sc_tag" in
+        v[0-9]*) ;;
+        *) sh_warn 'could not resolve the current shellcheck release'; return 1 ;;
+    esac
+    sh_sc_asset="shellcheck-$sh_sc_tag.$sh_sc_plat.tar.xz"
+    sh_sc_dirname="shellcheck-$sh_sc_tag"
     sh_space_need 16 home || return 1
-    sh_sc_url="https://github.com/koalaman/shellcheck/releases/download/v0.11.0/$sh_sc_asset"
+    sh_sc_url="https://github.com/koalaman/shellcheck/releases/download/$sh_sc_tag/$sh_sc_asset"
     sh_sc_stage=${SH_HOME_TMP:-${TMPDIR:-/tmp}}
     mkdir -p "$sh_sc_stage" 2>/dev/null || return 1
     if [ "$SH_DRY_RUN" = 1 ]; then
@@ -61,7 +72,7 @@ tc_shellcheck_install() {
     fi
     rm -f "$sh_sc_stage/.shellcheck.$$.tar.xz" 2>/dev/null
     sh_sc_bin=''
-    for sh_sc_e in "$sh_sc_stage"/shellcheck-v0.11.0/shellcheck; do
+    for sh_sc_e in "$sh_sc_stage/$sh_sc_dirname/shellcheck"; do
         [ -x "$sh_sc_e" ] || [ -f "$sh_sc_e" ] || continue
         sh_sc_bin=$sh_sc_e
         break
@@ -69,7 +80,7 @@ tc_shellcheck_install() {
     [ -n "$sh_sc_bin" ] || { sh_warn 'the shellcheck archive did not contain the shellcheck binary'; return 1; }
     cp -f "$sh_sc_bin" "$sh_sc_root/bin/shellcheck" 2>/dev/null || return 1
     chmod 0755 "$sh_sc_root/bin/shellcheck" 2>/dev/null || true
-    rm -rf "$sh_sc_stage/shellcheck-v0.11.0" 2>/dev/null
+    rm -rf "$sh_sc_stage/$sh_sc_dirname" 2>/dev/null
     if [ ! -x "$sh_sc_root/bin/shellcheck" ]; then
         sh_warn "the shellcheck archive did not put shellcheck at $sh_sc_root/bin/shellcheck"
         return 1

@@ -24,6 +24,10 @@ usage: sandhome COMMAND [args]
                          nothing. The fix for "Permission denied" on a tool
                          that is already installed or adopted. No names means
                          every toolchain sandhome knows.
+  add NAME --url URL    fetch one asset as a new toolchain into the durable
+                         local directory and install it. --sha256 pins it,
+                         --bin names the executable inside an archive,
+                         --scaffold-only writes the module without installing.
   shims [build]          build the LD_PRELOAD shims this machine needs
   test                   run this checkout's whole test suite
   selftest               the checks that need this machine and no network
@@ -178,6 +182,7 @@ usage: sh bootstrap.sh [options]
 | `SANDHOME_FETCH_DIR` | bootstrap.sh | `$SH_FETCH_DIR` |
 | `SANDHOME_FORCE` | toolchain.sh bootstrap.sh sandhome rust.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_GC_FORCE` | space.sh sandhome | `unset, and the feature is off until it is set` |
+| `SANDHOME_GH_VERSION` | gh.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_GO_DL_JSON_URL` | sandhome go.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_GO_VERSION_URL` | sandhome go.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_HERE` | profile.sh | `unset, and the feature is off until it is set` |
@@ -220,6 +225,8 @@ usage: sh bootstrap.sh [options]
 | `SANDHOME_SHA256_RUST` | fetch.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_SHA256_SHELLCHECK` | fetch.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_SHA256_ZIG` | fetch.sh | `unset, and the feature is off until it is set` |
+| `SANDHOME_SHELLCHECK_VERSION` | shellcheck.sh | `unset, and the feature is off until it is set` |
+| `SANDHOME_SHFMT_VERSION` | shfmt.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_SHIMS` | env.sh shim.sh sandhome | `unset, and the feature is off until it is set` |
 | `SANDHOME_WANTED_TOOLCHAINS` | env.sh report.sh | `*)` |
 | `SANDHOME_ZIG_INDEX_URL` | sandhome zig.sh | `unset, and the feature is off until it is set` |
@@ -252,15 +259,19 @@ usage: sh bootstrap.sh [options]
 | `clang` | `bin/clang bin/clang++` | Clang/LLVM, from the official LLVM release tarball (a >1GB download) |
 | `deno` | `deno` | Deno, a TypeScript/JavaScript runtime (single binary, from GitHub) |
 | `fd` | `bin/fd` | fd, a fast and user-friendly find replacement |
+| `gh` | `bin/gh` | gh, the GitHub command-line tool (single binary from its tarball) |
 | `go` | `go/bin/go go/bin/gofmt` | Go, from the official go.dev tarball (GOROOT stays in the home root) |
 | `jq` | `bin/jq` | jq, the command-line JSON processor (single static binary) |
 | `mold` | `bin/mold bin/ld.mold` | mold, a fast ELF linker (gcc/clang/rust via -fuse-ld=mold) |
+| `ninja` | `ninja` | ninja, a small build system (single static binary) |
 | `node` | `bin/node bin/npm bin/npx` | Node.js with the bundled npm, from the official nodejs.org tarball |
 | `python` | `(via its own PATH fragment)` | CPython, installed by uv (uv is always left on PATH) |
 | `qemuuser` | `bin/qemu-x86_64` | qemu-user, the static user-mode emulators (run a guest ELF, trace its syscalls without ptrace) |
 | `ripgrep` | `bin/rg` | ripgrep (rg), the fast recursive search tool |
 | `rust` | `cargo/bin/rustup cargo/bin/cargo` | Rust via rustup (rustc, cargo, rustup; minimal profile) |
 | `shellcheck` | `bin/shellcheck` | ShellCheck, the shell script linter (single static binary) |
+| `shfmt` | `bin/shfmt` | shfmt, a shell script formatter (single static binary) |
+| `yq` | `bin/yq` | yq, a YAML/TOML/XML command-line processor (single binary) |
 | `zig` | `zig` | zig cc cross compiler and linker, from the official tarball |
 
 ## Tests

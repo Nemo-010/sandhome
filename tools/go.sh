@@ -4,6 +4,18 @@ TC_go_DESC='Go, from the official go.dev tarball (GOROOT stays in the home root)
 TC_go_BINS='go/bin/go go/bin/gofmt'
 TC_go_EXEC_MB=150
 
+# tc_go_exec_mb -> the fresh-install exec need in MB: 12 in launch mode (the
+# launchers; the tree measured a 3MB view), 150 in copy mode (pkg/tool are
+# real executables the go command spawns, ~90MB measured). Read by the gate
+# below and the feasibility plan (issues #92, #105).
+tc_go_exec_mb() {
+    if [ "${SH_VIEW_MODE:-copy}" = launch ]; then
+        printf '12'
+    else
+        printf '150'
+    fi
+}
+
 tc_go_probe() {
     sh_have go && go version >/dev/null 2>&1
 }
@@ -119,7 +131,7 @@ tc_go_install() {
     # gated: without the exec line an install succeeded into a root too small
     # to build in, and the first build died with ENOSPC (issue #66).
     sh_space_need 400 home || return 1
-    sh_space_need "$TC_go_EXEC_MB" exec || return 1
+    sh_space_need "$(tc_go_exec_mb)" exec || return 1
     sh_gi_url="https://go.dev/dl/${sh_gi_ver}.${sh_gi_os}-${sh_gi_arch}.tar.gz"
     if [ "$SH_DRY_RUN" = 1 ]; then
         sh_step "would install $sh_gi_url into $sh_gi_root"

@@ -11,16 +11,20 @@ cannot be added without recording it.
 | clang | `https://github.com/llvm/llvm-project/releases/download/` | latest-release redirect tag (`llvmorg-*`) | caller pin only (`SANDHOME_SHA256_CLANG*`); hashed and printed otherwise |
 | deno | `https://github.com/denoland/deno/releases/download/` | latest-release redirect tag | `<asset>.sha256sum` sidecar published beside the zip, shape-validated hex64 |
 | fd | `https://github.com/sharkdp/fd/releases/download/` | latest-release redirect tag | caller pin only (`SANDHOME_SHA256_FD*`); hashed and printed otherwise |
+| gh | `https://github.com/cli/cli/releases/download/` | latest-release redirect tag | caller pin only (`SANDHOME_SHA256_GH*`); hashed and printed otherwise |
 | go | `https://go.dev/dl/` | `https://go.dev/VERSION?m=text`, first line | `https://go.dev/dl/?mode=json`, `filename` entry, shape-validated hex64 |
 | jq | `https://github.com/jqlang/jq/releases/latest/download/` | latest-release redirect | caller pin only (`SANDHOME_SHA256_JQ*`); hashed and printed otherwise |
 | mold | `https://github.com/rui314/mold/releases/download/` | latest-release redirect tag | caller pin only (`SANDHOME_SHA256_MOLD*`); hashed and printed otherwise |
+| ninja | `https://github.com/ninja-build/ninja/releases/download/` | latest-release redirect (`ninja-linux.zip`, `ninja-mac.zip` carry no version) | caller pin only (`SANDHOME_SHA256_NINJA*`); hashed and printed otherwise |
 | node | `https://nodejs.org/dist/` | `https://nodejs.org/dist/index.json`, first entry | `SHASUMS256.txt` entry for the tarball, shape-validated hex64 |
 | python | `https://github.com/astral-sh/uv/releases/latest/download/` (uv installs CPython from python-build-standalone) | latest-release redirect tag | caller pin only (`SANDHOME_SHA256_PYTHON*`); hashed and printed otherwise |
 | qemuuser | `https://codeberg.org/ziglang/qemu-static/releases/download/` (direct first, `https://api.rv.pkgforge.dev/` mirror second) | Forgejo API `https://api.cb.pkgforge.dev/api/v1/repos/ziglang/qemu-static/releases/latest`, `tag_name` entry | caller pin only (`SANDHOME_SHA256_QEMUUSER*`); hashed and printed otherwise |
 | ripgrep | `https://github.com/BurntSushi/ripgrep/releases/download/` | release tag | caller pin only (`SANDHOME_SHA256_RIPGREP*`); hashed and printed otherwise |
+| shfmt | `https://github.com/mvdan/sh/releases/download/` | latest-release redirect tag | caller pin only (`SANDHOME_SHA256_SHFMT*`); hashed and printed otherwise |
 | rust | `https://static.rust-lang.org/rustup/dist/` (rustup-init installs the toolchain) | stable channel | caller pin only (`SANDHOME_SHA256_RUST*`); hashed and printed otherwise |
-| shellcheck | `https://github.com/koalaman/shellcheck/releases/download/v0.11.0/` | pinned `v0.11.0` asset per host | caller pin only (`SANDHOME_SHA256_SHELLCHECK*`); hashed and printed otherwise |
+| shellcheck | `https://github.com/koalaman/shellcheck/releases/download/` | latest-release redirect tag, asset per host | caller pin only (`SANDHOME_SHA256_SHELLCHECK*`); hashed and printed otherwise |
 | zig | `https://ziglang.org/download/` | `https://ziglang.org/download/index.json`, first version | caller pin only (`SANDHOME_SHA256_ZIG*`); hashed and printed otherwise |
+| yq | `https://github.com/mikefarah/yq/releases/download/` | latest-release redirect (`yq_linux_amd64` carries no version) | caller pin only (`SANDHOME_SHA256_YQ*`); hashed and printed otherwise |
 
 Verification order for every download: bytes land on a sibling temp path,
 never the final name; the digest is taken on what arrived; it is compared

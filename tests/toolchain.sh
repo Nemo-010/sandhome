@@ -1165,4 +1165,59 @@ tc_rust_ensure_targets "$work/stub-rustup" "$work/stub-home" >/dev/null 2>&1
 t_is "$(cat "$work/rustup.log" 2>/dev/null)" '' 'a target added out-of-band is not re-added'
 unset RUSTUP_STUB_HAS RUSTUP_STUB_LOG SH_RUST_TARGETS
 
+# A durable local module directory is read ahead of the shipped tree, and the
+# origin is visible (issues #94, #101). Fixture module plus fixture home; no
+# network anywhere in this block.
+mkdir -p "$work/lochome/toolchains.d"
+cat > "$work/lochome/toolchains.d/loctool.sh" <<'EOF'
+TC_loctool_DESC='a local fixture'
+TC_loctool_BINS='bin/loctool'
+TC_loctool_EXEC_MB=8
+tc_loctool_probe() { return 1; }
+tc_loctool_install() { return 0; }
+tc_loctool_env() { return 0; }
+tc_loctool_version() { printf 'loctool 1'; }
+EOF
+SH_HOME="$work/lochome" SH_REPO_DIR="$work/repo"
+export SH_HOME SH_REPO_DIR
+t_is "$(sh_toolchain_known loctool && echo yes)" 'yes' 'a module in toolchains.d is known'
+t_is "$(sh_toolchain_origin loctool)" 'local' 'its origin reads local'
+t_is "$(sh_toolchain_origin jq)" 'shipped' 'a shipped module reads shipped'
+case " $(sh_toolchain_available) " in
+    *' loctool '*) t_ok 0 'the local module is listed alongside shipped ones' ;;
+    *) t_ok 1 'the local module is listed alongside shipped ones' ;;
+esac
+# A local module shadows a shipped name, visibly: jq from toolchains.d wins
+# the load and keeps its name in place.
+cp "$work/lochome/toolchains.d/loctool.sh" "$work/lochome/toolchains.d/jq.sh"
+SH_TOOLCHAIN_LOADED=''
+t_is "$(sh_toolchain_origin jq)" 'local' 'a local jq shadows the shipped one, visibly'
+t_is "$(sh_toolchain_module jq)" "$work/lochome/toolchains.d/jq.sh" 'and the loader resolves the shadow'
+rm -f "$work/lochome/toolchains.d/jq.sh"
+SH_TOOLCHAIN_LOADED=''
+unset SH_HOME
+
+# `sandhome add` writes the module and refuses clobbers, offline: scaffold
+# writes the file and installs nothing; a second add for the same name is
+# refused; an archive without --bin is refused; a bad NAME is refused.
+sh_ad_home="$work/addhome"
+sh_ad_exec="$work/addexec"
+mkdir -p "$sh_ad_home" "$sh_ad_exec"
+SANDHOME_REPO_DIR="$ROOT" SANDHOME_HOME="$sh_ad_home" SANDHOME_EXEC="$sh_ad_exec" \
+    sh "$ROOT/bin/sandhome" add scaftool --url https://x.example/scaftool-1.0.tar.gz --bin bin/scaftool --scaffold-only >/dev/null 2>&1
+t_ok "$([ -f "$sh_ad_home/toolchains.d/scaftool.sh" ]; echo $?)" 'add --scaffold-only writes the module'
+t_is "$(grep -c 'sh_fetch_unpack' "$sh_ad_home/toolchains.d/scaftool.sh" 2>/dev/null)" '1' 'an archive module unpacks'
+SANDHOME_REPO_DIR="$ROOT" SANDHOME_HOME="$sh_ad_home" SANDHOME_EXEC="$sh_ad_exec" \
+    sh "$ROOT/bin/sandhome" add scaftool --url https://x.example/other.tar.gz --bin bin/other >/dev/null 2>&1
+t_is "$?" 2 'add refuses to overwrite an existing module'
+SANDHOME_REPO_DIR="$ROOT" SANDHOME_HOME="$sh_ad_home" SANDHOME_EXEC="$sh_ad_exec" \
+    sh "$ROOT/bin/sandhome" add nobin --url https://x.example/nobin.tar.gz >/dev/null 2>&1
+t_is "$?" 2 'add refuses an archive without --bin'
+SANDHOME_REPO_DIR="$ROOT" SANDHOME_HOME="$sh_ad_home" SANDHOME_EXEC="$sh_ad_exec" \
+    sh "$ROOT/bin/sandhome" add 'Bad-Name' --url https://x.example/b.tar.gz >/dev/null 2>&1
+t_is "$?" 2 'add refuses a NAME outside the module shape'
+SANDHOME_REPO_DIR="$ROOT" SANDHOME_HOME="$sh_ad_home" SANDHOME_EXEC="$sh_ad_exec" \
+    sh "$ROOT/bin/sandhome" add single --url https://x.example/single >/dev/null 2>&1
+t_is "$?" 1 'add without --scaffold-only tries to install (fails here with no network for x.example)'
+
 t_end

@@ -422,6 +422,28 @@ sh_pin_key() {
 # with no value to compare against, which is what happens for the five modules
 # whose publisher does not publish a digest this can read.
 #
+# sh_pin_env_for NAME -> the SANDHOME_SHA256_<NAME> value for any sane module
+# name, or nothing. Module names are closed to lowercase alnum plus
+# underscore (the module filename without `.sh`), so upper-casing and one
+# `eval` read cannot splice a URL into a command the way a derived asset
+# name could: anything outside that shape answers nothing here. This is what
+# lets an outsider module -- one no table below has ever heard of -- be
+# pinned by its operator without editing this file (issues #101, #105).
+sh_pin_env_for() {
+    case "${1:-}" in
+        [a-z]*)
+            case "$1" in
+                *[!a-z0-9_]*) return 1 ;;
+            esac ;;
+        *) return 1 ;;
+    esac
+    sh_pef_var="SANDHOME_SHA256_$(sh_upper "$1")"
+    eval "sh_pef_val=\${$sh_pef_var:-}"
+    [ -n "$sh_pef_val" ] || return 1
+    printf '%s' "$sh_pef_val"
+    return 0
+}
+
 # # STOP: THE LOOKUP IS A `case` AND NOT `eval`, BECAUSE A DERIVED VARIABLE NAME
 # CANNOT BE AN INDIRECT REFERENCE IN POSIX SH, AND A NAME BUILT FROM AN URL
 # CANNOT BE WRITTEN AT ALL. `eval "x=\${$var:-}"` is the only indirect read
@@ -439,6 +461,12 @@ sh_pin_for() {
     sh_pf_name=${2:-}
     sh_pf_published=${3:-}
     if [ -n "$sh_pf_name" ]; then
+        # The operator's own pin always wins: a SANDHOME_SHA256_<NAME> set
+        # for any sane module name answers before anything module-authored.
+        # (sh_pin_env_for validates the shape; anything else falls through.)
+        if sh_pin_env_for "$sh_pf_name" 2>/dev/null; then
+            return 0
+        fi
         case "$sh_pf_name" in
             bun)     [ -n "${SANDHOME_SHA256_BUN:-}" ] && { printf '%s' "$SANDHOME_SHA256_BUN"; return 0; } ;;
             clang)   [ -n "${SANDHOME_SHA256_CLANG:-}" ] && { printf '%s' "$SANDHOME_SHA256_CLANG"; return 0; } ;;
@@ -508,6 +536,27 @@ sh_pin_for() {
         UV)      [ -n "${SANDHOME_SHA256_PYTHON:-}" ] && { printf '%s' "$SANDHOME_SHA256_PYTHON"; return 0; } ;;
         UV-*)    [ -n "${SANDHOME_SHA256_PYTHON:-}" ] && { printf '%s' "$SANDHOME_SHA256_PYTHON"; return 0; } ;;
     esac
+    # A module names its own digest beside the thing that would disprove it:
+    # tc_<name>_pin answers the pin for this download, computed or literal.
+    # It ranks below every operator-set pin (name, then asset arms above) and
+    # above the published/default arms below: the operator's explicit word
+    # beats the module's default, and the module's default beats trusting the
+    # publisher's sidecar alone. The name is validated to the module shape
+    # before it becomes a function suffix (issues #101, #105).
+    case "$sh_pf_name" in
+        [a-z]*)
+            case "$sh_pf_name" in
+                *[!a-z0-9_]*) : ;;
+                *)
+                    if command -v "tc_${sh_pf_name}_pin" >/dev/null 2>&1; then
+                        sh_pf_modpin=$("tc_${sh_pf_name}_pin" "$sh_pf_url" 2>/dev/null)
+                        if [ -n "$sh_pf_modpin" ]; then
+                            printf '%s' "$sh_pf_modpin"
+                            return 0
+                        fi
+                    fi ;;
+            esac ;;
+    esac
     # # NOTE: THE BARE VALUE IS A DEFAULT AND NOT AN OVERRIDE, AND THE ORDER
     # IS THE WHOLE FIX. It used to be `${SANDHOME_SHA256:-$published}` in every
     # module, so a caller who set it to pin ONE download silently replaced the
@@ -529,7 +578,7 @@ sh_pin_for() {
 # sh_pin_names -> every toolchain name a `SANDHOME_SHA256_<NAME>` pin answers to.
 # Printed so tests/unit.sh can require one entry per module in tools/, which is
 # what keeps the closed `case` above from going stale when a module is added.
-sh_pin_names() { printf ' fd go jq node python ripgrep rust zig mold clang deno bun qemuuser shellcheck\n'; }
+sh_pin_names() { printf ' fd go jq node python ripgrep rust zig mold clang deno bun qemuuser shellcheck shfmt yq ninja gh\n'; }
 
 # sh_pin_from URL [NAME] [PUBLISHED] -> the NAME of the pin that answered for
 # this URL, or nothing. The provenance line in the report names it, because a
