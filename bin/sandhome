@@ -395,12 +395,13 @@ cmd_toolchains() {
             eval "sh_c_desc=\${TC_${sh_c_t}_DESC:-}"
             eval "sh_c_bins=\${TC_${sh_c_t}_BINS:-}"
             [ "$sh_c_n" -gt 0 ] && printf ','
-            printf '{"name":"%s","desc":"%s","bins":"%s","status":"%s","version":"%s","origin":"%s"}' \
+            printf '{"name":"%s","desc":"%s","bins":"%s","status":"%s","version":"%s","origin":"%s","view":"%s"}' \
                 "$(sh_json_escape "$sh_c_t")" "$(sh_json_escape "$sh_c_desc")" \
                 "$(sh_json_escape "$sh_c_bins")" \
                 "$(sh_json_escape "$(sh_toolchain_status "$sh_c_t")")" \
                 "$(sh_json_escape "$(sh_toolchain_version "$sh_c_t")")" \
-                "$(sh_toolchain_origin "$sh_c_t")"
+                "$(sh_toolchain_origin "$sh_c_t")" \
+                "$(sh_toolchain_view_kind "$sh_c_t")"
             sh_c_n=$((sh_c_n + 1))
         done
         printf ']\n'

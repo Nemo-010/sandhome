@@ -358,4 +358,23 @@ else
     t_skip 'the helper does not probe here, so the report-mode clause was skipped'
 fi
 
+# SANDHOME_VIEW_MODE OVERRIDES THE DECISION (issue #83). copy forces real
+# copies without building; launch demands the helper with a copy fallback.
+# SH_HOME_EXEC=no is already set above, so the machine would choose launch
+# where the helper probes.
+SANDHOME_VIEW_MODE=copy sh_memexec_ensure >/dev/null 2>&1
+t_is "$SH_VIEW_MODE" 'copy' 'SANDHOME_VIEW_MODE=copy forces copy mode'
+SH_VIEW_MODE=''
+export SH_VIEW_MODE
+unset SANDHOME_VIEW_MODE
+# The per-toolchain mapping names how each entry runs: a home tree runs in
+# the machine mode, an adopted copy runs direct. That mapping is what a
+# /memfd:sandhome path in a trace is explained against.
+mkdir -p "$work/home/toolchains/mxkind"
+SH_VIEW_MODE=launch
+SANDHOME_VIEW_MODE=''
+export SH_VIEW_MODE SANDHOME_VIEW_MODE
+t_is "$(sh_toolchain_view_kind mxkind)" 'launch' 'an installed tree runs in the machine mode'
+t_is "$(sh_toolchain_view_kind nosuchtool)" 'direct' 'an adopted copy runs direct'
+
 t_end

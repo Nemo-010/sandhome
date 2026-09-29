@@ -585,3 +585,21 @@ sh_toolchain_bins() {
     sh_toolchain_load "$sh_tb_name" >/dev/null 2>&1 || { printf ''; return 0; }
     eval "printf '%s' \"\${TC_${sh_tb_name}_BINS:-}\""
 }
+
+# sh_toolchain_view_kind NAME -> how this toolchain runs: launch or copy for
+# an installed tree (the machine's view mode), direct for an adopted copy
+# with no home tree. This is the mapping a `/memfd:sandhome` path in a trace
+# is explained against (issue #83): launch means /proc/self/exe is the
+# anonymous memfd, copy and direct mean it is a real file.
+sh_toolchain_view_kind() {
+    if [ -d "$(sh_toolchain_root "$1")" ]; then
+        if command -v sh_report_view >/dev/null 2>&1; then
+            sh_report_view 2>/dev/null || printf 'copy'
+        else
+            printf '%s' "${SH_VIEW_MODE:-copy}"
+        fi
+    else
+        printf 'direct'
+    fi
+    return 0
+}

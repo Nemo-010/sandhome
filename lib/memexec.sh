@@ -139,8 +139,25 @@ sh_memexec_mode() {
 # roots are one directory that runs its own files, so no view is ever
 # mirrored and a helper would sit unused. Building one anyway costs a compile
 # and prints a step about a binary nothing will call.
+#
+# SANDHOME_VIEW_MODE overrides the decision (issue #83): `copy` forces real
+# copies, which keeps `/proc/self/exe` a real path at the price of exec-root
+# room; `launch` demands the helper and falls back to copy with a warning
+# when it does not probe here; empty or anything else decides per machine.
+# A launcher runs from an anonymous memfd, so exe-relative tools that must
+# see their own path (zig's install dir, node-gyp's process.execPath, crash
+# traces) either land on the per-module copy list or need copy mode: the
+# choice is visible in `sandhome report` (`view=`) instead of silent.
 sh_memexec_ensure() {
     if [ "${SH_HOME_EXEC:-unknown}" = yes ]; then
+        if [ "${SANDHOME_VIEW_MODE:-auto}" = launch ]; then
+            sh_warn 'SANDHOME_VIEW_MODE=launch was asked but the home runs its own files; views stay copies'
+        fi
+        SH_VIEW_MODE=copy
+        export SH_VIEW_MODE
+        return 0
+    fi
+    if [ "${SANDHOME_VIEW_MODE:-auto}" = copy ]; then
         SH_VIEW_MODE=copy
         export SH_VIEW_MODE
         return 0
@@ -149,6 +166,10 @@ sh_memexec_ensure() {
         sh_memexec_build || true
     fi
     SH_VIEW_MODE=$(sh_memexec_mode)
+    if [ "${SANDHOME_VIEW_MODE:-auto}" = launch ] && [ "$SH_VIEW_MODE" != launch ]; then
+        sh_warn 'SANDHOME_VIEW_MODE=launch was asked and the helper does not probe here; views fall back to copies'
+        SH_VIEW_MODE=copy
+    fi
     export SH_VIEW_MODE
     return 0
 }

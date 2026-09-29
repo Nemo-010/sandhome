@@ -137,6 +137,11 @@ usage: sh bootstrap.sh [options]
                       list forces the names in it (SANDHOME_FORCE=rust,go).
                       Same placement rule as SANDHOME_REF. `sandhome install
                       --force NAME` is the same decision per command.
+  SANDHOME_VIEW_MODE  copy forces real-copy views (`/proc/self/exe` stays a
+                      real path, at the price of exec-root room); launch
+                      demands the memfd helper with a copy fallback; empty or
+                      anything else decides per machine. Same placement rule
+                      as SANDHOME_REF.
   SANDHOME_SHA256     a default digest for any download that has no pin of its
                       own. Same placement rule as SANDHOME_REF: export it or
                       set it on the sh side. Prefer the per-download forms below, which do not
@@ -238,6 +243,7 @@ usage: sh bootstrap.sh [options]
 | `SANDHOME_SHELLCHECK_VERSION` | shellcheck.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_SHFMT_VERSION` | shfmt.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_SHIMS` | env.sh shim.sh sandhome | `unset, and the feature is off until it is set` |
+| `SANDHOME_VIEW_MODE` | memexec.sh bootstrap.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_WANTED_TOOLCHAINS` | env.sh report.sh | `*)` |
 | `SANDHOME_ZIG_INDEX_URL` | sandhome zig.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_ZIG_VERSION` | sandhome zig.sh | `unset, and the feature is off until it is set` |

@@ -94,6 +94,17 @@ behavior and the fallback, and the report prints which (`view=`). A usable
 host copy is still adopted with no workaround at all; `SANDHOME_FORCE` (or
 `install --force`) installs locally regardless.
 
+**`/proc/self/exe` is the memfd in launch mode.** A launcher runs from an
+anonymous file, so anything that reports its own path -- `process.execPath`,
+`argv[0]`-vs-exe checks, crash traces, `node-gyp` error lines -- names
+`/memfd:sandhome (deleted)`, a path that no longer exists by the time it is
+read. That is inherent to running from memory, not a defect in one tool.
+Three answers exist: the per-module copy list above (keep the tool real),
+`SANDHOME_VIEW_MODE=copy` (keep every view real, at the price of exec-root
+room), and the mapping itself -- `sandhome toolchains --json` carries a
+`view` field per toolchain (`launch`, `copy`, `direct`), so a memfd path in
+a trace is explainable instead of mysterious.
+
 ### Exec-only caches
 
 A build cache is not data. `go run` and `go test` compile into `GOCACHE` and
