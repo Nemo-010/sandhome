@@ -13,8 +13,8 @@
 # In copy mode each executable is a full copy (~100MB). The mode is
 # chosen by sh_memexec_ensure before any install; this module only prices its
 # own gate off it and writes the wrappers both modes need.
-TC_rust_DESC='Rust via rustup (rustc, cargo, rustup; minimal profile)'
-TC_rust_BINS='cargo/bin/rustup cargo/bin/cargo'
+TC_rust_DESC='Rust via rustup (rustc, cargo, rustup, rustdoc, cargo-clippy, cargo-fmt; minimal profile)'
+TC_rust_BINS='cargo/bin/rustup cargo/bin/cargo cargo/bin/rustc cargo/bin/rustdoc cargo/bin/cargo-clippy cargo/bin/cargo-fmt'
 
 # tc_rust_exec_mb -> the fresh-install exec need in MB: 25 in launch mode
 # (launcher copies plus the few real spawn-target copies), 150 in copy mode
@@ -125,15 +125,25 @@ sh_toolchain_rust_proxies() {
     sh_rr_rustup=$2
     sh_rr_host=$3
     mkdir -p "$sh_rr_cargo/bin" 2>/dev/null || return 0
-    if [ ! -x "$sh_rr_cargo/bin/cargo" ]; then
-        for sh_rr_c in "$sh_rr_rustup"/toolchains/*/bin/cargo; do
+    # EVERY COMMAND TC_rust_BINS ADVERTISES GETS A PROXY, BECAUSE THAT IS THE
+    # NAME A FRESH SHELL RESOLVES. Only cargo and rustup were proxied, so the
+    # exec view exposed no rustc and a fresh shell fell through to the host
+    # rustup shim, which answers "no default configured" (issue #135). The
+    # real binaries live under the toolchain dir; the proxy is a link to one,
+    # so the view mirrors a stable path and the env fragment still owns
+    # RUSTUP_HOME and RUSTC.
+    for sh_rr_name in cargo rustc rustdoc cargo-clippy cargo-fmt; do
+        if [ -x "$sh_rr_cargo/bin/$sh_rr_name" ]; then
+            continue
+        fi
+        for sh_rr_c in "$sh_rr_rustup"/toolchains/*/bin/"$sh_rr_name"; do
             if [ -f "$sh_rr_c" ]; then
-                ln -sfn "$sh_rr_c" "$sh_rr_cargo/bin/cargo" 2>/dev/null || \
-                    cp -f "$sh_rr_c" "$sh_rr_cargo/bin/cargo" 2>/dev/null || true
+                ln -sfn "$sh_rr_c" "$sh_rr_cargo/bin/$sh_rr_name" 2>/dev/null || \
+                    cp -f "$sh_rr_c" "$sh_rr_cargo/bin/$sh_rr_name" 2>/dev/null || true
                 break
             fi
         done
-    fi
+    done
     if [ ! -x "$sh_rr_cargo/bin/rustup" ] && [ -n "$sh_rr_host" ] && [ -x "$sh_rr_host" ]; then
         # Belt and braces beside the caller's sh_path_where: a host inside
         # the exec view or inside this very cargo dir is never a working
@@ -696,33 +706,34 @@ SHIMEOF
             "${SH_EXEC:-/tmp}"/*) sh_re_host_rustup='' ;;
         esac
     fi
-    if [ ! -x "$sh_re_cargo/bin/cargo" ] || [ ! -x "$sh_re_cargo/bin/rustup" ]; then
+    if [ ! -x "$sh_re_cargo/bin/cargo" ] || [ ! -x "$sh_re_cargo/bin/rustup" ] || \
+       [ ! -x "$sh_re_cargo/bin/rustc" ]; then
         sh_toolchain_rust_proxies "$sh_re_cargo" "$sh_re_rustup" "$sh_re_host_rustup"
-        if [ "${SH_HOME_EXEC:-unknown}" != yes ]; then
-            for sh_re_p in cargo rustup; do
-                [ -f "$sh_re_cargo/bin/$sh_re_p" ] || continue
-                sh_re_pv="$sh_re_view/cargo/bin/$sh_re_p"
-                if [ ! -e "$sh_re_pv" ]; then
-                    mkdir -p "$sh_re_view/cargo/bin" 2>/dev/null || continue
-                    if [ "${SH_VIEW_MODE:-copy}" = launch ]; then
-                        sh_memexec_stamp "$sh_re_cargo/bin/$sh_re_p" "$sh_re_pv" || \
-                            cp -f "$sh_re_cargo/bin/$sh_re_p" "$sh_re_pv" 2>/dev/null || true
-                    else
-                        rm -f "$sh_re_pv" 2>/dev/null
+    fi
+    if [ "${SH_HOME_EXEC:-unknown}" != yes ]; then
+        for sh_re_p in cargo rustup rustc rustdoc cargo-clippy cargo-fmt; do
+            [ -f "$sh_re_cargo/bin/$sh_re_p" ] || continue
+            sh_re_pv="$sh_re_view/cargo/bin/$sh_re_p"
+            if [ ! -e "$sh_re_pv" ]; then
+                mkdir -p "$sh_re_view/cargo/bin" 2>/dev/null || continue
+                if [ "${SH_VIEW_MODE:-copy}" = launch ]; then
+                    sh_memexec_stamp "$sh_re_cargo/bin/$sh_re_p" "$sh_re_pv" || \
                         cp -f "$sh_re_cargo/bin/$sh_re_p" "$sh_re_pv" 2>/dev/null || true
-                    fi
-                    [ -e "$sh_re_pv" ] && chmod 0755 "$sh_re_pv" 2>/dev/null || true
-                    # The framework's bin links ran inside the promote above,
-                    # before these entries existed, so link them here too:
-                    # without this a repair heals the view but leaves rustup
-                    # off PATH until the next cycle.
-                    if [ -e "$sh_re_pv" ]; then
-                        mkdir -p "$SH_EXEC_BIN" 2>/dev/null || true
-                        ln -sfn "$sh_re_pv" "$SH_EXEC_BIN/$sh_re_p" 2>/dev/null || true
-                    fi
+                else
+                    rm -f "$sh_re_pv" 2>/dev/null
+                    cp -f "$sh_re_cargo/bin/$sh_re_p" "$sh_re_pv" 2>/dev/null || true
                 fi
-            done
-        fi
+                [ -e "$sh_re_pv" ] && chmod 0755 "$sh_re_pv" 2>/dev/null || true
+                # The framework's bin links ran inside the promote above,
+                # before these entries existed, so link them here too:
+                # without this a repair heals the view but leaves rustup
+                # off PATH until the next cycle.
+                if [ -e "$sh_re_pv" ]; then
+                    mkdir -p "$SH_EXEC_BIN" 2>/dev/null || true
+                    ln -sfn "$sh_re_pv" "$SH_EXEC_BIN/$sh_re_p" 2>/dev/null || true
+                fi
+            fi
+        done
     fi
     # Requested targets are owed here too, against this tree's own rustup
     # with its home scoped: probe-green skips tc_rust_install on the managed

@@ -608,6 +608,29 @@ sh_toolchain_version() {
     printf ''
 }
 
+# sh_toolchain_has_doctor NAME -> 0 when the module declares a
+# tc_<name>_doctor health check. Used by the readiness gate so a check that
+# needs to spawn a process the way a user will (node re-executing itself,
+# issue #139) runs on exactly the toolchains that can answer it.
+sh_toolchain_has_doctor() {
+    sh_thd_name=$1
+    sh_toolchain_load "$sh_thd_name" >/dev/null 2>&1 || return 1
+    command -v "tc_${sh_thd_name}_doctor" >/dev/null 2>&1
+}
+
+# sh_toolchain_doctor NAME -> 0 when the module's own health check passes.
+# Isolated and bounded like the probe: a doctor hook that hangs is read as a
+# failure rather than allowed to hold the readiness gate open.
+sh_toolchain_doctor() {
+    sh_td_name=$1
+    sh_toolchain_load "$sh_td_name" >/dev/null 2>&1 || return 0
+    if ! command -v "tc_${sh_td_name}_doctor" >/dev/null 2>&1; then
+        return 0
+    fi
+    sh_run_isolated "${SH_PROBE_TIMEOUT_SECS:-60}" "${SH_LIB_DIR:-.}" "$(sh_toolchain_module "$sh_td_name")" "tc_${sh_td_name}_doctor" >/dev/null 2>&1
+    return $?
+}
+
 # sh_toolchain_bins NAME -> the declared relative executables.
 sh_toolchain_bins() {
     sh_tb_name=$1

@@ -23,25 +23,20 @@ sandhome_profile_main() {
     return 0
   fi
 
-  # # STOP: INTERACTIVE, NOT LOGIN. A tool that sends commands to a LOGIN shell would
-  # otherwise have its environment changed silently and after the caller's own
-  # setup. `$-` carries `i` only for a shell a person is typing at.
-  # A harness that spawns a non-login, non-interactive shell per tool call never
-  # reads this file at all (neither profile nor rc), so widening this guard
-  # would not reach it and would run env.sh on every shell start that does.
-  # That shell loads `$SANDHOME_HOME/entry.sh` instead, which needs no PATH
-  # and no login: `. "${XDG_DATA_HOME:-$HOME/.local/share}/sandhome/entry.sh"`
-  # (issue #122). This guard stays, and the entry point is the non-interactive
-  # path, so neither depends on the other.
-  case "$-" in
-    *i*) ;;
-    *)   return 0 ;;
-  esac
-
-  # -- the environment, if a shell has not read it already ---------------------
+  # -- the environment, for EVERY shell that reads this file -----------------
+  # # STOP: THE ENVIRONMENT IS LOADED BEFORE THE INTERACTIVE GUARD, BECAUSE A
+  # NON-INTERACTIVE LOGIN SHELL IS THE HARNESS SHAPE. `bash -lc`, `sh -l -c` and
+  # anything that reads `.profile` without an interactive `$-` got the
+  # bootstrap's unconditional `PATH=$SH_EXEC_BIN:...` line but never the exec
+  # and home roots, so every launch-mode memexec copy in the exec bin died with
+  # "cannot map this copy back" while `doctor` stayed green
+  # (issue #131). Loading env.sh here is what makes that PATH line safe. Only
+  # the environment is loaded; history and the rest below stay interactive-only,
+  # and a harness that reads neither profile nor rc still uses entry.sh
+  # (issue #122).
   # # NOTE: LOADING env.sh IS WHY THIS FILE IS INSTALLED. It puts the exec view on
   # PATH and every toolchain fragment into the environment, in one place. The
-  # guard is that the file exists; a login shell that already sourced it has
+  # guard is that the file exists; a shell that already sourced it has
   # SANDHOME_HOME set.
   if [ -z "${SANDHOME_HOME:-}" ] && [ -n "${HOME:-}" ]; then
     for _shp_env in "$HOME/.local/share/sandhome/env.sh" \
@@ -53,6 +48,15 @@ sandhome_profile_main() {
       fi
     done
   fi
+
+  # # NOTE: INTERACTIVE-ONLY FROM HERE. A tool that sends commands to a LOGIN
+  # shell would have the rest of its environment changed silently and after the
+  # caller's own setup. `$-` carries `i` only for a shell a person is typing at;
+  # history and the Windows-drive move below are for that shell only.
+  case "$-" in
+    *i*) ;;
+    *)   return 0 ;;
+  esac
 
   # -- PATH, de-duplicated and nothing else ------------------------------------
   # # NOTE: A login shell inside a login shell runs /etc/profile again, and /etc/profile

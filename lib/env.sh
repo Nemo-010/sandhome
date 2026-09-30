@@ -486,6 +486,55 @@ sh_install_profile() {
     return 0
 }
 
+# sh_bake_command SRC DST -> install the sandhome launcher at DST with the
+# durable checkout and home paths baked into it. THERE IS EXACTLY ONE WRITER OF
+# THAT FILE, BECAUSE EVERY INSTALL/REPAIR USED TO COPY THE UNBAKED TEMPLATE OVER
+# THE BOOTSTRAP'S BAKE: `env -i $SH_EXEC_BIN/sandhome doctor` exited 2 after any
+# install or repair while the log still claimed a bake (issue #133). A quote in
+# either path is refused rather than half-baked; an empty bake keeps HOME lookup,
+# which is the documented fallback.
+sh_bake_command() {
+    sh_bc_src=$1
+    sh_bc_dst=$2
+    [ -r "$sh_bc_src" ] && [ -n "$sh_bc_dst" ] || return 1
+    if [ "$(sh_lex_normalize "$sh_bc_src")" = "$(sh_lex_normalize "$sh_bc_dst")" ]; then
+        return 0
+    fi
+    cp -f "$sh_bc_src" "$sh_bc_dst" 2>/dev/null || return 1
+    chmod 0755 "$sh_bc_dst" 2>/dev/null || true
+    case "${SH_REPO_DIR:-}:${SH_HOME:-}" in
+        *\'*)
+            sh_warn "not baking the paths into $sh_bc_dst (a quote in $SH_REPO_DIR or $SH_HOME)"
+            return 0 ;;
+    esac
+    sh_bc_tmp="$sh_bc_dst.bake.$$"
+    sh_bc_repo=0
+    sh_bc_home=0
+    sh_bc_ok=0
+    {
+        while IFS= read -r sh_bc_l || [ -n "$sh_bc_l" ]; do
+            case "$sh_bc_l" in
+                SH_BAKED_REPO_DIR=*)
+                    printf "SH_BAKED_REPO_DIR='%s'\n" "$SH_REPO_DIR"
+                    sh_bc_repo=1 ;;
+                SH_BAKED_HOME=*)
+                    printf "SH_BAKED_HOME='%s'\n" "$SH_HOME"
+                    sh_bc_home=1 ;;
+                *) printf '%s\n' "$sh_bc_l" ;;
+            esac
+        done < "$sh_bc_dst"
+    } > "$sh_bc_tmp" 2>/dev/null && { [ "$sh_bc_repo" = 1 ] || [ "$sh_bc_home" = 1 ]; } && \
+        mv -f "$sh_bc_tmp" "$sh_bc_dst" 2>/dev/null && \
+        chmod 0755 "$sh_bc_dst" 2>/dev/null && sh_bc_ok=1
+    rm -f "$sh_bc_tmp" 2>/dev/null
+    if [ "$sh_bc_ok" = 1 ] && [ "$sh_bc_repo" = 1 ] && [ "$sh_bc_home" = 1 ]; then
+        sh_step "baked $SH_REPO_DIR and $SH_HOME into $sh_bc_dst"
+    else
+        sh_warn "the bake at $sh_bc_dst is incomplete (repo=$sh_bc_repo home=$sh_bc_home); a no-HOME launch falls back to HOME lookup"
+    fi
+    return 0
+}
+
 # sh_exec_install_launchers -> put sandhome and errandsh on the chosen exec bin.
 # STOP: ONLY THE BOOTSTRAP USED TO PLACE THE LAUNCHER. A create plan can move the
 # exec root (a new box, a cleared tmpfs, a root that filled and was replaced),
@@ -502,9 +551,8 @@ sh_exec_install_launchers() {
     [ "${SH_DRY_RUN:-0}" = 1 ] && return 0
     mkdir -p "$sh_eil_bin" 2>/dev/null || return 0
     sh_eil_src="$sh_eil_repo/bin/sandhome"
-    if [ -r "$sh_eil_src" ] && [ "$(sh_lex_normalize "$sh_eil_src")" != "$(sh_lex_normalize "$sh_eil_bin/sandhome")" ]; then
-        cp -f "$sh_eil_src" "$sh_eil_bin/sandhome" 2>/dev/null && \
-            chmod 0755 "$sh_eil_bin/sandhome" 2>/dev/null || true
+    if [ -r "$sh_eil_src" ]; then
+        sh_bake_command "$sh_eil_src" "$sh_eil_bin/sandhome" || true
     fi
     # faketty as well as errandsh: errandsh finds it beside itself, so both
     # copies are needed for a full-screen program to work from the exec root.
@@ -720,9 +768,28 @@ sh_global_view_names() {
         # it). An ELF binary cannot look itself up, and a real file installed in
         # the view is not a wrapper for another copy, so only a symlink to a
         # script already on PATH is filtered; PATH keeps serving the tool.
-        if [ -L "$SH_EXEC_BIN/$sh_gv_n" ] && sh_is_script "$SH_EXEC_BIN/$sh_gv_n" && \
-           [ -n "$(sh_path_where "$sh_gv_n")" ]; then
-            continue
+        #
+        # STOP: A PATH HIT INSIDE THIS TREE IS NOT "PATH WILL SERVE IT". The
+        # whole point of the hook is a shell that has NOT sourced env.sh, and
+        # views/<name>/bin and npm-global/bin are on PATH only BECAUSE env.sh
+        # put them there. `npm` and `npx` are symlinks to the node view's shell
+        # wrappers, so the old filter dropped both and a fresh shell had node
+        # but no npm (issue #132). Only a hit outside the exec root means a
+        # host copy will answer; anything under $SH_EXEC is this tree's own
+        # indirection and must be exposed by the hook.
+        if [ -L "$SH_EXEC_BIN/$sh_gv_n" ] && sh_is_script "$SH_EXEC_BIN/$sh_gv_n"; then
+            sh_gv_hit=$(sh_path_where "$sh_gv_n" 2>/dev/null)
+            if [ -n "$sh_gv_hit" ]; then
+                sh_gv_own=no
+                if [ -z "${SH_EXEC:-}" ]; then
+                    sh_gv_own=no
+                else
+                    case "$sh_gv_hit" in
+                        "$SH_EXEC"|"$SH_EXEC"/*) sh_gv_own=yes ;;
+                    esac
+                fi
+                [ "$sh_gv_own" = yes ] || continue
+            fi
         fi
         printf '%s\n' "$sh_gv_n"
     done
@@ -743,9 +810,78 @@ sh_global_skip_entry() {
     if [ -n "${SH_EXEC:-}" ]; then
         case "$1" in
             "$SH_EXEC") return 0 ;;
+            # A toolchain's own bin directory is written by the installer
+            # (npm prefixes, cargo install roots, uv tool bins, view bins),
+            # and redirecting it through a symlink makes every RELATIVE link
+            # that installer writes dangle. npm writes
+            #   http-server -> ../lib/node_modules/http-server/bin/http-server
+            # and once bin is a symlink that resolves against the wrong
+            # directory, so every `npm i -g` CLI is dead (issue #138). The
+            # hook belongs in a neutral PATH directory, never one of these.
+            "$SH_EXEC"/npm-global/bin|"$SH_EXEC"/uv-bin|"$SH_EXEC"/go-bin|"$SH_EXEC"/cargo-install/bin) return 0 ;;
+            "$SH_EXEC"/*/bin|"$SH_EXEC"/views/*) return 0 ;;
         esac
     fi
     return 1
+}
+
+# sh_global_relocate_record OLDBASE DIR -> undo a hook that an earlier install
+# recorded in DIR before the skip list refused toolchain bin directories. It
+# only ever touches our own symlink (the recorded target, or a path under the
+# exec root), restores DIR to the state the record says it had, and rescues any
+# dangling RELATIVE link an installer wrote through the redirect: npm writes
+# `http-server -> ../lib/node_modules/...` and those resolve correctly only
+# once they are back where they were written (issue #138).
+sh_global_relocate_record() {
+    sh_grl_old=$1
+    sh_grl_dir=$2
+    [ -n "$sh_grl_old" ] && [ -n "$sh_grl_dir" ] || return 0
+    [ -r "$sh_grl_old/dirs" ] || return 0
+    sh_grl_link=''
+    sh_grl_orig=''
+    sh_grl_target=''
+    sh_grl_i=0
+    while IFS= read -r sh_grl_d || [ -n "$sh_grl_d" ]; do
+        [ -n "$sh_grl_d" ] || continue
+        if [ "$sh_grl_d" = "$sh_grl_dir" ]; then
+            [ -r "$sh_grl_old/d/$sh_grl_i/link" ] && IFS= read -r sh_grl_link < "$sh_grl_old/d/$sh_grl_i/link"
+            [ -r "$sh_grl_old/d/$sh_grl_i/orig" ] && IFS= read -r sh_grl_orig < "$sh_grl_old/d/$sh_grl_i/orig"
+            [ -r "$sh_grl_old/d/$sh_grl_i/target" ] && IFS= read -r sh_grl_target < "$sh_grl_old/d/$sh_grl_i/target"
+            break
+        fi
+        sh_grl_i=$((sh_grl_i + 1))
+    done < "$sh_grl_old/dirs"
+    [ "$sh_grl_link" = yes ] || return 0
+    [ -L "$sh_grl_dir" ] || return 0
+    sh_grl_cur=$(readlink "$sh_grl_dir" 2>/dev/null) || sh_grl_cur=''
+    [ -n "$sh_grl_cur" ] || return 0
+    case "$sh_grl_cur" in
+        "$sh_grl_target"|"${SH_EXEC:-/nonexistent}"/*) ;;
+        *) return 0 ;;
+    esac
+    [ -n "$sh_grl_target" ] || sh_grl_target=$sh_grl_cur
+    rm -f "$sh_grl_dir" 2>/dev/null || true
+    # A toolchain bin directory must exist for the installer to write into it,
+    # so it comes back as a directory whatever the record says (an absent entry
+    # was only absent because the hook took it).
+    case "$sh_grl_orig" in
+        link:*) ln -s "${sh_grl_orig#link:}" "$sh_grl_dir" 2>/dev/null || mkdir -p "$sh_grl_dir" 2>/dev/null || true ;;
+        *)      mkdir -p "$sh_grl_dir" 2>/dev/null || true ;;
+    esac
+    if [ -d "$sh_grl_target" ] && [ -d "$sh_grl_dir" ]; then
+        for sh_grl_f in "$sh_grl_target"/* "$sh_grl_target"/.[!.]*; do
+            [ -L "$sh_grl_f" ] || continue
+            [ -e "$sh_grl_f" ] && continue
+            sh_grl_n=${sh_grl_f##*/}
+            case "$sh_grl_n" in sandhome|.sandhome-dispatch) continue ;; esac
+            sh_grl_t=$(readlink "$sh_grl_f" 2>/dev/null) || continue
+            case "$sh_grl_t" in /*) continue ;; esac
+            [ -e "$sh_grl_dir/$sh_grl_n" ] && continue
+            mv "$sh_grl_f" "$sh_grl_dir/$sh_grl_n" 2>/dev/null || true
+        done
+    fi
+    sh_warn "$sh_grl_dir was a toolchain bin directory taken by an earlier global hook; moved the hook out and restored it (issue #138)"
+    return 0
 }
 
 # sh_global_choose_dirs -> every `PATH` entry that can host the hook, one per
@@ -1117,6 +1253,13 @@ sh_global_install() {
     if [ -r "$sh_gi_old/dirs" ]; then
         while IFS= read -r sh_gi_pd || [ -n "$sh_gi_pd" ]; do
             [ -n "$sh_gi_pd" ] || continue
+            # A directory the skip list now refuses (a toolchain bin taken by
+            # an older hook) is not re-planned: it is repaired on the way out
+            # (issue #138).
+            if sh_global_skip_entry "$sh_gi_pd"; then
+                sh_global_relocate_record "$sh_gi_old" "$sh_gi_pd"
+                continue
+            fi
             sh_gi_dup=no
             while IFS= read -r sh_gi_pp || [ -n "$sh_gi_pp" ]; do
                 [ "$sh_gi_pp" = "$sh_gi_pd" ] && { sh_gi_dup=yes; break; }

@@ -9,11 +9,15 @@ TC_bun_EXEC_MB=200
 # discover it when the network is gone (issue #125).
 TC_bun_DYNAMIC='registry installs (bun install) at run time'
 
-# tc_bun_exec_mb -> the fresh-install exec need in MB: 12 in launch mode (one
-# launcher copy for the single binary), 200 in copy mode (issue #92).
+# tc_bun_copy_bins -> the bun runtime spawns itself for workers and
+# subprocesses, so a launcher view makes the child path a memfd (issue #139).
+tc_bun_copy_bins() { printf 'bun'; }
+
+# tc_bun_exec_mb -> the fresh-install exec need in MB: 120 in launch mode
+# (bun is on the copy list, so the real binary lands), 200 in copy mode.
 tc_bun_exec_mb() {
     if [ "${SH_VIEW_MODE:-copy}" = launch ]; then
-        printf '12'
+        printf '120'
     else
         printf '200'
     fi

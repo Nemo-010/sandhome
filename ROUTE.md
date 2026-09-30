@@ -180,8 +180,23 @@ code, so it overrules any other page that disagrees with it.
 
 ### The skills, where the harness finds them.
 
-A harness discovers skills from `~/.agents/skills/` (Pi also reads
-`~/.pi/agent/skills/`). Without a clone, fetch each one by URL:
+The setup already installs all three skills into both locations a harness reads
+(`~/.agents/skills/` and, when Pi state exists, `~/.pi/agent/skills/`). The
+network-only bootstrap copies them; a clone links them by name. So there is
+nothing to fetch here, and the `ls` below is a confirmation rather than a step:
+
+```sh
+ls "$HOME/.agents/skills"/*/SKILL.md "$HOME/.pi/agent/skills"/*/SKILL.md 2>/dev/null
+```
+
+Read the three in this session. A new session picks them up on start, and a
+harness with a resource reload (Pi: `/reload`) picks up new or changed skills
+without one; a harness that scans skills at startup picks them up in the next
+session.
+
+Only if the setup was run with `--no-skills`, or you want a clone's skills
+linked by name rather than copied, do it by hand. Without a clone, fetch each
+one by URL:
 
 ```sh
 mkdir -p "$HOME/.agents/skills/sandhome" "$HOME/.agents/skills/errandsh" "$HOME/.agents/skills/sealed-sandbox"
@@ -194,16 +209,6 @@ From a clone, link each skill by name instead of copying, so later pulls update 
 
 ```sh
 for s in sandhome errandsh sealed-sandbox; do ln -s "$PWD/skills/$s" "$HOME/.agents/skills/$s"; done
-```
-
-Confirm all three landed, then read them in this session. A new session picks
-them up on start, and a harness with a resource reload (Pi: `/reload`) picks up
-new or changed skills without one. A harness that scans skills at startup picks
-them up in the next session; if yours supports a resource reload, use it rather
-than restarting.
-
-```sh
-ls "$HOME/.agents/skills/sandhome/SKILL.md" "$HOME/.agents/skills/errandsh/SKILL.md" "$HOME/.agents/skills/sealed-sandbox/SKILL.md"
 ```
 
 ---
@@ -225,6 +230,8 @@ More than one row can apply and then both are read.
 | `doctor` reports `FAIL exec_space=low` or `=critical` | the exec root is draining and the next build will fail with `no space left on device`. `sandhome space` names the state and the numbers, `sandhome space --probe` lists roomier candidates, `sandhome gc` reclaims sandhome's own caches, and re-running the first command with `--exec DIR` moves everything |
 | `doctor` reports `FAIL exec_link_<tool>=broken` | a link in the exec view is not executable, or points at itself; `sandhome repair <tool>` rebuilds it and downloads nothing. A tool that was adopted rather than installed is the usual cause, and `install` is the command that adopts, so it is not the one to reach for first |
 | a tool is on PATH but a shell that inherited nothing cannot find it | it was adopted and could not be linked into the exec view; `sandhome repair <tool>` retries the link and `sandhome install --force <tool>` puts a copy there |
+| a non-interactive login shell (`bash -lc`) answers `cannot map this copy back to its payload; set SANDHOME_EXEC and SANDHOME_HOME` for node, jq, cargo or another launcher copy | that shell resolved an exec-bin launcher before the environment was loaded; the profile fragment now loads `env.sh` for every login shell, so re-run the setup (or `sandhome repair`) to rewrite it. `. "${XDG_DATA_HOME:-$HOME/.local/share}/sandhome/entry.sh"` is the immediate way in |
+| a headless browser, Playwright/Puppeteer, webpack/vite or another UI tool dies with `spawn /memfd:sandhome (deleted) ENOENT` | the node view is a launcher, so `process.execPath` is an anonymous memfd. `node`, `deno` and `bun` are real copies by default now; if `sandhome report` still says `view=launch` for node, `sandhome install --force node` rebuilds it. `sandhome doctor` reports `FAIL toolchain_node_spawn` when this is true |
 | `sandhome global --status` shows `state=stale`, or a fresh shell does not find `sandhome` | a recorded hook directory no longer answers a fresh shell; `sandhome global` repairs every recorded directory. When the report says `global=none` the host had no usable directory, and the entry point beside the home is the way in: `. "${XDG_DATA_HOME:-$HOME/.local/share}/sandhome/entry.sh"` |
 | `doctor` reports a `FAIL <VAR>=unset` for `GOBIN`, `GOCACHE`, `CARGO_INSTALL_ROOT` or `NPM_CONFIG_PREFIX` | that toolchain was adopted, so its fragment did not carry the exec-root paths; `sandhome install --force <tool>` writes a fragment that does |
 | the exec root was cleared by a restart (tmpfs) and `sandhome` is gone | run `sandhome resume`: it re-plans the roots, rebuilds every recorded view without fetching, then runs `doctor` and exits with its code. Only when `env.sh` itself is gone, re-run step 2 instead |

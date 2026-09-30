@@ -1471,5 +1471,29 @@ lang_line=$(sh -c "$sh_ts_fn; sh_toolset_names languages" 2>/dev/null)
 t_contains "$lang_line" 'cmake' 'languages carries cmake, not just compilers'
 t_contains "$lang_line" 'pkgconf' 'languages carries pkgconf'
 
+# THE LAUNCHER BAKE SURVIVES A REWRITE (issue #133). The bootstrap baked the
+# durable paths into exec/bin/sandhome and every install/repair copied the raw
+# template over it, so `env -i exec/bin/sandhome` exited 2 after any install
+# while the log still claimed a bake. Both writers go through sh_bake_command
+# now; a second write must still bake.
+ub=$tmp/bake
+mkdir -p "$ub/home" 2>/dev/null
+( SH_HOME="$ub/home" SH_REPO_DIR="$ROOT" sh_bake_command "$ROOT/bin/sandhome" "$ub/sandhome" >/dev/null 2>&1 )
+t_is "$(grep -m1 '^SH_BAKED_REPO_DIR=' "$ub/sandhome" 2>/dev/null)" "SH_BAKED_REPO_DIR='$ROOT'" 'the launcher bake records the repo (#133)'
+t_is "$(env -i "$ub/sandhome" version </dev/null 2>&1 | head -1)" 'sandhome/1' 'a baked launcher runs with no environment (#133)'
+( SH_HOME="$ub/home" SH_REPO_DIR="$ROOT" sh_bake_command "$ROOT/bin/sandhome" "$ub/sandhome" >/dev/null 2>&1 )
+t_is "$(grep -m1 '^SH_BAKED_REPO_DIR=' "$ub/sandhome" 2>/dev/null)" "SH_BAKED_REPO_DIR='$ROOT'" 'a second write re-bakes rather than clobbering (#133)'
+t_is "$(env -i "$ub/sandhome" version </dev/null 2>&1 | head -1)" 'sandhome/1' 'the re-baked launcher still runs with no environment (#133)'
+
+# THE PROFILE FRAGMENT LOADS THE ENVIRONMENT FOR A NON-INTERACTIVE LOGIN
+# SHELL (issue #131). `bash -lc` reads .profile but carries no interactive `$-`,
+# and the exec bin the bootstrap puts first is launch-mode memexec copies that
+# cannot map back without the exec and home roots. The fragment used to return
+# before loading env.sh.
+pr=$tmp/profile
+mkdir -p "$pr/.local/share/sandhome" 2>/dev/null
+printf 'SANDHOME_PROBE_MARK=loaded\nexport SANDHOME_PROBE_MARK\n' > "$pr/.local/share/sandhome/env.sh"
+t_is "$(env -i HOME="$pr" PATH=/usr/bin:/bin sh -c '. "$0"; printf "%s" "${SANDHOME_PROBE_MARK:-unset}"' "$ROOT/lib/profile.sh" 2>/dev/null)" 'loaded' 'profile.sh loads env.sh in a non-interactive shell (#131)'
+
 rm -rf "$tmp"
 t_end

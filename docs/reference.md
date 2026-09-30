@@ -324,7 +324,7 @@ usage: sh bootstrap.sh [options]
 | `python` | `(via its own PATH fragment)` | CPython, installed by uv (uv is always left on PATH) |
 | `qemuuser` | `bin/qemu-x86_64` | qemu-user, the static user-mode emulators (run a guest ELF, trace its syscalls without ptrace) |
 | `ripgrep` | `bin/rg` | ripgrep (rg), the fast recursive search tool |
-| `rust` | `cargo/bin/rustup cargo/bin/cargo` | Rust via rustup (rustc, cargo, rustup; minimal profile) |
+| `rust` | `cargo/bin/rustup cargo/bin/cargo cargo/bin/rustc cargo/bin/rustdoc cargo/bin/cargo-clippy cargo/bin/cargo-fmt` | Rust via rustup (rustc, cargo, rustup, rustdoc, cargo-clippy, cargo-fmt; minimal profile) |
 | `shellcheck` | `bin/shellcheck` | ShellCheck, the shell script linter (single static binary) |
 | `shfmt` | `bin/shfmt` | shfmt, a shell script formatter (single static binary) |
 | `yq` | `bin/yq` | yq, a YAML/TOML/XML command-line processor (single binary) |

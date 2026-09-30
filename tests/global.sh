@@ -363,4 +363,42 @@ env -i PATH=/usr/bin:/bin HOME="$work/fake" \
 t_is "$([ -d "$gh_ihome/global" ] && printf yes || printf no)" 'no' \
      'SANDHOME_GLOBAL=0 keeps `install` from writing the hook'
 
+# A SYMLINK-TO-SCRIPT OWNED BY THIS TREE IS EXPOSED (issue #132). npm is a
+# #!/bin/sh wrapper in the node view. env.sh puts that view on PATH, so the old
+# filter saw a PATH hit and skipped npm; but a fresh hook shell has NOT sourced
+# env.sh, so nothing served it. A hit under the exec root is this tree's own
+# indirection, never a host copy that will answer.
+gh_vbin=$gh_exec/views/node/bin
+mkdir -p "$gh_vbin" 2>/dev/null
+printf '#!/bin/sh\nprintf "npm-wrap|%%s\\n" "$1"\n' > "$gh_vbin/npm"
+chmod 0755 "$gh_vbin/npm" 2>/dev/null
+ln -sfn "$gh_vbin/npm" "$gh_bin/npm"
+gh_names=$( gh_env; PATH="$gh_vbin:$gh_bin:/usr/bin:/bin"; export PATH; sh_global_view_names 2>/dev/null )
+t_contains "$gh_names" 'npm' 'a view symlink-to-script is exposed by the hook (#132)'
+rm -f "$gh_bin/npm" "$gh_vbin/npm" 2>/dev/null
+
+# A TOOLCHAIN BIN DIRECTORY IS NEVER TAKEN BY THE HOOK (issue #138). npm writes
+# its global CLI links RELATIVE to the prefix bin, and redirecting that dir
+# through a symlink made every one of them dangle.
+( gh_env; sh_global_skip_entry "$gh_exec/npm-global/bin" ) 2>/dev/null
+t_is "$?" 0 'the hook refuses the npm prefix bin (#138)'
+( gh_env; sh_global_skip_entry "$gh_exec/views/node/bin" ) 2>/dev/null
+t_is "$?" 0 'the hook refuses a view bin (#138)'
+( gh_env; sh_global_skip_entry "$gh_exec/go-bin" ) 2>/dev/null
+t_is "$?" 0 'the hook refuses a toolchain bin (#138)'
+# An existing hook recorded in one of those directories is moved out, and the
+# relative link an installer wrote through the redirect is rescued.
+gh_rl=$work/relocate
+mkdir -p "$gh_rl/old/d/0" "$gh_exec/global" 2>/dev/null
+ln -sfn "$gh_exec/global" "$gh_rl/npm-global-bin"
+ln -sfn '../lib/node_modules/http-server/bin/http-server' "$gh_exec/global/http-server"
+printf '%s\n' "$gh_rl/npm-global-bin" > "$gh_rl/old/dirs"
+printf 'yes\n' > "$gh_rl/old/d/0/link"
+printf 'absent\n' > "$gh_rl/old/d/0/orig"
+printf '%s\n' "$gh_exec/global" > "$gh_rl/old/d/0/target"
+( gh_env; sh_global_relocate_record "$gh_rl/old" "$gh_rl/npm-global-bin" ) >/dev/null 2>&1
+t_ok "$([ -d "$gh_rl/npm-global-bin" ] && [ ! -L "$gh_rl/npm-global-bin" ]; echo $?)" 'a toolchain bin taken by an old hook is restored (#138)'
+t_is "$(readlink "$gh_rl/npm-global-bin/http-server" 2>/dev/null)" '../lib/node_modules/http-server/bin/http-server' 'the dangling CLI link is rescued (#138)'
+rm -f "$gh_exec/global/http-server" 2>/dev/null
+
 t_end

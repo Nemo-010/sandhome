@@ -8,14 +8,15 @@ TC_deno_EXEC_MB=150
 # (issue #125).
 TC_deno_DYNAMIC='remote imports and self-upgrade (deno upgrade) at run time'
 
-# tc_deno_exec_mb -> the fresh-install exec need in MB: 8 in launch mode (one
-# launcher copy for the single binary), 150 in copy mode (the full binary).
-# Read by the install gate below and the feasibility plan so the two never
-# disagree. Without it a launch-mode install was refused for 150MB of exec
-# space its 20KB view never needed (issue #92).
+# tc_deno_copy_bins -> the deno runtime spawns itself for workers and
+# subprocesses, so a launcher view makes the child path a memfd (issue #139).
+tc_deno_copy_bins() { printf 'deno'; }
+
+# tc_deno_exec_mb -> the fresh-install exec need in MB: 160 in launch mode
+# (deno is on the copy list, so the real binary lands), 150 in copy mode.
 tc_deno_exec_mb() {
     if [ "${SH_VIEW_MODE:-copy}" = launch ]; then
-        printf '8'
+        printf '160'
     else
         printf '150'
     fi

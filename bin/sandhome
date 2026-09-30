@@ -1470,6 +1470,7 @@ cmd_project() {
         sh_pj_node=1
     fi
     sh_pj_dir=$SH_EXEC/projects/$sh_pj_name
+    sh_pj_failed=0
     if ! mkdir -p "$sh_pj_dir" 2>/dev/null; then
         sh_fail "could not create $sh_pj_dir"
         return 1
@@ -1519,12 +1520,14 @@ cmd_project() {
                 fi
             else
                 sh_warn 'uv venv failed; python half skipped'
+                sh_pj_failed=1
             fi
         elif sh_have python3; then
             if python3 -m venv "$sh_pj_dir/.venv" >/dev/null 2>&1; then
                 sh_say "python: venv $sh_pj_dir/.venv"
             else
                 sh_warn 'python -m venv failed; python half skipped'
+                sh_pj_failed=1
             fi
         else
             sh_warn 'no uv or python3 on PATH; python half skipped (sandhome install python)'
@@ -1534,17 +1537,29 @@ cmd_project() {
         fi
     fi
     if [ "$sh_pj_node" = 1 ]; then
+        # A CALLER OF `sandhome project` MAY HAVE NO ENVIRONMENT LOADED, AND
+        # THE COMMAND EXISTS FOR THAT CALLER (issues #74, #137). Running npm
+        # against the inherited PATH found `sh_have node` true while npm was
+        # unreachable, and the failure was swallowed by 2>&1; applying the
+        # written environment here makes npm resolve the same copy the global
+        # hook would, and the error is named rather than hidden.
+        sh_env_apply 2>/dev/null || true
         if sh_have node; then
             if [ ! -f "$sh_pj_dir/package.json" ]; then
-                if ( CDPATH='' cd -- "$sh_pj_dir" 2>/dev/null && npm init -y >/dev/null 2>&1 ); then
+                sh_pj_npmout=$( ( CDPATH='' cd -- "$sh_pj_dir" 2>/dev/null && npm init -y ) 2>&1 )
+                sh_pj_npmrc=$?
+                if [ "$sh_pj_npmrc" = 0 ] && [ -f "$sh_pj_dir/package.json" ]; then
                     sh_say "node: npm init in $sh_pj_dir"
                 else
-                    sh_warn 'npm init failed; node half skipped'
+                    sh_pj_failed=1
+                    sh_warn "npm init failed${sh_pj_npmout:+: $(sh_first_line "$sh_pj_npmout")}; node half skipped"
                 fi
             else
                 sh_say 'node: package.json already present'
             fi
-            sh_say "node: work in ./$sh_pj_name (npm install, npx, native CLIs all run there)"
+            if [ -f "$sh_pj_dir/package.json" ]; then
+                sh_say "node: work in ./$sh_pj_name (npm install, npx, native CLIs all run there)"
+            fi
         else
             sh_warn 'no node on PATH; node half skipped (sandhome install node)'
         fi
@@ -1553,7 +1568,10 @@ cmd_project() {
     # exec root does not survive a restart (re-run this command), and a
     # native payload must live here, not on the work tree (issue #72).
     sh_say "note: $sh_pj_dir lives on the exec root; a tmpfs restart clears it, and this command rebuilds it"
-    return 0
+    # A tool that was PRESENT and failed is a non-zero exit so a script can
+    # react; a tool that is absent still leaves the other half usable and the
+    # warning says so, which is the old behavior and stays exit 0 (issue #137).
+    return "$sh_pj_failed"
 }
 # # NOTE: BOTH PROGRAMS REPORT THE SAME SCHEMA STRING, AND A READER WHO CHECKS
 # ONE HAS TO CHECK THE SAME ONE. `bootstrap.sh --version` printed `bootstrap/1`
@@ -1722,6 +1740,16 @@ case "${2:-}" in
         esac ;;
 esac
 
+# A BARE `sandhome` IS THE DISCOVERY PATH, AND IT IS NOT AN ERROR (issue #136).
+# The dispatcher used to default the case word to `help` and then `shift` with
+# $#=0, which dash reports as "shift: can't shift that many" over the usage the
+# reader actually wanted. Answer it here, before any shift, so `sandhome` and
+# `sandhome help` are the same clean exit 0 on every POSIX shell.
+if [ "$#" -eq 0 ]; then
+    cmd_help ''
+    exit 0
+fi
+
 case "${1:-help}" in
     doctor)      shift; cmd_doctor "$@" ;;
     status)      shift; cmd_status "$@" ;;
@@ -1743,9 +1771,9 @@ case "${1:-help}" in
     add) case "${2:-}" in -h|--help) shift; cmd_add "$@" ;; *) sh_cmd_needs_roots add; shift; cmd_add "$@" ;; esac ;;
     project) case "${2:-}" in -h|--help) shift; cmd_project "$@" ;; *) sh_cmd_needs_roots project; shift; cmd_project "$@" ;; esac ;;
     test)        cmd_test ;;
-    selftest)    shift; cmd_selftest "${1:-}" ;;
+    selftest)    [ "$#" -gt 0 ] && shift; cmd_selftest "${1:-}" ;;
     version|--version) cmd_version ;;
-    help|-h|--help) shift; cmd_help "${1:-}" ;;
+    help|-h|--help) [ "$#" -gt 0 ] && shift; cmd_help "${1:-}" ;;
     *)           usage >&2; sh_die "unknown command $1" ;;
 esac
 

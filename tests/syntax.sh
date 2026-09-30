@@ -179,4 +179,18 @@ else
     t_skip 'no shellcheck on PATH to lint with (sandhome install shellcheck)'
 fi
 
+# A BARE `sandhome` IS USAGE, NOT A SHELL DIAGNOSTIC (issue #136). Under dash,
+# `shift` with no positional parameters wrote "can't shift that many" over the
+# usage text the reader wanted. This path needs no planned roots, so it is
+# measured directly.
+if command -v dash >/dev/null 2>&1; then
+    sh_na_err=$(dash "$ROOT/bin/sandhome" 2>&1 >/dev/null </dev/null)
+    sh_na_rc=$?
+    t_is "$sh_na_err" '' 'dash bin/sandhome prints nothing on stderr (#136)'
+    t_is "$sh_na_rc" 0 'dash bin/sandhome exits 0 (#136)'
+    t_contains "$(dash "$ROOT/bin/sandhome" 2>/dev/null </dev/null | head -1)" 'usage: sandhome' 'dash bin/sandhome prints usage (#136)'
+else
+    t_skip 'no dash to check the bare-command path with'
+fi
+
 t_end

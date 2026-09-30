@@ -810,6 +810,21 @@ case "$proj_bare" in
 esac
 t_is "$?" 0 'the skipped half still exits 0'
 
+# THE NODE HALF APPLIES THE ENVIRONMENT (issue #137). `sandhome project` is
+# for a caller whose shell is not set up, so npm reachable only through the
+# written env.sh must still be found and run; the old code called npm against
+# the caller's bare PATH and swallowed the failure with 2>&1.
+mkdir -p "$work/phome2" "$work/envnpm/bin" "$work/pwork3" 2>/dev/null
+printf '#!/bin/sh\nexit 0\n' > "$work/envnpm/bin/node"
+printf '#!/bin/sh\n: > ./package.json\n' > "$work/envnpm/bin/npm"
+chmod 0755 "$work/envnpm/bin/node" "$work/envnpm/bin/npm" 2>/dev/null
+printf 'PATH="%s:$PATH"\nexport PATH\n' "$work/envnpm/bin" > "$work/phome2/env.sh"
+proj_env=$(cd "$work/pwork3" && SANDHOME_HOME="$work/phome2" SANDHOME_EXEC="$work/pexec2" \
+    SANDHOME_REPO_DIR="$ROOT" PATH="/usr/bin:/bin" \
+    sh "$ROOT/bin/sandhome" project --node envjs 2>&1)
+t_is "$?" 0 'project finds npm through the written environment (#137)'
+t_ok "$([ -f "$work/pexec2/projects/envjs/package.json" ]; echo $?)" 'the env-only npm created package.json (#137)'
+
 # THE REQUEST IS PRICED BEFORE ANYTHING IS SPENT (issue #75). One feas
 # line per toolchain plus a total, all on stderr; names that do not fit
 # are refused before any fit name installs. The free space is stubbed
@@ -1272,22 +1287,73 @@ case "$(cat "$ROOT/NOTICE")" in
     *) t_ok 1 'shellcheck is recorded in NOTICE' ;;
 esac
 
-# Single-binary toolchains price their launch-mode view, not their payload:
-# a deno install was refused for 150MB its 20KB view never needed (issue #92).
-for sh_tmm in deno bun mold; do
+# SINGLE-BINARY TOOLS THAT DO NOT RE-EXEC THEMSELVES PRICE THEIR LAUNCH-MODE
+# VIEW, NOT THEIR PAYLOAD: a deno install was refused for 150MB its 20KB view
+# never needed (issue #92). But a runtime that DOES re-exec itself (deno, bun)
+# now lands as a real copy even in launch mode (issue #139), so its launch-mode
+# price is the payload. A launcher for those made every worker and subprocess
+# die with a memfd path.
+for sh_tmm in deno bun; do
     sh_toolchain_load "$sh_tmm" >/dev/null 2>&1
+    t_contains "$(tc_${sh_tmm}_copy_bins 2>/dev/null)" "$sh_tmm" "$sh_tmm is a real copy in launch mode (#139)"
     sh_tmm_mb=$(SH_VIEW_MODE=launch "tc_${sh_tmm}_exec_mb" 2>/dev/null) || sh_tmm_mb=''
     case "$sh_tmm_mb" in
-        ''|*[!0-9]*) t_ok 1 "$sh_tmm prices its launch-mode view" ;;
-        *) if [ "$sh_tmm_mb" -lt 32 ]; then t_ok 0 "$sh_tmm prices its launch-mode view (${sh_tmm_mb}MB)";
-           else t_ok 1 "$sh_tmm prices its launch-mode view (got ${sh_tmm_mb}MB)"; fi ;;
+        ''|*[!0-9]*) t_ok 1 "$sh_tmm prices its copied runtime in launch mode" ;;
+        *) if [ "$sh_tmm_mb" -ge 32 ]; then t_ok 0 "$sh_tmm prices its copied runtime in launch mode (${sh_tmm_mb}MB)";
+           else t_ok 1 "$sh_tmm prices its copied runtime in launch mode (got ${sh_tmm_mb}MB)"; fi ;;
     esac
 done
+sh_toolchain_load mold >/dev/null 2>&1
+sh_tmm_mb=$(SH_VIEW_MODE=launch "tc_mold_exec_mb" 2>/dev/null) || sh_tmm_mb=''
+case "$sh_tmm_mb" in
+    ''|*[!0-9]*) t_ok 1 'mold prices its launch-mode view' ;;
+    *) if [ "$sh_tmm_mb" -lt 32 ]; then t_ok 0 "mold prices its launch-mode view (${sh_tmm_mb}MB)";
+       else t_ok 1 "mold prices its launch-mode view (got ${sh_tmm_mb}MB)"; fi ;;
+esac
 # zig locates its install dir exe-relative through /proc/self/exe, which a
 # memfd image hides: it must land as a real copy even in launch mode, or
 # every compiler subcommand fails while the probe stays green (issue #77).
 sh_toolchain_load zig >/dev/null 2>&1
 t_contains "$(tc_zig_copy_bins 2>/dev/null)" 'zig' 'zig is a real copy in launch mode (issue #77)'
+
+# RUSTC IS A DECLARED BIN, SO A FRESH SHELL GETS IT (issue #135). Only cargo
+# and rustup were declared, so the exec view exposed no rustc and a fresh shell
+# fell through to the host rustup shim, which answers "no default configured".
+sh_toolchain_load rust >/dev/null 2>&1
+t_contains "$(sh_toolchain_bins rust 2>/dev/null)" 'cargo/bin/rustc' 'rust declares rustc (#135)'
+t_contains "$(sh_toolchain_bins rust 2>/dev/null)" 'cargo/bin/rustdoc' 'rust declares rustdoc (#135)'
+
+# NODE IS A REAL COPY IN LAUNCH MODE (issue #139): spawn(process.execPath)
+# must not be an anonymous memfd, or Playwright/Puppeteer/webpack workers die
+# ENOENT while `node --version` keeps answering.
+sh_toolchain_load node >/dev/null 2>&1
+t_contains "$(tc_node_copy_bins 2>/dev/null)" 'bin/node' 'node is a real copy in launch mode (#139)'
+
+# THE SPAWN HEALTH CHECK IS WIRED INTO DOCTOR (issue #139 FR3). A runtime that
+# cannot re-exec itself must be reported, so a green gate never coexists with
+# a broken browser. The isolated runner needs the view path in the exported
+# environment, which is where the hook reads it.
+if sh_toolchain_has_doctor node; then
+    t_ok 0 'node declares a doctor health check (#139)'
+else
+    t_ok 1 'node declares a doctor health check (#139)'
+fi
+sh_nd_view=$work/nodeview
+mkdir -p "$sh_nd_view/node/bin" 2>/dev/null
+printf '#!/bin/sh\nexit 1\n' > "$sh_nd_view/node/bin/node"
+chmod 0755 "$sh_nd_view/node/bin/node" 2>/dev/null
+if SH_EXEC_VIEWS="$sh_nd_view" sh_toolchain_doctor node >/dev/null 2>&1; then
+    t_ok 1 'a runtime that cannot spawn itself fails the doctor hook (#139)'
+else
+    t_ok 0 'a runtime that cannot spawn itself fails the doctor hook (#139)'
+fi
+printf '#!/bin/sh\nexit 0\n' > "$sh_nd_view/node/bin/node"
+chmod 0755 "$sh_nd_view/node/bin/node" 2>/dev/null
+if SH_EXEC_VIEWS="$sh_nd_view" sh_toolchain_doctor node >/dev/null 2>&1; then
+    t_ok 0 'a runtime that can spawn itself passes the doctor hook (#139)'
+else
+    t_ok 1 'a runtime that can spawn itself passes the doctor hook (#139)'
+fi
 
 # Requested rust targets are owed on every path that skips the install, not
 # just the adopt one: a managed tree asked for a new --target answered

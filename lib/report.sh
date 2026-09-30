@@ -487,6 +487,15 @@ sh_doctor() {
             sh_doc_version=$(sh_toolchain_version "$sh_doc_t")
             sh_doctor_check "toolchain_$sh_doc_t" \
                 "$([ -n "$sh_doc_version" ] && printf yes || printf no)" yes
+            # A TOOLCHAIN CAN ANSWER A VERSION AND STILL BE UNUSABLE (issue
+            # #139): a launcher-view node prints `node --version` and then
+            # fails every spawn because process.execPath is a memfd. A module
+            # that declares tc_<name>_doctor gets that check run here, so a
+            # green gate cannot coexist with a broken browser again.
+            if [ -n "$sh_doc_version" ] && sh_toolchain_has_doctor "$sh_doc_t"; then
+                sh_doctor_check "toolchain_${sh_doc_t}_spawn" \
+                    "$(sh_toolchain_doctor "$sh_doc_t" && printf yes || printf no)" yes
+            fi
         done
     else
         # A root without its views is a wiped or half-built root. The loop
