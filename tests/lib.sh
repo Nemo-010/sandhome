@@ -7,6 +7,13 @@ TESTS_RUN=0
 TESTS_FAIL=0
 TESTS_SKIP=0
 
+# Tests never write the global hook into the PATH directories of the machine
+# they run on: the candidate is a real directory of the host, and a suite that
+# dropped `sandhome` and a dispatcher into `$HOME/.local/bin` would change the
+# next test. tests/global.sh unsets this for the clauses that exercise the hook.
+SANDHOME_GLOBAL=0
+export SANDHOME_GLOBAL
+
 t_begin() {
     TESTS_NAME=$1
     TESTS_RUN=0

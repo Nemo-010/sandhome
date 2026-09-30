@@ -138,7 +138,8 @@ bin/sandhome          the command. Copied to $SANDHOME_EXEC/bin by a bootstrap.
   lib/detect.sh       what machine is this, read off the machine
   lib/space.sh        the two roots, the probes, the mirror, gc
   lib/fetch.sh        one download path, one digest path, one unpack path
-  lib/env.sh          the environment, written once and read everywhere
+  lib/env.sh          the environment, written once, read everywhere, and the
+                      global hook that reads it for a fresh shell
   lib/toolchain.sh    the contract every tools/<name>.sh obeys
   lib/shim.sh         the three LD_PRELOAD interposers
   lib/report.sh       the report, read from probes
@@ -154,6 +155,11 @@ bin/sandhome          the command. Copied to $SANDHOME_EXEC/bin by a bootstrap.
 prints the same bytes, so `eval "$(sandhome env)"` and the file cannot drift.
 Each toolchain owns one fragment under `$SANDHOME_HOME/env.d/`, and `env.sh`
 sources them all, so a second module cannot clobber the first.
+
+The hook does not add a second source of truth: it is one dispatcher that reads
+`env.sh` and `exec`s the view, so it cannot drift from the file. `sandhome
+global --remove` deletes exactly what `sh_global_install` recorded writing,
+which is what lets it share a directory with files it did not create.
 
 **Every function is namespaced by its module**, because POSIX `sh` has no
 namespaces and two modules defining `install` would shadow each other silently.
@@ -293,3 +299,40 @@ alias and no prompt, returns early for a non-interactive shell (`$-` containing
 `i`), de-duplicates `PATH` and drops empty elements, gives history a home that
 survives the session, and in WSL moves an interactive shell off a mounted
 Windows drive. One switch, `SANDHOME_NO_PROFILE=1`, turns all of it off.
+
+## 9. The global hook: setup once, no per-command sourcing
+
+A non-login `bash -c` shell reads no startup file, and `BASH_ENV`/`ENV` are
+usually unset, so a harness that spawns one shell per tool call has no way to
+inherit an environment. The first answer was "source `env.sh` at the top of
+every command" - `bash . "$HOME/.local/share/sandhome/env.sh" <cmd>` - which
+is correct and hostile: every command carries the incantation, and one command
+that forgets it looks like a failed setup.
+
+`sh_global_install` in `lib/env.sh` removes the incantation by putting the
+environment into a directory the shell already searches. Two cases, in order:
+
+1. **A `PATH` entry that already runs binaries and is writable.** One dispatcher
+   is written there, keyed on `$0`: `${0##*/}` names the tool, the dispatcher
+   sources `env.sh`, and it `exec`s `"$SANDHOME_EXEC/bin/$name"`. One symlink per
+   tool points at the single file.
+2. **A `PATH` entry that is absent, empty, or already a symlink, on a writable
+   root that refuses `execve`.** The entry is replaced by a symlink into
+   `$SANDHOME_EXEC/global`, which holds the same dispatcher. The mount refuses
+   `execve` on the name the shell looked up, but the kernel resolves the link
+   first and the exec policy applies to the resolved root, so the dispatcher
+   runs. This is the userspace route through a `noexec` home.
+
+The candidate scan is two passes so case 1 wins: a directory that runs binaries
+is never replaced by a symlink. `sh_global_remove` deletes only what the install
+recorded writing, and never a file it did not create. `bootstrap.sh` installs
+the hook after the environment is written; `SANDHOME_GLOBAL=0` (or `--no-global`)
+keeps it out of a directory the caller does not own, which is what the test
+suite does. `sandhome report` prints `global=<state>`, and `sandhome
+global --status` reads the record back.
+
+Measured on the sandbox this was built in, where `$HOME` is `/state/home` and
+refuses `execve`: with the hook installed, a fresh `env -i` shell whose `PATH`
+holds only the hook ran a toolchain **and** `sandhome` by name with nothing
+sourced, and the tool's own output proved `env.sh` had been read on the way.
+The case is exercised by `tests/global.sh`.

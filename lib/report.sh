@@ -145,6 +145,10 @@ sh_report_text() {
     printf 'login_shell=%s\n' "$sh_rt_login"
     printf 'env_on_path=%s\n' "$sh_rt_onpath"
     printf 'entry=%s\n' "${SH_HOME:-unknown}/entry.sh"
+    # The global hook: whether a fresh shell finds the environment with no
+    # sourcing. Read from disk, so a report run after the exec root moved says
+    # `stale:` rather than repeating what an install once claimed (issue #127).
+    printf 'global=%s\n' "$(sh_global_report 2>/dev/null)"
     printf 'installed=%s\n'   "$(sh_lead "${SH_INSTALLED:-}")"
     printf 'adopted=%s\n'     "$(sh_lead "${SH_ADOPTED:-}")"
     # # STOP: THIS LINE PROBES THE DISK. It printed $SH_SHIMS_BUILT, which is
@@ -218,9 +222,10 @@ sh_report_json() {
     fi
     sh_rj_onpath=no
     case ":${PATH:-}:" in *":${SH_EXEC_BIN:-}:") sh_rj_onpath=yes ;; esac
-    printf ',"login_shell":"%s","env_on_path":"%s","entry":"%s"' \
+    printf ',"login_shell":"%s","env_on_path":"%s","entry":"%s","global":"%s"' \
         "$(sh_json_escape "$sh_rj_login")" "$(sh_json_escape "$sh_rj_onpath")" \
-        "$(sh_json_escape "${SH_HOME:-unknown}/entry.sh")"
+        "$(sh_json_escape "${SH_HOME:-unknown}/entry.sh")" \
+        "$(sh_json_escape "$(sh_global_report 2>/dev/null)")"
     printf ',"shims_missing":"%s","view":"%s","memexec":"%s"' \
         "$(sh_json_escape "$(sh_lead "$(sh_shim_needed_missing 2>/dev/null)")")" \
         "$(sh_json_escape "$(sh_report_view 2>/dev/null)")" \

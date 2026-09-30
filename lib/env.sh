@@ -482,3 +482,334 @@ sh_env_load() {
     fi
     return 0
 }
+
+# ------------------------------------------------------- the global hook --
+# # STOP: A FRESH SHELL MUST NOT BE ASKED TO SOURCE ANYTHING. The environment was
+# one file, `env.sh`, and every caller had to read it in every new shell: a tool
+# harness that spawns a non-login shell per call ran
+#   bash . "$HOME/.local/share/sandhome/env.sh" <cmd>
+# in front of every command, and a caller told "setup once" watched it not be
+# so (issue #127). The snippet beside the home (`entry.sh`) made the one line
+# short, not absent, and the docs carried the per-call cost as a fact of life.
+#
+# This is the userspace route. The sandbox fixes the environment of each spawned
+# shell, so the only thing a fresh shell consults on its own is `PATH`. A
+# `PATH` entry is writable in one of two ways, and both are handled:
+#
+#   1. The directory is on a root that runs binaries. The hook is written into
+#      it directly. This is the ordinary case on a host whose home is exec.
+#   2. The directory is on a root that refuses `execve` (this tree's subject),
+#      but its PARENT is writable. The directory is REPLACED BY A SYMLINK to a
+#      directory under the exec root, which runs. Measured on the sandbox this
+#      was built for: `/state/home` is noexec, yet
+#         /state/home/.pi/agent/bin -> /workspace/.sandhome/exec/global
+#      and `command -v` then `exec` of a file under the link succeed, because
+#      the kernel resolves the link and permits exec on the resolved root. A
+#      noexec *mount* is a wall; a path through a symlink is a door in it.
+#
+# The contents are ONE dispatcher plus one symlink per exposed toolchain, and a
+# `sandhome` copy. The dispatcher is keyed on `$0`, so `cargo` and `go` share
+# it. Each invocation loads `env.sh` and execs the real binary from the exec
+# view, so the wrapper is a fresh shell with the environment and nothing more.
+# A tool that is not installed says so by name and exits 127.
+#
+# STOP: THE HOOK IS DISCOVERED, NOT ASSUMED. No directory name is hard-coded:
+# the candidate is read from THIS shell's `PATH`, which is the same list every
+# fresh shell in this sandbox inherits, and the choice is recorded so `remove`
+# and the report can name it. A host with no writable candidate says so in one
+# sentence and keeps `entry.sh` as the documented fallback.
+
+sh_global_state_dir() { printf '%s/global' "${SH_HOME:-}"; }
+
+# sh_global_read FIELD -> the field's first line, or nothing.
+sh_global_read() {
+    sh_gr_out=''
+    sh_gr_f="$(sh_global_state_dir)/$1"
+    if [ -r "$sh_gr_f" ]; then
+        IFS= read -r sh_gr_out < "$sh_gr_f" || sh_gr_out=''
+    fi
+    printf '%s' "$sh_gr_out"
+}
+
+sh_global_dir() { sh_global_read dir; }
+
+# sh_global_names -> the recorded tool names, one per line.
+sh_global_names() {
+    sh_gn_f="$(sh_global_state_dir)/names"
+    [ -r "$sh_gn_f" ] || return 0
+    while IFS= read -r sh_gn_line || [ -n "$sh_gn_line" ]; do
+        [ -n "$sh_gn_line" ] && printf '%s\n' "$sh_gn_line"
+    done < "$sh_gn_f"
+}
+
+# sh_global_forget -> drop the record without touching the filesystem. Used when
+# no candidate exists, so a moved-root run cannot report a hook that is gone.
+sh_global_forget() {
+    rm -rf "$(sh_global_state_dir)" 2>/dev/null || true
+    return 0
+}
+
+# sh_global_view_names -> every executable the exec view exposes, minus the
+# command, the shell and the internal helper. These are the names a fresh shell
+# should find: exactly the set `env.sh` would have put on PATH.
+sh_global_view_names() {
+    [ -n "${SH_EXEC_BIN:-}" ] && [ -d "$SH_EXEC_BIN" ] || return 0
+    for sh_gv_f in "$SH_EXEC_BIN"/*; do
+        [ -e "$sh_gv_f" ] || [ -L "$sh_gv_f" ] || continue
+        sh_gv_n=${sh_gv_f##*/}
+        case "$sh_gv_n" in
+            sandhome|errandsh|faketty|sandhome-memexec) continue ;;
+        esac
+        printf '%s\n' "$sh_gv_n"
+    done
+}
+
+# sh_global_choose_dir -> the first `PATH` entry that can host the hook, or
+# nothing. Two passes: an already-working directory wins, then a directory that
+# can be made working by pointing it at the exec root. `$SH_EXEC_BIN` is never a
+# candidate: it is the real view, not the hook, and a hook inside it would
+# shadow the binary with itself.
+sh_global_choose_dir() {
+    sh_gcd_rest=$PATH
+    while [ -n "$sh_gcd_rest" ]; do
+        case "$sh_gcd_rest" in
+            *:*) sh_gcd_d=${sh_gcd_rest%%:*}; sh_gcd_rest=${sh_gcd_rest#*:} ;;
+            *)   sh_gcd_d=$sh_gcd_rest; sh_gcd_rest='' ;;
+        esac
+        [ -n "$sh_gcd_d" ] || continue
+        if [ -n "${SH_EXEC_BIN:-}" ]; then
+            case "$sh_gcd_d" in
+                "$SH_EXEC_BIN"|"$SH_EXEC_BIN"/*) continue ;;
+            esac
+        fi
+        if [ -d "$sh_gcd_d" ] && [ -w "$sh_gcd_d" ] && sh_exec_probe "$sh_gcd_d" 2>/dev/null; then
+            printf '%s' "$sh_gcd_d"
+            return 0
+        fi
+    done
+    sh_gcd_rest=$PATH
+    while [ -n "$sh_gcd_rest" ]; do
+        case "$sh_gcd_rest" in
+            *:*) sh_gcd_d=${sh_gcd_rest%%:*}; sh_gcd_rest=${sh_gcd_rest#*:} ;;
+            *)   sh_gcd_d=$sh_gcd_rest; sh_gcd_rest='' ;;
+        esac
+        [ -n "$sh_gcd_d" ] || continue
+        if [ -n "${SH_EXEC_BIN:-}" ]; then
+            case "$sh_gcd_d" in
+                "$SH_EXEC_BIN"|"$SH_EXEC_BIN"/*) continue ;;
+            esac
+        fi
+        sh_gcd_parent=$(sh_dirname "$sh_gcd_d")
+        case "$sh_gcd_parent" in ''|.|/) continue ;; esac
+        [ -d "$sh_gcd_parent" ] && [ -w "$sh_gcd_parent" ] || continue
+        if [ ! -e "$sh_gcd_d" ]; then
+            printf '%s' "$sh_gcd_d"
+            return 0
+        fi
+        if [ -L "$sh_gcd_d" ]; then
+            printf '%s' "$sh_gcd_d"
+            return 0
+        fi
+        if [ -d "$sh_gcd_d" ]; then
+            sh_gcd_empty=1
+            for sh_gcd_f in "$sh_gcd_d"/* "$sh_gcd_d"/.[!.]*; do
+                [ -e "$sh_gcd_f" ] || [ -L "$sh_gcd_f" ] || continue
+                sh_gcd_empty=0
+                break
+            done
+            if [ "$sh_gcd_empty" = 1 ]; then
+                printf '%s' "$sh_gcd_d"
+                return 0
+            fi
+        fi
+    done
+    printf ''
+}
+
+# sh_global_write_dispatch FILE HOME -> write the dispatcher atomically.
+sh_global_write_dispatch() {
+    sh_gwd_f=$1
+    sh_gwd_tmp="$sh_gwd_f.tmp.$$"
+    {
+        printf '%s\n' '#!/bin/sh'
+        printf '%s\n' '# sandhome global hook. Generated; remove with `sandhome global --remove`.'
+        printf '%s\n' '_sandhome_name=${0##*/}'
+        printf '_sandhome_home=%s\n' "$(sh_sq_quote "$2")"
+        printf '%s\n' 'if [ -r "$_sandhome_home/env.sh" ]; then'
+        printf '%s\n' '  . "$_sandhome_home/env.sh"'
+        printf '%s\n' 'fi'
+        printf '%s\n' 'if [ -n "${SANDHOME_EXEC:-}" ] && [ -x "$SANDHOME_EXEC/bin/$_sandhome_name" ]; then'
+        printf '%s\n' '  exec "$SANDHOME_EXEC/bin/$_sandhome_name" "$@"'
+        printf '%s\n' 'fi'
+        printf '%s\n' 'printf "%s\n" "sandhome: $_sandhome_name is not installed; run: sandhome install $_sandhome_name" >&2'
+        printf '%s\n' 'exit 127'
+    } > "$sh_gwd_tmp" 2>/dev/null || { rm -f "$sh_gwd_tmp" 2>/dev/null; return 1; }
+    chmod 0755 "$sh_gwd_tmp" 2>/dev/null || true
+    mv -f "$sh_gwd_tmp" "$sh_gwd_f" 2>/dev/null || { rm -f "$sh_gwd_tmp" 2>/dev/null; return 1; }
+    return 0
+}
+
+# sh_global_record DIR LINK COMMAND NAMES... -> the record `remove` and the
+# report read. One directory, four files, so no field can be misparsed.
+sh_global_record() {
+    sh_gr_dir=$1; sh_gr_link=$2; sh_gr_cmd=$3; shift 3
+    sh_gr_base=$(sh_global_state_dir)
+    rm -rf "$sh_gr_base" 2>/dev/null || true
+    mkdir -p "$sh_gr_base" 2>/dev/null || return 1
+    printf '%s\n' "$sh_gr_dir" > "$sh_gr_base/dir" 2>/dev/null || true
+    printf '%s\n' "$sh_gr_link" > "$sh_gr_base/link" 2>/dev/null || true
+    printf '%s\n' "$sh_gr_cmd" > "$sh_gr_base/command" 2>/dev/null || true
+    : > "$sh_gr_base/names" 2>/dev/null || true
+    for sh_gr_n in "$@"; do
+        printf '%s\n' "$sh_gr_n" >> "$sh_gr_base/names" 2>/dev/null || true
+    done
+    return 0
+}
+
+# sh_global_install -> install or refresh the hook. Returns 0 whether or not a
+# candidate existed: no candidate is a fact about the host, not a failure to fix.
+sh_global_install() {
+    if [ "${SH_DRY_RUN:-0}" = 1 ]; then
+        sh_step "would install the global hook (a PATH directory that loads the environment)"
+        return 0
+    fi
+    [ -n "${SH_HOME:-}" ] || return 0
+    [ -n "${SH_EXEC:-}" ] || return 0
+    [ -n "${SH_EXEC_BIN:-}" ] || return 0
+    sh_gi_dir=$(sh_global_choose_dir)
+    if [ -z "$sh_gi_dir" ]; then
+        sh_global_forget
+        sh_step "no writable exec-capable directory on this PATH; the global hook is not installed (source entry.sh, or run a command as 'sandhome exec CMD')"
+        return 0
+    fi
+    sh_gi_link=no
+    sh_gi_target=$sh_gi_dir
+    if [ ! -d "$sh_gi_dir" ] || ! sh_exec_probe "$sh_gi_dir" 2>/dev/null; then
+        sh_gi_target="$SH_EXEC/global"
+        if [ -d "$sh_gi_dir" ] && [ ! -L "$sh_gi_dir" ]; then
+            if ! rmdir "$sh_gi_dir" 2>/dev/null; then
+                sh_warn "cannot replace $sh_gi_dir with a symlink into the exec root; the global hook is not installed"
+                sh_global_forget
+                return 0
+            fi
+        else
+            rm -f "$sh_gi_dir" 2>/dev/null || true
+        fi
+        mkdir -p "$sh_gi_target" 2>/dev/null || {
+            sh_warn "could not create $sh_gi_target; the global hook is not installed"
+            sh_global_forget
+            return 0
+        }
+        if ! sh_exec_probe "$sh_gi_target" 2>/dev/null; then
+            sh_warn "the exec root $SH_EXEC cannot host a global hook; not installed"
+            sh_global_forget
+            return 0
+        fi
+        if ! ln -s "$sh_gi_target" "$sh_gi_dir" 2>/dev/null; then
+            sh_warn "could not link $sh_gi_dir to $sh_gi_target; the global hook is not installed"
+            sh_global_forget
+            return 0
+        fi
+        sh_gi_link=yes
+    fi
+    if ! sh_exec_probe "$sh_gi_target" 2>/dev/null; then
+        sh_warn "$sh_gi_target does not run a file; the global hook is not installed"
+        sh_global_forget
+        return 0
+    fi
+    sh_gi_old=$(sh_global_names)
+    if ! sh_global_write_dispatch "$sh_gi_target/.sandhome-dispatch" "$SH_HOME"; then
+        sh_warn "could not write the global dispatcher under $sh_gi_target; not installed"
+        return 0
+    fi
+    # The command itself is copied, not dispatched: it must work with no
+    # environment at all, and the baked copy already does.
+    sh_gi_cmd=no
+    sh_gi_dst="$sh_gi_target/sandhome"
+    if [ ! -e "$sh_gi_dst" ] || [ -L "$sh_gi_dst" ]; then
+        if [ -r "$SH_EXEC_BIN/sandhome" ]; then
+            cp -f "$SH_EXEC_BIN/sandhome" "$sh_gi_dst" 2>/dev/null && \
+                chmod 0755 "$sh_gi_dst" 2>/dev/null && sh_gi_cmd=yes
+        fi
+    fi
+    sh_gi_names=''
+    for sh_gi_n in $(sh_global_view_names); do
+        sh_gi_names="$sh_gi_names $sh_gi_n"
+        sh_gi_dst="$sh_gi_target/$sh_gi_n"
+        if [ -e "$sh_gi_dst" ] || [ -L "$sh_gi_dst" ]; then
+            sh_gi_tgt=$(readlink "$sh_gi_dst" 2>/dev/null || printf '')
+            [ "$sh_gi_tgt" = '.sandhome-dispatch' ] || continue
+        fi
+        ln -sfn '.sandhome-dispatch' "$sh_gi_dst" 2>/dev/null || \
+            sh_warn "could not link $sh_gi_n into $sh_gi_dir"
+    done
+    for sh_gi_o in $sh_gi_old; do
+        case " $sh_gi_names " in
+            *" $sh_gi_o "*) continue ;;
+        esac
+        sh_gi_dst="$sh_gi_target/$sh_gi_o"
+        if [ -L "$sh_gi_dst" ] && [ "$(readlink "$sh_gi_dst" 2>/dev/null)" = '.sandhome-dispatch' ]; then
+            rm -f "$sh_gi_dst" 2>/dev/null || true
+        fi
+    done
+    # shellcheck disable=SC2086
+    sh_global_record "$sh_gi_dir" "$sh_gi_link" "$sh_gi_cmd" $sh_gi_names
+    sh_gi_count=0
+    for sh_gi_n in $sh_gi_names; do sh_gi_count=$((sh_gi_count + 1)); done
+    if [ "$sh_gi_link" = yes ]; then
+        sh_step "installed the global hook at $sh_gi_dir -> $sh_gi_target ($sh_gi_count commands; a fresh shell needs to source nothing)"
+    else
+        sh_step "installed the global hook at $sh_gi_dir ($sh_gi_count commands; a fresh shell needs to source nothing)"
+    fi
+    return 0
+}
+
+# sh_global_remove -> undo what install wrote. It never removes a file it did
+# not create: every symlink must point at the dispatcher, the command must be
+# the one this install copied, and the directory itself is dropped only when it
+# was installed as a symlink into the exec root.
+sh_global_remove() {
+    sh_grr_dir=$(sh_global_dir)
+    if [ -z "$sh_grr_dir" ]; then
+        sh_step "no global hook is recorded"
+        sh_global_forget
+        return 0
+    fi
+    sh_grr_target=$sh_grr_dir
+    if [ -L "$sh_grr_dir" ]; then
+        sh_grr_target=$(readlink "$sh_grr_dir" 2>/dev/null || printf '')
+    fi
+    if [ -n "$sh_grr_target" ] && [ -d "$sh_grr_target" ]; then
+        for sh_grr_n in $(sh_global_names); do
+            sh_grr_f="$sh_grr_target/$sh_grr_n"
+            if [ -L "$sh_grr_f" ] && [ "$(readlink "$sh_grr_f" 2>/dev/null)" = '.sandhome-dispatch' ]; then
+                rm -f "$sh_grr_f" 2>/dev/null || true
+            fi
+        done
+        rm -f "$sh_grr_target/.sandhome-dispatch" 2>/dev/null || true
+        if [ "$(sh_global_read command)" = yes ]; then
+            rm -f "$sh_grr_target/sandhome" 2>/dev/null || true
+        fi
+    fi
+    if [ -L "$sh_grr_dir" ]; then
+        rm -f "$sh_grr_dir" 2>/dev/null || true
+        [ -n "$sh_grr_target" ] && rmdir "$sh_grr_target" 2>/dev/null || true
+    fi
+    sh_global_forget
+    sh_step "removed the global hook (a fresh shell needs env.sh again)"
+    return 0
+}
+
+# sh_global_report -> on:<dir>, stale:<dir> or none, read from disk.
+sh_global_report() {
+    sh_grp_dir=$(sh_global_dir)
+    if [ -z "$sh_grp_dir" ]; then
+        printf 'none'
+        return 0
+    fi
+    if [ -d "$sh_grp_dir" ] && [ -x "$sh_grp_dir/sandhome" ]; then
+        printf 'on:%s' "$sh_grp_dir"
+    else
+        printf 'stale:%s' "$sh_grp_dir"
+    fi
+}

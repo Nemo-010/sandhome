@@ -23,17 +23,15 @@ will actually type before giving you a task:
 
 > Set up my sandbox: fetch
 > https://raw.githubusercontent.com/talaria0101/sandhome/main/bootstrap.sh ,
-> run `sh bootstrap.sh --toolset developer`, then
-> `. "$HOME/.local/share/sandhome/env.sh"`, then `sandhome doctor` - when it
+> run `sh bootstrap.sh --toolset developer`, then `sandhome doctor` - when it
 > exits 0, the sandbox is ready; get on with my task and only come back to me
 > if doctor fails.
 
-When you receive that instruction, it means: do the four setup commands,
-confirm doctor exits 0, and then proceed with the task without reporting back
-on setup at all. The rest of this skill exists for the case where doctor does
-not exit 0.
+When you receive that instruction, it means: do the setup commands, confirm
+doctor exits 0, and then proceed with the task without reporting back on setup
+at all. The rest of this skill exists for the case where doctor does not exit 0.
 
-## Set up, in four commands
+## Set up, in three commands
 
 ```sh
 sh bootstrap.sh --toolset developer        # from a clone
@@ -41,11 +39,20 @@ sh bootstrap.sh --toolset developer        # from a clone
 curl -fsSL https://raw.githubusercontent.com/talaria0101/sandhome/main/bootstrap.sh \
   | sh -s -- --toolset developer
 
-. "$HOME/.local/share/sandhome/env.sh"     # in this shell
 sandhome doctor                            # exits 0 when sound
-sandhome status                            # one-line readiness: roots, view, toolchains, next
 sandhome toolchains                        # what is here, and how it reaches PATH
 ```
+
+`sandhome status` is the same readiness on one line (roots, view, toolchains,
+next command), for a harness that wants to check before it works.
+
+The bootstrap installs a **global hook** into a directory already on `PATH`, so
+the next `sandhome doctor` is a fresh shell that needs nothing sourced and no
+`env.sh` in front of it. That is the whole fix for the per-command incantation:
+setup is once, and a command is a command. If the host has no writable,
+exec-capable `PATH` directory the report says `global=none`; then source the
+entry point once per shell:
+`. "${XDG_DATA_HOME:-$HOME/.local/share}/sandhome/entry.sh"`.
 
 A process with no inherited environment starts from the installed copy,
 which carries its library with it: `env -i /tmp/bin/sandhome doctor` works
@@ -100,7 +107,7 @@ installed without an error and does not answer is reported as a failure.
 | `collect2: posix_spawnp: Permission denied` linking rust | the sysroot linker is on the noexec home and cannot be exec'd; no `-fuse-ld` value fixes it. `sandhome install --force rust` puts the toolchain on the exec root || `fork/exec ...: permission denied` after a successful `go build` | the build cache was on a noexec root; `sandhome install go` puts `GOCACHE` and `GOBIN` on the exec root, for an adopted go too |
 | `npm i -g` CLI missing or `bad interpreter` | prefix was on the noexec home; `sandhome install node` moves it to the exec root |
 | ANSI codes inside `jq` or `git` output | `fakepty` is on; `SANDHOME_SHIMS=0` |
-| a tool is absent from a fresh shell | `$SANDHOME_HOME/env.sh` was not read |
+| a tool is absent from a fresh shell | the global hook was not installed (`global=none`) and `env.sh` was not read; install it, or source the entry point |
 | a tool is absent even after `env.sh` was read | it was adopted and could not be linked into the exec view; `sandhome repair <name>` retries the link, and `sandhome install --force <name>` places a copy in the view when the adopted binary cannot be linked at all |
 | `doctor` says `FAIL exec_space=low` or `=critical` | the exec root is draining and a build will fail with `no space left on device`. `sandhome space` names the state, `sandhome space --probe` lists roomier candidates, `sandhome gc` reclaims sandhome's own caches, and re-running setup with `--exec DIR` moves everything to a roomy path |
 

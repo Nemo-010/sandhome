@@ -15,6 +15,10 @@ usage: sandhome COMMAND [args]
   resume                 rebuild the views after a tmpfs restart, then doctor
   env                    print the environment, for `eval "$(sandhome env)"`
   path                   print the exec-view bin directory
+  global [--status|--remove]   install the global hook: a directory already on
+                         PATH that loads the environment for a fresh shell, so
+                         setup is once and no command needs `. env.sh`. --status
+                         names it, --remove takes it away.
   space [--probe]        where the two roots are, and every candidate tried
   space --largest [N]    the N biggest entries on the exec root (default 10)
   space --reclaim        reclaimable cache bytes without removing anything
@@ -122,6 +126,8 @@ usage: sh bootstrap.sh [options]
   --no-skills         do not install the skills into ~/.agents/skills
   --no-profile        do not install the profile fragment or touch login files
   --no-path-line      do not add the exec bin directory to the login files
+  --no-global         do not install the global hook (a directory already on
+                      PATH that loads the environment for a fresh shell)
   --dry-run           print what would be done and change nothing
   --json              print the report as one JSON object
   --doh-url URL       DNS-over-HTTPS resolver for a confirmed no-resolver
@@ -143,6 +149,10 @@ usage: sh bootstrap.sh [options]
                       list forces the names in it (SANDHOME_FORCE=rust,go).
                       Same placement rule as SANDHOME_REF. `sandhome install
                       --force NAME` is the same decision per command.
+  SANDHOME_GLOBAL     install the global hook (default install). 0 (or
+                      --no-global) skips it, which is what a test suite
+                      wants and what a host whose PATH directories are not
+                      the caller's to write wants.
   SANDHOME_VIEW_MODE  copy forces real-copy views (`/proc/self/exe` stays a
                       real path, at the price of exec-root room); launch
                       demands the memfd helper with a copy fallback; empty or
@@ -204,6 +214,7 @@ usage: sh bootstrap.sh [options]
 | `SANDHOME_FORCE` | toolchain.sh bootstrap.sh sandhome rust.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_GC_FORCE` | space.sh sandhome | `unset, and the feature is off until it is set` |
 | `SANDHOME_GH_VERSION` | gh.sh | `unset, and the feature is off until it is set` |
+| `SANDHOME_GLOBAL` | bootstrap.sh | `install` |
 | `SANDHOME_GO_DL_JSON_URL` | sandhome go.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_GO_VERSION_URL` | sandhome go.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_HERE` | profile.sh | `unset, and the feature is off until it is set` |
@@ -319,4 +330,5 @@ usage: sh bootstrap.sh [options]
 | `sh tests/shims.sh` | tests/shims.sh - build and actually use both LD_PRELOAD shims. |
 | `sh tests/docs.sh` | tests/docs.sh - the documentation is checked against the code, not trusted. |
 | `sh tests/bootstrap.sh` | does NOT run binaries, prove the exec split put it where it runs, and prove the |
+| `sh tests/global.sh` | A fresh shell finds the environment with no `. env.sh`, through a PATH dir. |
 | `sh tests/errandsh-posix.sh` | errandsh's test, and it is a test rather than a claim. |

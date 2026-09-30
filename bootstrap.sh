@@ -204,6 +204,8 @@ usage: sh bootstrap.sh [options]
   --no-skills         do not install the skills into ~/.agents/skills
   --no-profile        do not install the profile fragment or touch login files
   --no-path-line      do not add the exec bin directory to the login files
+  --no-global         do not install the global hook (a directory already on
+                      PATH that loads the environment for a fresh shell)
   --dry-run           print what would be done and change nothing
   --json              print the report as one JSON object
   --doh-url URL       DNS-over-HTTPS resolver for a confirmed no-resolver
@@ -225,6 +227,10 @@ usage: sh bootstrap.sh [options]
                       list forces the names in it (SANDHOME_FORCE=rust,go).
                       Same placement rule as SANDHOME_REF. `sandhome install
                       --force NAME` is the same decision per command.
+  SANDHOME_GLOBAL     install the global hook (default install). 0 (or
+                      --no-global) skips it, which is what a test suite
+                      wants and what a host whose PATH directories are not
+                      the caller's to write wants.
   SANDHOME_VIEW_MODE  copy forces real-copy views (`/proc/self/exe` stays a
                       real path, at the price of exec-root room); launch
                       demands the memfd helper with a copy fallback; empty or
@@ -287,6 +293,14 @@ SH_SHELL=install
 SH_SKILLS=install
 SH_PROFILE=install
 SH_PATH_LINE=install
+# The global hook is on by default; SANDHOME_GLOBAL=0 (or --no-global) keeps a
+# hook out of every PATH directory. A test suite and a restricted host set it
+# so nothing is written where they do not own the directory.
+: "${SANDHOME_GLOBAL:=install}"
+case "$SANDHOME_GLOBAL" in
+    0|no|off|none) SH_GLOBAL=none ;;
+    *)             SH_GLOBAL=install ;;
+esac
 SH_JSON=0
 
 sh_need_value() {
@@ -429,6 +443,7 @@ sh_bootstrap_args() {
             --no-skills)        SH_SKILLS=none; shift ;;
             --no-profile)      SH_PROFILE=none; shift ;;
             --no-path-line)    SH_PATH_LINE=none; shift ;;
+            --no-global)       SH_GLOBAL=none; shift ;;
             --dry-run)         SH_DRY_RUN=1; shift ;;
             --json)            SH_JSON=1; shift ;;
             --doh-url)         sh_need_value "$@"; SANDHOME_DOH_URL=$2; export SANDHOME_DOH_URL; shift 2 ;;
@@ -652,6 +667,16 @@ sh_bootstrap_install_profile() {
     sh_install_profile "$SH_REPO_DIR/lib/profile.sh"
 }
 
+# sh_bootstrap_install_global -> put the environment in a directory a fresh
+# non-login shell already searches (issue #127). One setup, every shell; see
+# the global hook section in lib/env.sh for the mechanism and the measurement.
+sh_bootstrap_install_global() {
+    if [ "$SH_GLOBAL" = none ]; then
+        return 0
+    fi
+    sh_global_install || true
+}
+
 # ---------------------------------------------------------------------- main --
 sandhome_bootstrap_main() {
     sh_bootstrap_resolve_dir || sh_bootstrap_refetch "$@"
@@ -856,6 +881,7 @@ sandhome_bootstrap_main() {
     sh_env_load
     sh_bootstrap_path_line
     sh_bootstrap_install_profile || true
+    sh_bootstrap_install_global || true
     # The scratch tree served its purpose once the durable copy exists;
     # remove it so failed and partial runs do not accumulate under /tmp.
     if [ -n "${SANDHOME_FETCH_DIR:-}" ] && [ "${SANDHOME_FETCH_DIR:-}" != "$SH_REPO_DIR" ]; then

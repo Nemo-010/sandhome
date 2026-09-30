@@ -28,9 +28,14 @@ sh bootstrap.sh --toolset developer        # from a clone
 curl -fsSL https://raw.githubusercontent.com/talaria0101/sandhome/main/bootstrap.sh \
   | sh -s -- --toolset developer
 
-. "$HOME/.local/share/sandhome/env.sh"     # in this shell
 sandhome doctor                            # exits 0 when every invariant holds
 ```
+
+The bootstrap installs a **global hook** into a directory already on `PATH`, so
+a fresh shell knows `sandhome` and the toolchains with nothing sourced in front
+of a command. If the host has no writable, exec-capable `PATH` directory, the
+report says `global=none`; then source the entry point beside the home, once per
+shell: `. "${XDG_DATA_HOME:-$HOME/.local/share}/sandhome/entry.sh"`.
 
 Toolsets: `minimal` (jq), `cli` (+ ripgrep, fd), `developer` (+ python, node,
 the default), `languages` and `agent` (both + rust, go). `--with rust` adds one,

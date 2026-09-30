@@ -86,7 +86,7 @@ file. The probe above runs a real file for exactly this reason.
 
 ---
 
-## Step 2. Set up, in four commands.
+## Step 2. Set up, in three commands. Source nothing.
 
 The first command runs whatever is on `main` at the moment it is fetched, and
 it fetches a second copy of `main` to use as the library. Nothing is pinned by
@@ -109,9 +109,10 @@ From nothing but a network (unpinned default):
 curl -fsSL https://raw.githubusercontent.com/talaria0101/sandhome/main/bootstrap.sh | sh -s -- --toolset developer
 ```
 
-```sh
-. "$HOME/.local/share/sandhome/env.sh"
-```
+That is the whole setup. The bootstrap installs a **global hook**: a directory
+that is already on this shell's `PATH` and whose contents load the environment.
+The next command starts a fresh shell and `sandhome` is simply there. You do not
+source `env.sh`, and you do not put anything in front of each command.
 
 ```sh
 sandhome doctor
@@ -136,14 +137,25 @@ From a clone, the first command is instead:
 sh bootstrap.sh --toolset developer
 ```
 
+If `sandhome` is not found after that, the host has no writable exec-capable
+directory on `PATH` (the bootstrap says so in one sentence and prints
+`global=none` in its report). Then the stable way in is the entry point beside
+the home, which needs no `PATH` and no login shell, and which you source in the
+shell you are using:
+
+```sh
+. "${XDG_DATA_HOME:-$HOME/.local/share}/sandhome/entry.sh"
+```
+
 When the check at the end of this step exits 0, the sandbox is ready: do the
 task.
 
 The run detects the machine, plans the two roots, adopts each toolchain
 that already answers and installs the ones that do not, builds the shims
-this machine actually needs, writes `env.sh`, and prints a report read from
-the machine. The third command exits 0 only when every invariant holds.
-The fourth names what is here and how each tool reaches PATH.
+this machine actually needs, writes `env.sh`, installs the global hook, and
+prints a report read from the machine. `doctor` exits 0 only when every
+invariant holds. `toolchains` names what is here and how each tool reaches
+PATH.
 
 **`exec_free_mb` is a decision, not trivia.** The exec root is where every
 build artifact has to land, because the home often refuses `execve`. A few
@@ -241,7 +253,21 @@ or bad interpreter. Tool output that must execute lives on `$SANDHOME_EXEC`:
 there; for anything else build under `$SANDHOME_EXEC` or copy the artifact
 there before running it. No wrapper or launcher lives in the work tree.
 
-The environment file is the single source of truth, and sourcing it is a per-call cost on a harness that spawns a non-login shell per tool call, not a per-session setup step. Every new shell, including every non-login tool shell, must load it again before `sandhome` or any toolchain is on PATH. A reader told "per-session" loses a call's worth of toolchain to `command not found` and thinks setup failed. In a shell that sources files, source the entry point below. Where sourcing is not possible, load it through eval, which survives `sh -c`, but the eval needs `sandhome` already on PATH and fails silently with rc=0 when it is not: the entry point is the cold-shell path, the eval is the warm-shell shortcut.
+The environment file is the single source of truth, and the bootstrap installs
+a **global hook** so no shell has to read it by hand: a directory already on
+this shell's `PATH` whose entries load `env.sh` and exec the real tool. On a
+host whose home refuses `execve` the hook directory is a symlink into the exec
+root, which runs, so the noexec mount is not a wall. `sandhome report` prints
+`global=on:<dir>` when it is installed and `global=none` when the host had no
+writable candidate; `sandhome global --status` names it.
+
+Sourcing is therefore the **fallback**, not the setup step. The two forms below
+are for a host that printed `global=none`, and for a shell that wants the
+environment before it runs a command. In a shell that sources files, source the
+entry point. Where sourcing is not possible, load it through eval, which
+survives `sh -c`, but the eval needs `sandhome` already on PATH and fails
+silently with rc=0 when it is not: the entry point is the cold-shell path, the
+eval is the warm-shell shortcut.
 
 ```sh
 eval "$(sandhome env)"
@@ -252,9 +278,9 @@ sh -c 'eval "$(sandhome env)"; sandhome doctor'
 ```
 
 **A shell with no PATH at all sources the entry point by its durable path.** The
-`eval` forms above need `sandhome` already on PATH, and a harness that spawns a
-non-login shell per call has no PATH until something loads it. The bootstrap
-leaves a snippet beside the durable home for exactly that case:
+`eval` forms above need `sandhome` already on PATH, and a host that printed
+`global=none` has no PATH entry for it. The bootstrap leaves a snippet beside
+the durable home for exactly that case:
 
 ```sh
 . "${XDG_DATA_HOME:-$HOME/.local/share}/sandhome/entry.sh"

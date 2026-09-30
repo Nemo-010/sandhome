@@ -223,6 +223,10 @@ usage: sandhome COMMAND [args]
   resume                 rebuild the views after a tmpfs restart, then doctor
   env                    print the environment, for `eval "$(sandhome env)"`
   path                   print the exec-view bin directory
+  global [--status|--remove]   install the global hook: a directory already on
+                         PATH that loads the environment for a fresh shell, so
+                         setup is once and no command needs `. env.sh`. --status
+                         names it, --remove takes it away.
   space [--probe]        where the two roots are, and every candidate tried
   space --largest [N]    the N biggest entries on the exec root (default 10)
   space --reclaim        reclaimable cache bytes without removing anything
@@ -443,6 +447,17 @@ works); two or more arguments stay exec-argv. --shell names the string form
 explicitly. A path with a slash is always argv, never a shell string.
 HELP
             return 0 ;;
+        global)
+            cat <<'HELP'
+usage: sandhome global [--status|--remove]
+Install or refresh the global hook: a directory already on this shell's PATH
+whose contents load the environment, so a fresh shell (login, interactive or
+the non-login shell a tool harness spawns per call) needs to source nothing.
+The bootstrap installs it by default; this command reinstalls it after a view
+moved, prints where it is with --status, and removes it with --remove. When no
+writable PATH entry can host it, entry.sh and `sandhome exec` remain.
+HELP
+            return 0 ;;
         env|path|project|shims|shell|pty|test|selftest|version)
             usage; return 0 ;;
         *)
@@ -452,6 +467,43 @@ HELP
 }
 cmd_env()    { sh_env_print; }
 cmd_path()   { printf '%s\n' "$SH_EXEC_BIN"; }
+
+# cmd_global [--status|--remove] -> install, report or remove the global hook
+# (issue #127). The bootstrap installs it by default; this command exists for a
+# session that wants to (re)install it after a view moved, read where it is, or
+# undo it. It never touches a file it did not create.
+cmd_global() {
+    sh_cg_mode=install
+    for sh_cg_arg in "$@"; do
+        case "$sh_cg_arg" in
+            --status) sh_cg_mode=status ;;
+            --remove) sh_cg_mode=remove ;;
+            -h|--help) cmd_help global; return 0 ;;
+            *) sh_die "global does not take '$sh_cg_arg'; run 'sandhome help global' for the form it takes" ;;
+        esac
+    done
+    sh_env_load
+    case "$sh_cg_mode" in
+        status)
+            sh_cg_dir=$(sh_global_dir)
+            if [ -z "$sh_cg_dir" ]; then
+                printf 'global=none\n'
+                return 0
+            fi
+            sh_cg_list=''
+            for sh_cg_n in $(sh_global_names); do
+                sh_cg_list="$sh_cg_list $sh_cg_n"
+            done
+            printf 'global=%s\n' "$(sh_global_report)"
+            printf 'global_dir=%s\n' "$sh_cg_dir"
+            printf 'global_link=%s\n' "$(sh_global_read link)"
+            printf 'global_command=%s\n' "$(sh_global_read command)"
+            printf 'global_tools=%s\n' "${sh_cg_list# }"
+            return 0 ;;
+        remove) sh_global_remove ;;
+        *)      sh_global_install ;;
+    esac
+}
 cmd_space() {
     case "${1:-}" in
         -h|--help) cmd_help space; return 0 ;;
@@ -718,6 +770,7 @@ cmd_install() {
     SH_INSTALLED=$INSTALLED
     SH_ADOPTED=$ADOPTED
     sh_env_load
+    sh_global_install || true
     return 0
 }
 # # STOP: REPAIR REBUILDS THE VIEW AND DOWNLOADS NOTHING. Every consumer-facing
@@ -794,6 +847,7 @@ cmd_repair() {
     sh_shim_write_passwd
     sh_shim_report
     sh_env_write
+    sh_global_install || true
     return 0
 }
 cmd_shims() {
@@ -1570,7 +1624,7 @@ cmd_test() {
 case "${2:-}" in
     -h|--help)
         case "${1:-}" in
-            doctor|env|path|space|status|resume|toolchains|install|ensure|repair|shims|shell|pty|exec|report|gc|prune|add|project|test|selftest|version|help)
+            doctor|env|path|global|space|status|resume|toolchains|install|ensure|repair|shims|shell|pty|exec|report|gc|prune|add|project|test|selftest|version|help)
                 cmd_help "${1:-help}"
                 exit 0 ;;
         esac ;;
@@ -1582,6 +1636,7 @@ case "${1:-help}" in
     resume)      shift; cmd_resume "$@" ;;
     env)         cmd_env ;;
     path)        cmd_path ;;
+    global)      sh_cmd_needs_roots global; shift; cmd_global "$@" ;;
     space)       shift; cmd_space "$@" ;;
     toolchains)  shift; cmd_toolchains "$@" ;;
     install|ensure) case "${2:-}" in -h|--help) shift; cmd_install "$@" ;; *) sh_cmd_needs_roots install; shift; cmd_install "$@" ;; esac ;;

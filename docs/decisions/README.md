@@ -13,3 +13,4 @@ describes.
 | [`fetching-and-digests.md`](fetching-and-digests.md) | one download path, digests read from the release, and the schema traps in the version chains |
 | [`pinning.md`](pinning.md) | one pin per download; a published digest outranks a caller's default, and a POSIX sh variable name cannot hold a hyphen |
 | [`research-parity.md`](research-parity.md) | what the thirteen-reference sweep taught and where each adopted, documented or refused line went |
+| [`global-env.md`](global-env.md) | the environment is installed once into a directory already on `PATH`, not sourced at the top of every command |

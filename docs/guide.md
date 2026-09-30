@@ -179,8 +179,9 @@ names, or `sandhome install --force NAME`) installs locally regardless.
 
 The run: detects the machine, plans the roots, adopts or installs each toolchain,
 builds the shims this machine actually needs, writes `$SANDHOME_HOME/env.sh`,
-installs `$SANDHOME_HOME/profile.sh` and the one line a login file reads, and
-prints a report **read from the machine**  -  never from what was requested.
+installs `$SANDHOME_HOME/profile.sh` and the one line a login file reads,
+installs the global hook (section 3), and prints a report **read from the
+machine**  -  never from what was requested.
 
 Exit codes: `0` done, `1` something asked for could not be installed, `2` could
 not run at all.
@@ -203,8 +204,22 @@ library. That copy is a **copy, not a symlink**, because the checkout is
 frequently on a root that refuses `execve`: a symlink into it answers
 `command -v sandhome` and then fails with `Permission denied`.
 
+**The global hook is why the file is not sourced by hand.** The bootstrap picks
+a directory that is already on `PATH` and puts one dispatcher in it, keyed on
+`$0`, that sources `env.sh` and `exec`s the real binary from the exec root. A
+new shell, including a non-login shell a harness spawns per tool call, finds
+`sandhome` and every toolchain with nothing in front of the command. When the
+only candidate is on a root that refuses `execve`, the directory is replaced by
+a **symlink into the exec root**: the kernel resolves the link and permits
+`execve` on the resolved root, which is the userspace route through the noexec
+mount. `sandhome report` prints `global=on:<dir>` when it is installed, and
+`global=none` when the host had no writable candidate; `sandhome global
+--status` names it and `sandhome global --remove` takes it away. Installation is
+once; the hook serves every future shell.
+
 ```sh
-. "$SANDHOME_HOME/env.sh"          # in a shell
+sandhome global                    # where the hook is, and whether it is stale
+. "$SANDHOME_HOME/env.sh"          # in a shell, when no hook is installed
 eval "$(sandhome env)"             # without sourcing the file
 sandhome env                       # to read it
 sandhome path                       # the exec bin directory, for a script

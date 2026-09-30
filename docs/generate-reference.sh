@@ -281,7 +281,7 @@ printf '\n'
 # --- the test files ---------------------------------------------------------
 printf '## Tests\n\n'
 printf '| file | what it checks |\n| --- | --- |\n'
-for t in syntax unit space toolchain shims docs bootstrap errandsh-posix; do
+for t in syntax unit space toolchain shims docs bootstrap global errandsh-posix; do
     f="$ROOT/tests/$t.sh"
     [ -r "$f" ] || continue
     head_one=$(sed -n '3p' "$f" 2>/dev/null | sed 's/^# *//')
