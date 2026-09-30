@@ -344,8 +344,36 @@ SYNCEOF
         sh_rw_run="$(sh_memexec_bin)"
         sh_rw_target=$sh_rw_home
     else
-        if [ ! -f "$sh_rw_view.real" ]; then
-            mv -f "$sh_rw_view" "$sh_rw_view.real" 2>/dev/null || return 1
+        # # STOP: A DAMAGED .real IS REBUILT, NOT PRESERVED. The guard was "the
+        # file is missing", so a `.real` that exists but is not the compiler
+        # survived every repair, and the wrapper then exec'd itself:
+        #   rustc.real: 19: exec: .../bin/rustc.real: Argument list too long
+        # which reads as a kernel limit and is neither (measured on a view a
+        # launch-mode fixture had stamped over; the same rig compiled and ran a
+        # program once the pair was rebuilt). The test is CONTENT, not
+        # existence: a real compiler is an ELF image, and a sysroot wrapper is a
+        # #! script, so the first two bytes decide. The home copy is the source
+        # of truth and it is a real binary on the home in every mode.
+        sh_rw_bad=no
+        if [ -f "$sh_rw_view.real" ]; then
+            sh_rw_head=$(sed -n '1p' "$sh_rw_view.real" 2>/dev/null | cut -c1-2)
+            case "$sh_rw_head" in
+                '#!') sh_rw_bad=yes ;;
+            esac
+        else
+            sh_rw_bad=yes
+        fi
+        if [ "$sh_rw_bad" = yes ]; then
+            # The home binary is the real one; the view copy is the wrapper we
+            # are about to write. Anything already at sh_rw_view that is NOT a
+            # wrapper script is kept as the .real, which is what a promote that
+            # already mirrored the ELF leaves here.
+            if sh_is_script "$sh_rw_view" 2>/dev/null; then
+                rm -f "$sh_rw_view.real" 2>/dev/null
+                cp -f "$sh_rw_home" "$sh_rw_view.real" 2>/dev/null || return 1
+            else
+                mv -f "$sh_rw_view" "$sh_rw_view.real" 2>/dev/null || return 1
+            fi
         fi
         sh_rw_run=''
         sh_rw_target="$sh_rw_view.real"

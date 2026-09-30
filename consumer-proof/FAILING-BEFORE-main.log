@@ -1,0 +1,97 @@
+### FAILING-BEFORE: the nine open reports against talaria0101/sandhome main
+### date: 2026-09-30 (UTC), host: Linux x86_64, glibc, uid 0, no /dev/ptmx,
+### no /etc/passwd, memfd_create blocked by seccomp so launch mode falls back to
+### copies, consumer-shaped rig: HOME on /state (the noexec mount this tree
+### exists for), exec root on /workspace, every check in an `env -i` shell with
+### only HOME and PATH. The launch-style fixture stamps shims/memexec.c over
+### the view copies, which is exactly what launch mode does, and is labelled.
+### Reproduce: sh issues.sh <tree> <label> <home> <exec> --stamp
+### tree: /tmp/mainunit (git archive of main)
+
+#131 a non-interactive login shell resolves exec/bin before the env is loaded
+   $ bash -lc 'jq --version'
+   | jq-1.8.2
+   $ bash -lc 'echo $SANDHOME_EXEC' (did the login shell load the environment?)
+   | UNSET
+   $ bash -lc 'node --version'
+   | node: cannot map this copy back to its payload; set SANDHOME_EXEC and SANDHOME_HOME
+   $ sh -c 'jq --version' (non-login: no profile, the hook only)
+   | jq-1.8.2
+
+#132 the global hook must expose every tool the view advertises
+   |   node  /state/mf-home/bin/node
+   |   npm   NONE
+   |   npx   NONE
+   | sh: 1: npm: not found
+
+#133 the bake in exec/bin/sandhome must survive install and repair
+   baked repo lines right after the bootstrap: 1
+   after 'sandhome repair jq':  0
+   after 'sandhome install jq': 0
+   $ env -i $SANDHOME_EXEC/bin/sandhome doctor  (no HOME, no PATH, no environment)
+   | sandhome: cannot find the sandhome library, and this shell has no HOME to look in
+   | sandhome: set SANDHOME_REPO_DIR to the checkout, or set HOME and run this again
+   rc=2
+   $ the same with the CHECKOUT GONE, which is what the pointers cannot survive
+   (no clone recorded for this rig; skipped)
+
+#134 the skills: the setup installs them, so the document must say so and the check is a command
+   ~/.agents/skills: 3 SKILL.md files
+   $ sandhome skills
+   | usage: sandhome COMMAND [args]   <- no such command on main
+   | sandhome: [-] unknown command skills
+#135 rust: TC_rust_BINS must name rustc, and a fresh shell must get it
+   TC_rust_BINS='cargo/bin/rustup cargo/bin/cargo'
+   $ sandhome install rust   (the fix's own regression: the toolchain is installed)
+   |   cargo       /state/mf-home/bin/cargo
+   |   rustc       NONE
+   |   rustdoc     NONE
+   |   cargo-fmt   NONE
+   $ rustc --version from a shell that sourced nothing
+   | sh: 1: rustc: not found
+
+#136 a bare sandhome on a POSIX shell
+   $ dash bin/sandhome   (no arguments)
+   | /tmp/mainunit/bin/sandhome: 1748: shift: can't shift that many
+   rc=2
+   $ dash bin/sandhome help doctor   (the page for one command)
+   | usage: sandhome doctor [--json]
+   rc=0
+   $ sh bin/sandhome   (no arguments)
+   | /tmp/mainunit/bin/sandhome: 1748: shift: can't shift that many
+   rc=2
+   $ sh bin/sandhome help doctor   (the page for one command)
+   | usage: sandhome doctor [--json]
+   rc=0
+   $ bash bin/sandhome   (no arguments)
+   | usage: sandhome COMMAND [args]   <- no such command on main
+   | sandhome: [-] unknown command skills
+#137 sandhome project: the node half, and the exit status
+   $ sandhome project p137 --no-link  (a fresh shell with the hook, nothing sourced)
+   | sandhome: project p137 at /workspace/tri/main-final-exec/projects/p137
+   | sandhome: [!] uv venv failed; python half skipped
+   | sandhome: python: use ./p137/.venv/bin/python (or source ./p137/.venv/bin/activate)
+   | sandhome: [!] npm init failed; node half skipped
+   | sandhome: node: work in ./p137 (npm install, npx, native CLIs all run there)
+   | sandhome: note: /workspace/tri/main-final-exec/projects/p137 lives on the exec root; a tmpfs restart clears it, and this command rebuilds it
+   package.json exists: NO
+   | exit status: 0
+
+#138 npm install -g: the prefix bin must stay a real directory
+   |   /workspace/tri/main-final-exec/npm-global/bin
+   |   is a real directory: false
+   |   is a symlink to: /workspace/tri/main-final-exec/global
+   $ npm install -g cowsay (through the hook, with the prefix on PATH)
+   | 3 packages are looking for funding
+   |   run `npm fund` for details
+   |   which: NONE
+   | sh: 1: cowsay: not found
+   $ control: the same link in a REAL bin directory, same shell, same PATH shape
+   |   which: /workspace/tri/main-final/npmctl/bin/cowsay
+   | 1.6.0
+   $ a CLI installed after the setup, from a shell that sourced NOTHING
+   | sh: 1: cowsay: not found
+   |   the link npm wrote: ../lib/node_modules/cowsay/cli.js
+   |   runnable: NO (ENOENT)
+
+#139 a runtime that spawns itself

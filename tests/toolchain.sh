@@ -334,6 +334,56 @@ sh_toolchain_rust_proxies "$rust_fake2/cargo" "$rust_fake2/rustup" ''
 t_contains "$(readlink "$rust_fake2/cargo/bin/cargo" 2>/dev/null)" 'toolchains/stable' \
            'a link that is already a real binary is left alone (the fix is not a rewrite-everything)' 
 
+# --- a sysroot wrapper whose .real is not the compiler is rebuilt -----------
+# The wrapper generation guarded on "the file is missing", so a `.real` that
+# existed but was not the compiler survived every repair and the wrapper then
+# exec'd itself: `rustc.real: 19: exec: .../bin/rustc.real: Argument list too
+# long`, which reads as a kernel limit and is neither. The guard is CONTENT: a
+# compiler is an ELF image and a sysroot wrapper is a #! script, so the first
+# two bytes decide. Measured on a view a launch-mode fixture had stamped, and
+# healed by one `sandhome repair rust`.
+rw_fake=$work/rustwrapper
+rm -rf "$rw_fake" 2>/dev/null
+mkdir -p "$rw_fake/view/toolchains/stable-x86_64-unknown-linux-gnu/bin" "$rw_fake/home/toolchains/stable-x86_64-unknown-linux-gnu/bin" 2>/dev/null
+# the HOME holds the real compiler, as rustup leaves it
+printf '\177ELF\002\001\001\000fake-compiler-image\n' > "$rw_fake/home/toolchains/stable-x86_64-unknown-linux-gnu/bin/rustc"
+chmod 0755 "$rw_fake/home/toolchains/stable-x86_64-unknown-linux-gnu/bin/rustc" 2>/dev/null
+# the VIEW holds a wrapper and a .real that is ANOTHER wrapper: the damaged state
+printf '#!/bin/sh\n# sandhome: sysroot wrapper\necho wrapper\n' > "$rw_fake/view/toolchains/stable-x86_64-unknown-linux-gnu/bin/rustc"
+chmod 0755 "$rw_fake/view/toolchains/stable-x86_64-unknown-linux-gnu/bin/rustc" 2>/dev/null
+printf '#!/bin/sh\n# sandhome: sysroot wrapper\necho also-a-wrapper\n' > "$rw_fake/view/toolchains/stable-x86_64-unknown-linux-gnu/bin/rustc.real"
+chmod 0755 "$rw_fake/view/toolchains/stable-x86_64-unknown-linux-gnu/bin/rustc.real" 2>/dev/null
+tc_rust_sysroot_wrapper \
+    "$rw_fake/view/toolchains/stable-x86_64-unknown-linux-gnu/bin/rustc" \
+    "$rw_fake/home/toolchains/stable-x86_64-unknown-linux-gnu/bin/rustc" \
+    "$rw_fake/view/toolchains/stable-x86_64-unknown-linux-gnu" \
+    '' >/dev/null 2>&1
+# The check is that it is NOT a script any more, which is the property the
+# guard turns on: a real compiler does not start with #!.
+rw_real_head=$(sed -n '1p' "$rw_fake/view/toolchains/stable-x86_64-unknown-linux-gnu/bin/rustc.real" 2>/dev/null | cut -c1-2)
+case "$rw_real_head" in
+    '#!') t_ok 1 'a damaged rustc.real is replaced by the home compiler, not kept' ;;
+    *)   t_ok 0 'a damaged rustc.real is replaced by the home compiler, not kept' ;;
+esac
+t_is "$(sed -n '1p' "$rw_fake/view/toolchains/stable-x86_64-unknown-linux-gnu/bin/rustc" 2>/dev/null | cut -c1-2)" '#!' \
+     'and the wrapper is written back over the view name'
+# the control: a GOOD .real (already the compiler) must be left byte-identical
+rw_good=$work/rustwrapper-good
+rm -rf "$rw_good" 2>/dev/null
+mkdir -p "$rw_good/view/toolchains/stable-x86_64-unknown-linux-gnu/bin" 2>/dev/null
+printf '\177ELF\002\001\001\000the-real-compiler\n' > "$rw_good/toolchains/stable-x86_64-unknown-linux-gnu/bin/rustc.real" 2>/dev/null
+mkdir -p "$rw_good/toolchains/stable-x86_64-unknown-linux-gnu/bin" 2>/dev/null
+printf '\177ELF\002\001\001\000the-real-compiler\n' > "$rw_good/toolchains/stable-x86_64-unknown-linux-gnu/bin/rustc.real"
+printf '#!/bin/sh\necho old-wrapper\n' > "$rw_good/toolchains/stable-x86_64-unknown-linux-gnu/bin/rustc"
+chmod 0755 "$rw_good/toolchains/stable-x86_64-unknown-linux-gnu/bin/rustc" "$rw_good/toolchains/stable-x86_64-unknown-linux-gnu/bin/rustc.real" 2>/dev/null
+tc_rust_sysroot_wrapper \
+    "$rw_good/toolchains/stable-x86_64-unknown-linux-gnu/bin/rustc" \
+    "$rw_good/toolchains/stable-x86_64-unknown-linux-gnu/bin/rustc" \
+    "$rw_good/toolchains/stable-x86_64-unknown-linux-gnu" \
+    '' >/dev/null 2>&1
+t_contains "$(cat "$rw_good/toolchains/stable-x86_64-unknown-linux-gnu/bin/rustc.real" 2>/dev/null)" 'the-real-compiler' \
+     'a rustc.real that IS the compiler is left exactly as it was'
+
 # install rust --target parses without downloading (unknown target refused by
 # rustup later, but the flag itself must be accepted and exported).
 inst_t=$(SANDHOME_HOME="$work/ih" SANDHOME_EXEC="$work/ie" SANDHOME_REPO_DIR="$ROOT" \
