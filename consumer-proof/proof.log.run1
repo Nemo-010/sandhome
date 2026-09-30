@@ -1,0 +1,236 @@
+
+=== C0 failing-before: a fresh shell has no sandhome and no environment ===
+date(host): 2026-09-30T09:26:44Z
+command -v sandhome: []
+no (noexec, as on the target sandbox)
+no
+
+=== C1 ROUTE step 2: sh bootstrap.sh --toolset cli (only HOME and PATH given) ===
+bootstrap:   built /workspace/sandhome/.sandhome/exec/bin/sandhome-memexec
+bootstrap: void on Linux x86_64, glibc, wsl=no, privilege=root
+bootstrap: pty=no passwd=no
+bootstrap: home /tmp/shc/home/.local/share/sandhome (noexec); exec /workspace/sandhome/.sandhome/exec
+requested=jq ripgrep fd
+feas jq need_mb=8 free_mb=96679 fit=yes
+feas ripgrep need_mb=32 free_mb=96679 fit=yes
+feas fd need_mb=16 free_mb=96679 fit=yes
+total_exec_need_mb=56 max_exec_free_mb=96679
+bootstrap: toolchain jq: a working copy is already here; adopting it
+bootstrap: toolchain ripgrep: a working copy is already here; adopting it
+bootstrap: toolchain fd: a working copy is already here; adopting it
+bootstrap:   built /tmp/shc/home/.local/share/sandhome/shims/fakepty.so
+bootstrap:   built /tmp/shc/home/.local/share/sandhome/shims/fakepwd.so
+bootstrap:   built /tmp/shc/home/.local/share/sandhome/shims/antiptrace.so
+bootstrap:   built /tmp/shc/home/.local/share/sandhome/shims/fakedrm.so
+bootstrap:   built /tmp/shc/home/.local/share/sandhome/shims/fakeinput.so
+bootstrap:   built /tmp/shc/home/.local/share/sandhome/shims/fakexenv.so
+bootstrap:   built /tmp/shc/home/.local/share/sandhome/shims/fakedisplay.so
+bootstrap:   installed /workspace/sandhome/.sandhome/exec/bin/errandsh
+bootstrap:   installed /workspace/sandhome/.sandhome/exec/bin/sandhome
+bootstrap:   baked /workspace/sandhome and /tmp/shc/home/.local/share/sandhome into /workspace/sandhome/.sandhome/exec/bin/sandhome
+bootstrap:   wrote /tmp/shc/home/.local/share/sandhome/entry.sh (source it from a shell with no PATH)
+bootstrap:   linked /tmp/shc/home/.agents/skills/sandhome
+bootstrap:   linked /tmp/shc/home/.agents/skills/errandsh
+bootstrap:   linked /tmp/shc/home/.agents/skills/sealed-sandbox
+bootstrap:   wrote /tmp/shc/home/.local/share/sandhome/env.sh
+bootstrap:   added /workspace/sandhome/.sandhome/exec/bin to /tmp/shc/home/.profile
+bootstrap:   installed /tmp/shc/home/.local/share/sandhome/profile.sh
+bootstrap:   added /tmp/shc/home/.local/share/sandhome/profile.sh to /tmp/shc/home/.profile
+bootstrap:   installed the global hook at 2 of 2 directories, verified in a fresh shell (3 commands; a fresh shell needs to source nothing)
+os=void
+kernel=Linux
+arch=x86_64
+libc=glibc
+wsl=no
+privilege=root
+provider=xbps
+pty=no
+passwd=no
+ptrace=no
+bind=unix
+home=/tmp/shc/home/.local/share/sandhome
+home_exec=no
+exec=/workspace/sandhome/.sandhome/exec
+exec_free_mb=96679
+exec_space=ok
+max_exec_free_mb=96679
+exec_ceiling=roomy
+login_shell=unknown
+env_on_path=no
+entry=/tmp/shc/home/.local/share/sandhome/entry.sh
+global=on:/workspace/shc-wsbin
+installed=
+adopted=jq ripgrep fd
+shims=fakepty fakepwd antiptrace fakedrm fakeinput fakexenv fakedisplay
+shims_missing=
+shims_built_this_run=fakepty fakepwd antiptrace fakedrm fakeinput fakexenv fakedisplay
+view=copy
+memexec=built but the probe fails here; views fall back to copies
+toolchain.bun=
+toolchain.clang=clang version 21.1.7
+toolchain.cmake=cmake version 4.2.2
+toolchain.deno=
+toolchain.fd=fd 10.5.0
+toolchain.gh=gh version 2.101.0 (2026-09-15)
+toolchain.go=go1.27.1
+toolchain.jq=jq-1.8.2
+toolchain.meson=
+toolchain.mold=mold 2.40.4 (compatible with GNU ld)
+toolchain.ninja=
+toolchain.node=
+toolchain.perl=5.042003
+toolchain.pkgconf=0.29.2
+toolchain.python=Python 3.14.7
+toolchain.qemuuser=qemu-x86_64 version 11.1.1
+toolchain.ripgrep=ripgrep 15.2.0
+toolchain.rust=
+toolchain.shellcheck=
+toolchain.shfmt=
+toolchain.yq=
+toolchain.zig=0.13.0
+failures=0
+bootstrap rc=0
+/tmp/shc/home/bin/sandhome
+command-v rc=0
+
+=== C2 route step 2 tail: doctor and status, nothing sourced ===
+ok   home_writable=yes
+ok   exec_writable=yes
+ok   exec_runs=yes
+ok   exec_on_path=yes
+ok   env_file=yes
+ok   global_hook=on:/workspace/shc-wsbin
+ok   fakepty_built=yes
+ok   fakepwd_built=yes
+ok   fakepwd_database=yes
+ok   antiptrace_built=yes
+ok   fakedrm_built=yes
+ok   fakeinput_built=yes
+ok   fakexenv_built=yes
+ok   fakedisplay_built=yes
+ok   toolchain_fd=yes
+ok   toolchain_jq=yes
+ok   toolchain_ripgrep=yes
+doctor_failures=0
+doctor rc=0
+ready=yes home=/tmp/shc/home/.local/share/sandhome exec=/workspace/sandhome/.sandhome/exec exec_space=ok exec_ceiling=roomy view=copy toolchains=13/22 workdir_noexec=no next=build under /workspace/sandhome/.sandhome/exec
+SANDHOME_EXEC=[unset] TEST=[unset]
+jq-1.8.2
+ripgrep 15.2.0
+fd 10.5.0
+git version 2.55.0
+
+=== C3 every recorded directory serves a fresh shell on its own ===
+global=on:/workspace/shc-wsbin
+global_dir=/workspace/shc-wsbin
+global_link=no
+global_command=yes
+hook=/workspace/shc-wsbin state=ok link=no
+hook=/tmp/shc/home/bin state=ok link=yes
+global_dirs=2
+global_ok=2
+global_broken=0
+global_tools=fd jq rg
+global_clashes=
+fresh shell through /workspace/shc-wsbin: 1
+env=ok
+fresh shell through /tmp/shc/home/bin: 1
+env=ok
+
+=== C4 wipe the exec root (tmpfs-restart shape), then resume ===
+before: jq-1.8.2
+tool ok
+after wipe: jq-1.8.2
+tool ok (unexpected)
+pty=no fakepty_built=yes passwd=no fakepwd_built=yes passwd_file=/tmp/shc/home/.local/share/sandhome/shims/passwd dir=/tmp/shc/home/.local/share/sandhome/shims preload=off antiptrace_built=yes fakedrm_built=yes fakeinput_built=yes fakexenv_built=yes fakedisplay_built=yes
+ok   home_writable=yes
+ok   exec_writable=yes
+ok   exec_runs=yes
+ok   exec_on_path=yes
+ok   env_file=yes
+ok   global_hook=on:/tmp/shc/home/bin
+ok   fakepty_built=yes
+ok   fakepwd_built=yes
+ok   fakepwd_database=yes
+ok   antiptrace_built=yes
+ok   fakedrm_built=yes
+ok   fakeinput_built=yes
+ok   fakexenv_built=yes
+ok   fakedisplay_built=yes
+ok   toolchain_fd=yes
+ok   toolchain_jq=yes
+ok   toolchain_ripgrep=yes
+doctor_failures=0
+resume rc=0
+after resume: jq-1.8.2
+tool ok
+
+=== C5 dispatch cost, this machine, 20 runs each (ms total) ===
+bare PATH, jq:            27 ms
+hook, jq:                 27 ms
+per-command . env.sh, jq: 54 ms
+bare PATH, true:          15 ms
+hook, true:               15 ms
+per-command . env.sh, true: 41 ms
+
+=== C6 shell diversity: sh, dash, bash, login and non-login ===
+sh -c: ok
+ok
+dash -c: ok
+ok
+bash -c: ok
+ok
+bash -lc (login): ok
+ok
+
+=== C7 status, remove, and recovery through entry.sh ===
+global=on:/tmp/shc/home/bin
+global_dir=/tmp/shc/home/bin
+global_link=yes
+global_command=yes
+hook=/tmp/shc/home/bin state=ok link=yes
+hook=/workspace/shc-wsbin state=ok link=no
+global_dirs=2
+global_ok=2
+global_broken=0
+global_tools=clang clang++ cmake cpack ctest gh ld.mold mold perl pkg-config qemu-x86_64
+global_clashes=
+sandhome:   removed the global hook (a fresh shell needs env.sh again)
+after remove, command -v sandhome: []
+sandhome:   installed the global hook at 3 of 3 directories, verified in a fresh shell (11 commands; a fresh shell needs to source nothing)
+ok   home_writable=yes
+ok   exec_writable=yes
+ok   exec_runs=yes
+ok   exec_on_path=yes
+ok   env_file=yes
+ok   global_hook=on:/workspace/sandhome/.sandhome/exec/go-bin
+ok   fakepty_built=yes
+ok   fakepwd_built=yes
+ok   fakepwd_database=yes
+ok   antiptrace_built=yes
+ok   fakedrm_built=yes
+ok   fakeinput_built=yes
+ok   fakexenv_built=yes
+ok   fakedisplay_built=yes
+ok   toolchain_fd=yes
+ok   toolchain_jq=yes
+ok   toolchain_ripgrep=yes
+doctor_failures=0
+entry rc=0
+after entry.sh recovery: hook back, tool ok
+ok
+global=on:/workspace/sandhome/.sandhome/exec/go-bin
+global_dir=/workspace/sandhome/.sandhome/exec/go-bin
+global_link=no
+global_command=yes
+hook=/workspace/sandhome/.sandhome/exec/go-bin state=ok link=no
+hook=/workspace/shc-wsbin state=ok link=no
+hook=/tmp/shc/home/bin state=ok link=yes
+global_dirs=3
+global_ok=3
+global_broken=0
+global_tools=clang clang++ cmake cpack ctest gh ld.mold mold perl pkg-config qemu-x86_64
+global_clashes=
+
+=== done ===
+log: /workspace/consumer-proof/proof.log
