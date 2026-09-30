@@ -357,6 +357,76 @@ else
 fi
 t_is "$notice_missing" '' 'every toolchain module has a NOTICE row naming its bytes, version and digest'
 
+# --- 7bb: README's "what is in the box" lists every module and every shim ----
+# The inventory is the one place a reader looks to see what the tree carries,
+# and it rots silently: it named 7 toolchains when there are 22, and 2 shims
+# when there are 7. Nothing failed, because every check so far runs in the
+# direction "the document names something that does not exist" - a document that
+# omits something cannot be caught that way. So this check runs the other
+# direction, over the same two sentences, and the README says so.
+box_line=$(sed -n '/^| `tools\/` |/p' "$ROOT/README.md" 2>/dev/null | head -1)
+shim_line=$(sed -n '/^| `shims\/` |/p' "$ROOT/README.md" 2>/dev/null | head -1)
+box_missing=''
+for mod in "$ROOT"/tools/*.sh; do
+    [ -r "$mod" ] || continue
+    modname=${mod##*/}; modname=${modname%.sh}
+    case "$box_line" in
+        *"$modname"*) : ;;
+        *) box_missing="$box_missing $modname" ;;
+    esac
+done
+t_is "$box_missing" '' 'README names every toolchain module that exists'
+# The match is on a WHOLE NAME, not a substring. `antiptraceXX` contains
+# `antiptrace`, so a substring test calls a document that RENAMED a shim one
+# that listed it, which is the guard lying about the thing it exists to catch.
+# (Measured: the substring form stayed green with `antiptraceXX` in the README.)
+# The line is stripped of its backticks and the sentence is split on spaces and
+# commas, so a shim named inside a longer phrase still matches as a word.
+shim_words=$(printf '%s' "$shim_line" | tr '`,|' '   ')
+shim_missing=''
+for shim in fakepty fakepwd antiptrace fakedrm fakeinput fakexenv fakedisplay; do
+    shim_found=no
+    for shim_w in $shim_words; do
+        [ "$shim_w" = "$shim" ] && shim_found=yes
+    done
+    [ "$shim_found" = yes ] || shim_missing="$shim_missing $shim"
+done
+t_is "$shim_missing" '' 'README names every shim that exists'
+# The guards must be able to fail, and the probe has to exercise the REAL
+# mechanism. A module is planted in tools/ that no document names; the same
+# sweep the clause above runs must then refuse to certify the README. (An
+# earlier version of this probe matched a string constant, which proves
+# nothing about the sweep it stands for, and a second one split its words
+# differently from the sweep and reported a pass over a failing guard.)
+probe_mod=zz-probe-module
+cat > "$ROOT/tools/$probe_mod.sh" <<'PROBEEOF'
+#!/bin/sh
+TC_zz_probe_MODULE_DESC='a module planted to prove the README inventory guard can fail'
+TC_zz_probe_MODULE_BINS='bin/zz-probe'
+PROBEEOF
+box_line=$(sed -n '/^| `tools\/` |/p' "$ROOT/README.md" 2>/dev/null | head -1)
+box_missing_probe=''
+for mod in "$ROOT"/tools/*.sh; do
+    [ -r "$mod" ] || continue
+    modname=${mod##*/}; modname=${modname%.sh}
+    case "$box_line" in
+        *"$modname"*) : ;;
+        *) box_missing_probe="$box_missing_probe $modname" ;;
+    esac
+done
+rm -f "$ROOT/tools/$probe_mod.sh"
+t_contains "$box_missing_probe" "$probe_mod" 'the README inventory guard refuses a module no document names'
+# and the count in the shim sentence must match the shim list, so "three"
+# cannot come back with seven modules behind it
+shim_count=$(sh -c '. "$0/lib/common.sh" 2>/dev/null; . "$0/lib/shim.sh"; sh_shim_names' "$ROOT" 2>/dev/null | wc -w | tr -d ' ')
+# The SENTENCE in the guide is what a reader reads, so the count clause reads
+# that sentence and not the README row: pointing it at the README left the guide
+# free to say "Three interposers" with seven modules behind it, which is the
+# exact staleness this clause exists to catch (measured, both ways).
+guide_shim_word=$(sed -n 's/^\([A-Za-z]*\) `LD_PRELOAD` interposers.*/\1/p' "$ROOT/docs/guide.md" 2>/dev/null | head -1)
+guide_shim_count=$(printf '%s' "$guide_shim_word" | tr 'A-Z' 'a-z' | sed 's/^one$/1/; s/^two$/2/; s/^three$/3/; s/^four$/4/; s/^five$/5/; s/^six$/6/; s/^seven$/7/; s/^eight$/8/; s/^nine$/9/; s/^ten$/10/')
+t_is "$guide_shim_count" "$shim_count" "the guide's shim count ($guide_shim_word) matches the $shim_count shims that exist"
+
 # --- 7c: the view-cost table agrees with the modules (issues #90, #91) -----
 # docs/architecture.md owns what a view costs per toolchain and mode. Every
 # module declares TC_<name>_EXEC_MB (the copy price the gate and the plan

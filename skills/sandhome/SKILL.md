@@ -97,6 +97,12 @@ sandhome install rust go      # adopt or install, then write the env
 `install` ends in a **probe**: the tool is run, not assumed. A toolchain that
 installed without an error and does not answer is reported as a failure.
 
+`sandhome skills` reports what the setup installed for a harness: one line per
+skill per location (`~/.agents/skills`, and `~/.pi/agent/skills` where Pi state
+exists) with its state and where the bytes came from, ending in
+`skills_installed=N` and exiting non-zero when none is installed. A harness with
+a resource reload (Pi: `/reload`) picks them up without a restart.
+
 ## Diagnose a tool that will not run
 
 1. `sandhome space --probe`  -  which root runs a binary, and which is `exec=no`?
@@ -112,7 +118,11 @@ installed without an error and does not answer is reported as a failure.
 | `Too many levels of symbolic links` on a binary | the view links a tool to itself; `sandhome repair <name>` rewrites the link |
 | `collect2: posix_spawnp: Permission denied` linking rust | the sysroot linker is on the noexec home and cannot be exec'd; no `-fuse-ld` value fixes it. `sandhome install --force rust` puts the toolchain on the exec root || `fork/exec ...: permission denied` after a successful `go build` | the build cache was on a noexec root; `sandhome install go` puts `GOCACHE` and `GOBIN` on the exec root, for an adopted go too |
 | `npm i -g` CLI missing or `bad interpreter` | prefix was on the noexec home; `sandhome install node` moves it to the exec root |
+| a CLI installed after the setup is missing from a shell that sourced nothing | the hook does not know the name yet; `sandhome global` re-reads the prefix from disk. A login shell finds it at once, a shell that has run a hooked tool finds it through that tool |
 | ANSI codes inside `jq` or `git` output | `fakepty` is on; `SANDHOME_SHIMS=0` |
+| `cargo`/`rustc` says `Permission denied (os error 13)` from a fresh shell but works in a sourced one | rustup's proxies resolve through the noexec home; `sandhome repair rust` points the view at the real toolchain binaries |
+| a browser or bundler dies with `spawn /memfd:sandhome (deleted) ENOENT` | the runtime ran from memory; `sandhome install --force node` puts a real copy in the view, and `doctor` reports `toolchain_node_spawn` while it is not |
+| a login shell (`bash -lc`) dies with `cannot map this copy back to its payload` | it resolved the exec bin before the environment was loaded; the profile fragment loads `env.sh` for every login shell now, so re-run the setup once |
 | a tool is absent from a fresh shell | the global hook was not installed (`global=none`), or a recorded directory no longer answers (`sandhome global --status` shows `state=stale`); run `sandhome global` to install or repair it, or source the entry point |
 | a tool is absent even after `env.sh` was read | it was adopted and could not be linked into the exec view; `sandhome repair <name>` retries the link, and `sandhome install --force <name>` places a copy in the view when the adopted binary cannot be linked at all |
 | `doctor` says `FAIL exec_space=low` or `=critical` | the exec root is draining and a build will fail with `no space left on device`. `sandhome space` names the state, `sandhome space --probe` lists roomier candidates, `sandhome gc` reclaims sandhome's own caches, and re-running setup with `--exec DIR` moves everything to a roomy path |

@@ -17,6 +17,7 @@ tc_<name>_env         write the env fragment (optional)
 tc_<name>_version     print a version (optional)
 tc_<name>_exec_mb     computed fresh-install exec need in MB (optional)
 tc_<name>_copy_bins   executables that stay real copies in launch mode (optional)
+tc_<name>_doctor      health check the readiness gate runs (optional)
 tc_<name>_pin URL      digest for this download (optional): consulted after
                     operator-set pins and before the published/default arms,
                     so an outsider module is pinnable without editing
@@ -29,7 +30,26 @@ gate reads the same number, so the two never disagree. A module whose need
 depends on the view mode (rust: 25 launch, 150 copy) defines
 `tc_<name>_exec_mb` instead. `tc_<name>_copy_bins` names the executables a
 memfd image cannot run: anything spawned by path that locates its siblings
-exe-relative (measured: gcc's `ld.lld` wrapper, `cargo-clippy`).
+exe-relative (measured: gcc's `ld.lld` wrapper, `cargo-clippy`), anything that
+reads its own install dir through `/proc/self/exe` (`zig`), and the language
+runtimes that fork themselves (`node`, `deno`, `bun` - issue #139, where the
+symptom was that every Playwright and webpack spawn died with ENOENT naming
+`/memfd:sandhome (deleted)` while `node --version` answered and `doctor` was
+green). `tc_<name>_doctor` is a check the readiness gate runs on the toolchain
+itself, for a property a version string cannot show: that a runtime can
+re-execute itself.
+
+The `copy_bins` list is only useful if it **reaches the promote**, and that took
+a fix of its own. `sh_promote_toolchain` read the list through
+`sh_copy_only_set`, which asked `command -v tc_<name>_copy_bins` without ever
+sourcing `tools/<name>.sh`, so the answer was no and `SH_COPY_ONLY` came back
+empty for every module that declared one - measured on `main` for node, deno,
+bun, zig and rust alike. `bin/node` was therefore stamped as a launcher in
+launch mode, which is exactly what `tc_node_copy_bins` exists to prevent, and
+rust's `ld.lld` wrappers and zig's install-dir lookup were stamped too. The
+resolver loads the module itself now (`sh_toolchain_load` is idempotent, so
+every path is safe), and `tests/space.sh` calls it with nothing pre-loaded so
+the property cannot rot.
 
 Functions are namespaced by name because POSIX sh has no namespaces and two
 modules defining `install` would silently shadow each other.
@@ -59,6 +79,25 @@ modules defining `install` would silently shadow each other.
   prices copy mode; a module whose launch view costs less defines
   `tc_<name>_exec_mb` and both the gate and the plan read it. The figure is
   measured off a real view, with headroom, never guessed.
+- **Name every executable a memfd image cannot run** in `tc_<name>_copy_bins`.
+  The promote reads that list to decide what lands as real bytes and what lands
+  as a 20KB launcher. Three reasons a binary cannot run from memory, all
+  measured: it is *spawned by path* and locates its siblings exe-relative (gcc's
+  `ld.lld` wrapper, `cargo-clippy`); it finds its own install dir through
+  `/proc/self/exe`, which a memfd image hides (`zig`); or it is a **language
+  runtime that forks itself**, so `process.execPath` is a path that no longer
+  exists by the time a child reads it (`node`, `deno`, `bun` - the last is the
+  parent of every worker and every download helper, so Playwright, Puppeteer,
+  webpack, vite and jest all break while `node --version` still answers,
+  issue #139). A launcher is right for a compiler you invoke once and wrong for
+  an interpreter you invoke thousands of times.
+- **A `tc_<name>_doctor` hook is where a toolchain's own health check goes.**
+  `doctor` runs it and reports `toolchain_<name>_spawn`, so the readiness gate
+  cannot be green over a toolchain that cannot do what a *user* does with it.
+  Run the user's call, not a proxy for it: `node` spawning itself through
+  `process.execPath` is the check, because that is what every UI tool does. Name
+  the view copy explicitly rather than trusting the `PATH` the doctor run
+  inherited, or it can check a different toolchain's bytes.
 
 ## The digest position
 

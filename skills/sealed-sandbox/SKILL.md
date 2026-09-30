@@ -35,8 +35,21 @@ detects it by running a file, splits the roots, mirrors executables onto the
 exec root and symlinks shared objects back. See `docs/architecture.md` section 1.
 
 If a tool "installed" and is not found, or a binary is `Permission denied`:
-`sandhome install <name>`. It rebuilds the exec view and probes the tool
-afterwards.
+`sandhome repair <name>`. `repair` rebuilds the exec view and downloads nothing,
+so it cannot make a working install worse; `install` is the command that adopts
+and downloads, and on an adopted toolchain that is what broke the view in the
+first place.
+
+Two failures here read as something else and are worth naming. A **language
+runtime** (`node`, `deno`, `bun`) cannot be a launch-mode view at all: every
+worker and download helper the runtime spawns reads `process.execPath`, and an
+anonymous memfd path is gone by the time they do, so a browser or bundler dies
+with `spawn /memfd:sandhome (deleted) ENOENT` while `node --version` answers.
+`sandhome doctor` reports `toolchain_node_spawn` when that is true. And a
+**rustup proxy** resolves the toolchain under `$RUSTUP_HOME`, which on a split
+root is the mount that refuses `execve`, so `cargo` can answer
+`Permission denied (os error 13)` from a fresh shell while working in any
+sourced one; `sandhome repair rust` points the view at the real binaries.
 
 ## No bind
 

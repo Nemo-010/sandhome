@@ -24,8 +24,12 @@ find the environment with nothing in front of the command.
 
 ## What does not work
 
-- **A login shell file.** A non-login, non-interactive shell does not read one,
-  which is the only shell a harness uses.
+- **A login shell file alone.** A non-login, non-interactive shell reads none,
+  which is the only shell a harness uses. The profile fragment now loads the
+  environment for every login shell as well (issue #131: a non-interactive
+  `bash -lc` got the exec bin on `PATH` from `~/.profile` but never the roots,
+  so every launch-mode copy in it died), but that covers only shells that read
+  a login file at all, so it cannot be the answer on its own.
 - **`BASH_ENV`/`ENV`.** Unset, and setting them is the caller's business, not
   the installer's.
 - **Writing a wrapper into `$HOME/bin` and adding it to `PATH`.** `$HOME` is
@@ -33,6 +37,49 @@ find the environment with nothing in front of the command.
   `Permission denied`.
 - **A new directory on `PATH` only for login shells.** The profile fragment
   already on the home has this limit; it is not read by the shells that matter.
+
+## Three things the hook has to do, and each was a measured failure
+
+The first version installed the hook and exposed the exec view. Consuming it as
+a user found three gaps, each of which is now part of the decision.
+
+**1. A view name whose only `PATH` hit is inside this tree must still be
+exposed (issue #132).** `env.sh` puts `views/<name>/bin` and the toolchain
+prefixes on `PATH`, so asking "does `PATH` already find this name?" answered
+yes for tools that only a shell which has *already read the environment* can
+find - which is the shell the hook exists to make unnecessary. `npm` and `npx`
+were the two names lost this way, because they are the only symlinks in the view
+that point at a script, so a filter looking for scripts-to-wrappers caught them
+and the ELF names slipped through. The test is the exec **root**, not the view
+bin: a hit under `$SH_EXEC` does not count; a hit outside it is a real host
+copy and is still filtered.
+
+**2. A directory this tree creates to hold executables is never a hook
+directory (issue #138).** `npm install -g cowsay` writes
+`bin/cowsay -> ../lib/node_modules/cowsay/cli.js`, a **relative** link the
+kernel resolves against the link's *real* directory. While `bin` was a symlink
+to `$SH_EXEC/global`, that resolved under `$SH_EXEC` instead of the prefix and
+every `npm i -g` CLI was dangling while npm reported success. The refusal is by
+**exact path** against one list (`sh_global_sandbox_dirs`), because a prefix
+match would also refuse `npm-global/lib`, which is the directory those relative
+links resolve *into*. An older hook already sitting in one of those
+directories is repaired rather than merely refused in future: our own link is
+removed, the directory is restored, and the stranded relative links are moved
+back.
+
+**3. The CLIs installed afterwards have to be on the `PATH` a fresh shell
+searches (issue #138 again).** Restoring the prefix directory makes `npm i -g`
+write a good link, and the CLI is then reachable from a sourced shell and from
+any tool the hook starts - but a shell that has not run a hooked command and is
+not a login shell still does not search the prefix, and a fresh shell is
+exactly the case this whole decision is about. Two things close it, and neither
+is enough alone: the dispatcher prepends the sandbox bin directories to the
+`PATH` of the tools it starts, in `env.sh`'s order so the result is identical;
+and the hook's name list reads those directories **from disk** rather than from
+a record, because they change every time an operator installs something and a
+recorded list would be stale the moment it was written. A login shell is covered
+separately by the profile fragment, and a shell with no `PATH` at all by
+`entry.sh`.
 
 ## The decision
 
@@ -60,13 +107,24 @@ dropped off this shell's `PATH` instead of forgetting it, and an entry is
 looked up by its path in the record, never by its position, because `PATH`
 order moves between runs.
 
-The dispatcher is one file keyed on `$0`:
+The dispatcher is one file keyed on `$0`. Its shape, abbreviated (the real
+one also carries the prefixed-bin loop, the `env -i` probe marker and a
+last-resort search of the prefix):
 
 ```sh
 _sandhome_name=${0##*/}
 . "$_sandhome_home/env.sh"
+for _sandhome_sb in "$SANDHOME_EXEC/npm-global/bin" "$SANDHOME_EXEC/uv-bin"; do
+    [ -d "$_sandhome_sb" ] || continue
+    case ":$PATH:" in *":$_sandhome_sb:"*) continue ;; esac
+    PATH="$_sandhome_sb:$PATH"
+done
+export PATH
 exec "$SANDHOME_EXEC/bin/$_sandhome_name" "$@"
 ```
+
+The directory list is generated from `sh_global_sandbox_dirs` so the dispatcher's
+`PATH` and the refusal in point 2 above cannot name different directories.
 
 Every exposed name is a symlink to that one file, so a toolchain added later
 needs a symlink, not a new script, and the environment has one place to live.

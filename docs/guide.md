@@ -18,19 +18,32 @@ the page to read before adding a toolchain to it.
   `$GITHUB_WORKSPACE`, `$RUNNER_TEMP`, `$AGENT_WORKFOLDER`, `$WORKSPACE`,
   `/mnt`, `/data`, `/scratch`, `/srv`), then the home, `/dev/shm`, `/tmp`,
   `/run/user/<uid>`, `$HOME/.cache/sandhome/exec`, and order is only a tie-break:
-  preferring the first candidate that merely cleared the floor put `/dev/shm`
-  (184MB) ahead of `/tmp` (488MB) and the default toolset failed for want of
+  preferring the first candidate that merely cleared the floor put a 184MB
+  `/dev/shm` ahead of a 488MB `/tmp` and the default toolset failed for want of
   room (issue #37). Exec perms differ by sandbox, so every candidate is probed
   with a real file before it can win: a roomy noexec volume loses on its merits
-  and a small exec-capable one wins only when nothing roomier runs. On this
-  machine `/workspace` runs and holds 117GB while `/tmp` and `/dev/shm` refuse
-execve, so the plan picks the workspace volume; on a cage without it the same
-  entries are absent and the fallback is the roomiest tmpfs that runs.
+  and a small exec-capable one wins only when nothing roomier runs. A cage
+  without any of the named volumes simply does not have those entries, and the
+  fallback is the roomiest tmpfs that runs.
+
+  **The only honest way to read the plan on a new machine is to run it.** These
+  figures are a property of the machine, not of the tree, and they go stale:
+  exec permissions and free space both change under a long-lived sandbox, so a
+  document that states them as fact is describing one host at one moment. Two
+  from the sandbox this was measured on, kept because they are the shape of the
+  problem rather than the answer to it - `/workspace` ran binaries while `/tmp`
+  and `/dev/shm` did not, so the roomiest volume *won* and the tmpfs lost; on a
+  host where both run, `/tmp` won on free space. Neither is a rule:
+
+  ```sh
+  sandhome space --probe   # every candidate: writable, exec, mount, free
+  sandhome space           # the two the plan chose, and why
+  ```
 
   **Free space decides between working candidates, and it is the decision that
-  matters.** On this sandbox `/dev/shm` works and has 244MB while `/tmp` works
-  and has 52GB; the first plan picks `/tmp`, and installing `go` onto the other
-  one fails for want of room. `SANDHOME_MIN_EXEC_MB` raises the bar; when no
+  matters.** Where `/dev/shm` runs and is small while `/tmp` runs and is large,
+  the plan picks `/tmp` on free space, and installing `go` onto the other one
+  fails for want of room. `SANDHOME_MIN_EXEC_MB` raises the bar; when no
   candidate clears it the first that works is used and a warning says so.
 
   **When no roomy exec-capable root exists, nothing points at one (issue #59).**
@@ -38,7 +51,7 @@ execve, so the plan picks the workspace volume; on a cage without it the same
   megabytes on any exec-capable candidate. A small ceiling restricts the
   *view*, not the toolchain: payloads live on the home and only executables
   mirror onto the exec root, so rust and clang install and compile on roots
-  far smaller than their payloads (measured with 296MB free of 488MB).
+  far smaller than their payloads (measured at 296MB free of a 488MB root).
   What does not fit is a view bigger than the root; the per-toolchain view
   costs are in `docs/architecture.md`, and an install that cannot fit names
   its measured need against the measured free space instead of failing
@@ -90,11 +103,11 @@ execve, so the plan picks the workspace volume; on a cage without it the same
   | `full` | nothing left | the same, plus `gc` and `--exec` by name |
 
   A small root is judged on megabytes and a large one needs **both** a share and
-  an absolute floor, because either alone is wrong. A pure share rule is nonsense
-  at scale: the 419GB disk this was written on sat at 6.6% free with 393GB still
-  on it, a share-only rule called that `low`, and `doctor` failed a freshly built
-  home with 27GB free. A pure absolute rule is nonsense at the small end, which is
-  why a root under `SANDHOME_PCT_MEANINGFUL_MB` (1GB) is judged on megabytes
+  an absolute floor, because either alone is wrong. A pure share rule is
+  nonsense at scale: measured on a 419GB disk at 6.6% free, 393GB was still on
+  it and a share-only rule called that `low`, so `doctor` failed a freshly built
+  home with 27GB free. A pure absolute rule is nonsense at the small end, which
+  is why a root under `SANDHOME_PCT_MEANINGFUL_MB` (1GB) is judged on megabytes
   alone. So on a large root `low` means *both* under 10% free and under
   `SANDHOME_LOW_EXEC_MB`, which is the shape a genuinely draining root has: 40MB
   of 4TB is 0.001% free and cannot build anything.
@@ -230,21 +243,38 @@ refresh keeps a recorded directory even when the shell doing the refresh no
 longer carries it on `PATH`. Installation is once; the hook serves every
 future shell.
 
+**The hook also carries the tools an operator installs after the setup.** A CLI
+written by `npm install -g`, `uv tool install`, `go install` or `cargo install`
+lives in a prefix on the exec root, and a fresh shell does not search it - so the
+dispatcher puts those directories on the `PATH` of the tools it starts, and the
+hook reads them from disk for its name list. One `sandhome global` after an
+install is what teaches it a new CLI; a login shell is covered by the profile
+fragment and a shell with no `PATH` at all by `entry.sh`, and the two together
+cover the shells the dispatcher cannot (issue #138). Two directories are
+refused outright and never become hook directories, whatever is in them: a
+`bin` directory this tree created for another installer to write into,
+because `npm i -g` writes **relative** links there and a redirect symlink
+strands every one of them.
+
 ```sh
+sandhome version             # the schema version, and the cheapest way to prove the copy runs
 sandhome global                    # where the hook is, and whether it is stale
 . "$SANDHOME_HOME/env.sh"          # in a shell, when no hook is installed
 eval "$(sandhome env)"             # without sourcing the file
 sandhome env                       # to read it
 sandhome path                       # the exec bin directory, for a script
 sandhome exec CMD...               # run CMD with the environment already loaded
+sandhome skills                     # what the setup installed for a harness
 ```
 
 Two of those exist for scripts, and neither was documented until this was
 noticed by looking for the reverse of what `tests/docs.sh` checks. That test
 fails when a document names a command the code does not have, which is the
-direction that bites a reader. It cannot see the other direction: a command the
-code has and no document names, which is a capability that exists and that
-nobody can find.
+direction that bites a reader. It also now runs the other direction - every
+dispatched command must be named in a document - because that gap was real:
+`sandhome path` and `sandhome exec` sat in the dispatcher and in neither the
+guide nor the router for as long as they existed, and the suite was green
+throughout.
 
 - `sandhome path` prints `$SANDHOME_EXEC/bin` and nothing else, so a script can
   extend `PATH` without parsing `env.sh`. A tool harness that wants the exec
@@ -261,12 +291,31 @@ nobody can find.
   It replaces the `sh -c '. "$SANDHOME_HOME/env.sh" && ...'` incantation, which is
   what every caller wrote before this existed.
 
-The installed profile fragment de-duplicates `PATH`, gives history a home that
-survives the session, and moves an interactive shell out of a mounted Windows
-drive in WSL. It is `SANDHOME_NO_PROFILE=1`-off in one switch, fetches nothing,
-and defines no alias or prompt. It runs only for an interactive shell (`$-`
-contains `i`), so a tool that sends a command to a login shell does not have its
-environment changed underneath it.
+The installed profile fragment **loads `env.sh` for every login shell**, and only
+the rest is interactive-only: the `PATH` de-dup, the history that survives the
+session, and the move out of a mounted Windows drive in WSL are gated on `$-`
+containing `i`, so a person typing at a prompt gets them and a tool that sends a
+command to a login shell does not have them changed underneath it. It fetches
+nothing, defines no alias or prompt, and is off in one switch
+(`SANDHOME_NO_PROFILE=1`).
+
+The environment is loaded first for a reason that was measured. `~/.profile`
+carries one unconditional `export PATH="$SANDHOME_EXEC/bin:$PATH"` line, so a
+**non-interactive login shell** - `bash -lc`, `sh -l -c`, the shape a tool
+harness uses - got the exec bin first and never the roots. A launch-mode view
+then resolved to its own copies, which cannot map themselves back without
+`SANDHOME_EXEC`, and every one of them died with `cannot map this copy back to
+its payload` while `doctor` reported zero failures (issue #131). The read is
+done in a subshell whose assignments are kept only when it succeeded, so a
+missing `HOME` cannot put a line on stderr in front of every command:
+
+```sh
+$ bash -lc 'echo $SANDHOME_EXEC'   # before: UNSET, after: the exec root
+```
+
+Note that `bash -lc` with an uppercase `C` reads no startup file at all, so it
+shows nothing either way; a real login shell (`bash -lc`, with `HOME` set) is
+the shape to measure with.
 
 ## 4. Adding a toolchain
 
@@ -282,6 +331,9 @@ tc_<name>_probe()   { ...; }       # 0 when a working copy is already here
 tc_<name>_install() { ...; }       # install into $(sh_toolchain_root <name>)
 tc_<name>_env()     { ...; }       # write the env fragment (optional)
 tc_<name>_version() { ...; }       # print a version (optional)
+tc_<name>_exec_mb()  { ...; }      # computed exec need, when it depends on the view mode (optional)
+tc_<name>_copy_bins(){ ...; }      # executables that must stay REAL copies in launch mode (optional)
+tc_<name>_doctor()  { ...; }       # health check the readiness gate runs (optional)
 ```
 
 The framework, `lib/toolchain.sh`:
@@ -378,7 +430,12 @@ The mold archive ships both `mold` and `ld.mold`, and the latter is what
 
 ## 5. The shims
 
-Three `LD_PRELOAD` interposers, built only when the machine needs them:
+Seven `LD_PRELOAD` interposers, each built only when the machine needs it, and
+none of them all-purpose: `sh_shim_need` names the detector that decides, so a
+shim is present exactly when its answer is missing and a machine that already
+has the thing does not carry it.
+
+Three answer for a cage with no kernel support at all:
 
 - **`fakepty`**  -  a USERSPACE pty. It makes the session's descriptors look
   like a terminal (isatty, termios, window size, `/dev/tty`) where there is no
@@ -398,7 +455,7 @@ Three `LD_PRELOAD` interposers, built only when the machine needs them:
   `SANDHOME_ANTIPTRACE_TRACEME`, `SANDHOME_ANTIPTRACE_STATUS` and
   `SANDHOME_ANTIPTRACE_WCHAN` switch the behaviours off separately (`=0`).
 
-Both are built into `$SANDHOME_HOME/shims/`. `env.sh` puts them in `LD_PRELOAD`
+All seven are built into `$SANDHOME_HOME/shims/`. `env.sh` puts them in `LD_PRELOAD`
 only when `SANDHOME_SHIMS` is set to something other than `0`. `fakepty` is no
 longer a blanket `isatty()==1`: `env.sh` also exports `SANDHOME_FAKEPTY_ID`, the
 readlink identity of the session's own descriptors, and only THOSE are faked. A
@@ -453,10 +510,11 @@ initialisation stop failing at the open or the probe; none of them renders:
 
 Each is built only when the machine needs it (no `/dev/dri`, no input
 devices, no `DISPLAY`/`WAYLAND_DISPLAY`) and loads with `SANDHOME_SHIMS=1`
-like the rest. Not built: audio shims (`SDL_AUDIODRIVER=dummy` covers SDL;
-raw ALSA callers have no lever, but faking samples is a different category
-from faking enumeration), sysfs sensors, and deterministic RNG -- each is a
-project of its own, not a probe answer.
+like the rest. That is four of the seven: the three above plus these, so
+"three interposers" undercounts the tree by design. Not built: audio shims
+(`SDL_AUDIODRIVER=dummy` covers SDL; raw ALSA callers have no lever, but faking
+samples is a different category from faking enumeration), sysfs sensors, and
+deterministic RNG -- each is a project of its own, not a probe answer.
 
 Third, the hard limits, stated so no test pretends past them: no display
 server can exist here (bind is denied, so no in-cage Xvfb -- a client-side
@@ -524,7 +582,13 @@ SANDHOME_FAKEPTY_SIZE=120x40 sandhome pty less big.log
 | `Too many levels of symbolic links` on a binary | the view links a tool to itself; `sandhome repair <name>` rewrites the link |
 | `fork/exec ... permission denied` after a successful `go build` | the Go build cache landed on a noexec root; re-run the install so `GOCACHE` is written to `SANDHOME_EXEC` |
 | `go install` binary neither runs nor is on PATH | `GOBIN` now points at `$SANDHOME_EXEC/go-bin` and is on PATH; re-run `sandhome install go`, then `go install`. Build output in a noexec work tree still will not run: build under `$SANDHOME_EXEC` |
-| `npm i -g` CLI not found or `bad interpreter` | the prefix now lives on `$SANDHOME_EXEC/npm-global` with `bin` on PATH; re-run `sandhome install node`. Project-local `.bin` on a noexec checkout has the same cause: run the project from `$SANDHOME_EXEC` |
+| `npm i -g` CLI not found or `bad interpreter` | the prefix lives on `$SANDHOME_EXEC/npm-global` with `bin` on `PATH`; re-run `sandhome install node`. **A CLI installed after the setup is not found by a shell that sourced nothing** until one `sandhome global` teaches the hook the new name (issue #138); a login shell finds it immediately. Project-local `.bin` on a noexec checkout has the same cause: run the project from `$SANDHOME_EXEC` |
+| `npm i -g` CLI exists but cannot be run (`sh: cowsay: not found` with the link present) | a directory this tree created for an installer to write into was taken as a hook directory, so the RELATIVE link `bin/cowsay -> ../lib/node_modules/...` resolved against the hook instead of the prefix (issue #138). `sandhome global` moves our own link out, restores the directory and rescues the stranded links |
+| `cargo` or `rustc` answers `error: command failed: 'cargo': Permission denied (os error 13)` from a fresh shell but works in a sourced one | rustup's proxies resolve the toolchain under `$RUSTUP_HOME`, which on a split root is the mount that refuses `execve`. The exec-bin entries now point at the real toolchain binaries and the proxies are rewritten on every repair; if the view predates that, run `sandhome repair rust` (issue #135) |
+| `rustc.real: Argument list too long` | the sysroot wrapper exec'd itself because its `.real` was a damaged copy. `sandhome repair rust` rebuilds the pair from the home compiler (issue #135) |
+| `rustc` answers from a sourced shell and a browser or bundler still dies with `spawn /memfd:sandhome (deleted) ENOENT` | the node view is a launcher, so `process.execPath` is a path that no longer exists. `node`, `deno` and `bun` are real copies now; `doctor` fails with `toolchain_node_spawn` when they are not (issue #139) |
+| a login shell (`bash -lc`) dies with `cannot map this copy back to its payload` | the shell resolved the exec bin before the environment was loaded. The profile fragment now loads `env.sh` for every login shell; re-run the setup once to rewrite it, or `. "${XDG_DATA_HOME:-$HOME/.local/share}/sandhome/entry.sh"` for the shell in hand (issue #131) |
+| `env -i $SANDHOME_EXEC/bin/sandhome doctor` cannot find the library | the bake and the home pointer both name a checkout or a home that is gone. The copy keeps its own library in `$SANDHOME_EXEC/.sandhome-lib`; re-run the setup or `sandhome repair` once to write it (issue #133) |
 | `collect2: posix_spawnp: Permission denied` linking rust | the sysroot linker is on the noexec home, so it cannot be exec'd at all. A `-fuse-ld=` flag does not fix it: rustc appends its own `-fuse-ld=lld` and `-B<sysroot>` after any `-C link-arg`, so the last one wins. `sandhome install --force rust` installs a toolchain whose data lives on the home and whose executables run from the exec view, where a plain `rustc -O hello.rs -o out` links and runs with no `RUSTFLAGS` |
 | the working tree itself is noexec | `sandhome doctor` prints a note naming `$SANDHOME_EXEC`; build and run output there, not in the checkout |
 | a project needs a venv, npm, or native CLIs on a noexec checkout | one command does the whole dance: `sandhome project NAME [--python|--node]` creates `$SANDHOME_EXEC/projects/NAME`, links `./NAME` to it, and sets up the venv and the npm project inside, so console scripts, `npx` and native CLIs run where they stand. A tmpfs exec root does not survive a restart; re-running the command rebuilds it |
