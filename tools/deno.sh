@@ -3,6 +3,10 @@
 TC_deno_DESC='Deno, a TypeScript/JavaScript runtime (single binary, from GitHub)'
 TC_deno_BINS='deno'
 TC_deno_EXEC_MB=150
+# Deno fetches after install: remote imports, `deno upgrade` and JSR/npm fetches
+# all reach the network at run time. Declared for the same reason as bun
+# (issue #125).
+TC_deno_DYNAMIC='remote imports and self-upgrade (deno upgrade) at run time'
 
 # tc_deno_exec_mb -> the fresh-install exec need in MB: 8 in launch mode (one
 # launcher copy for the single binary), 150 in copy mode (the full binary).

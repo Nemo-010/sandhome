@@ -3,6 +3,11 @@
 TC_bun_DESC='Bun, a JavaScript/TypeScript runtime and toolkit (single binary)'
 TC_bun_BINS='bun'
 TC_bun_EXEC_MB=200
+# Bun fetches after install: `bun install` reaches the npm registry and the shim
+# itself is only a launcher for whatever the network serves at run time. Declared
+# so `sandhome toolchains` and the report name it instead of leaving the caller to
+# discover it when the network is gone (issue #125).
+TC_bun_DYNAMIC='registry installs (bun install) at run time'
 
 # tc_bun_exec_mb -> the fresh-install exec need in MB: 12 in launch mode (one
 # launcher copy for the single binary), 200 in copy mode (issue #92).

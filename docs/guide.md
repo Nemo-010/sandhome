@@ -144,7 +144,7 @@ sh bootstrap.sh [options]
 | `--no-profile` / `--no-path-line` | leave the login files alone |
 | `--dry-run` / `--json` | preview (with per-toolchain `feas` lines and a `total_exec_need_mb` total), or one JSON report |
 | `--doh-url URL` | DNS-over-HTTPS resolver for a confirmed no-resolver cage (see `SANDHOME_DOH_URL` in the reference). Off unless set. |
-| | blocked origins: when plain downloaders fail for a non-DNS reason (a 403), one mirror leg runs before the failure message. `SANDHOME_MIRROR_URL` (default the pkgforge passthrough) and `SANDHOME_MIRROR_GH_URL` (default the API mirror) name the bases; empty either to opt out. The pin still applies: mirrored bytes are the origin's bytes under another route (byte-identical, measured). |
+| | blocked origins: when plain downloaders fail for a non-DNS reason (a 403), one mirror leg runs before the failure message. `SANDHOME_MIRROR_URL` (default the pkgforge passthrough) carries any origin URL and is a second egress path; `SANDHOME_MIRROR_GH_URL` (default the API mirror) is an authenticated, read-only GitHub API proxy that serves `api.github.com` JSON at 5000/hour where a caller's IP gets 60/hour, so API reads route to it while downloads go through the passthrough. Empty either to opt out. The pin still applies: mirrored bytes are the origin's bytes under another route (byte-identical, measured). |
 
 The five toolsets, and the difference between them is the compilers:
 

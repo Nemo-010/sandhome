@@ -187,7 +187,7 @@ usage() {
     cat <<'USAGE'
 usage: sh bootstrap.sh [options]
 
-  --toolset NAME      minimal | cli | developer | languages | agent.
+  --toolset NAME      minimal | cli | developer | project | languages | agent.
                       Default developer.
   --with NAME         add a toolchain. Repeatable, and also takes a
                       comma-separated list.
@@ -303,6 +303,11 @@ sh_toolset_names() {
         developer) printf 'jq ripgrep fd python node\n' ;;
         languages) printf 'jq ripgrep fd python node rust go zig deno bun mold\n' ;;
         agent)     printf 'jq ripgrep fd python node rust go zig deno bun mold\n' ;;
+        # The union a from-source C/C++ build needs, in one command, so an agent
+        # that pasted a CMake or meson project does not hand-assemble the list
+        # before the first configure (issue #123). meson pulls python through its
+        # own REQUIRES, so naming it here is the whole closure.
+        project)   printf 'jq ripgrep fd python node go rust clang cmake meson ninja mold\n' ;;
         *)         return 1 ;;
     esac
 }
@@ -344,6 +349,13 @@ sh_bootstrap_detect() {
             sh_bdet_add clang
             sh_bdet_add mold
             sh_bdet_add ninja
+            # The build system itself, not only its compiler and linker: a
+            # CMakeLists.txt project configured with `cmake -S . -B build`
+            # failed with `command not found` before the catalog shipped cmake
+            # (issue #123). meson.build names meson; configure.ac is autotools
+            # and is already on the base image, so it adds nothing here.
+            [ -e "$sh_bdet_d/CMakeLists.txt" ] || [ -e "$sh_bdet_d/CMakePresets.json" ] && sh_bdet_add cmake
+            [ -e "$sh_bdet_d/meson.build" ] && sh_bdet_add meson
         fi
         # A Makefile alone is a weaker C signal than CMake: it names the need
         # for a compiler and a runner, but not necessarily a mold linker, so
@@ -518,6 +530,30 @@ sh_bootstrap_install_command() {
                 sh_warn "could not bake the paths; no-HOME launches fall back to HOME lookup"
             fi ;;
     esac
+    # # A STABLE ABSOLUTE WAY IN, BECAUSE A NON-LOGIN SHELL HAS NO PATH. The exec
+    # bin is on PATH only through ~/.profile, which a login shell reads; an agent
+    # harness spawns a non-login shell per tool call, so nothing sources the
+    # environment and `eval "$(sandhome env)"` fails with `sandhome: not found`
+    # and rc=0 (issue #122). The home is often NOEXEC, so a copy of the command
+    # there cannot run - sourcing a file needs no exec permission, so what lands
+    # on the home is a SOURCEABLE snippet, not a binary. It names the exec bin and
+    # a `sandhome` function, so a caller with nothing but a shell and the home
+    # path gets the command and the environment in one line. The exec bin path is
+    # baked in, and `sandhome resume` rewrites the snippet after a tmpfs restart
+    # moves the view.
+    if [ -d "$SH_HOME" ] && [ -n "$SH_EXEC_BIN" ]; then
+        sh_bic_entry="$SH_HOME/entry.sh"
+        {
+            printf '%s\n' '# sandhome entry point. Generated; sourced, not executed.'
+            printf '%s\n' "# Written because a non-login shell has no PATH (issue #122)."
+            printf '%s\n' "SANDHOME_HOME=\${SANDHOME_HOME:-'$SH_HOME'}"
+            printf '%s\n' "SANDHOME_EXEC=\${SANDHOME_EXEC:-'$SH_EXEC'}"
+            printf '%s\n' 'export SANDHOME_HOME SANDHOME_EXEC'
+            printf 'sandhome() { "%s/sandhome" "$@"; }\n' "$SH_EXEC_BIN"
+            printf '%s\n' "[ -r \"\$SANDHOME_HOME/env.sh\" ] && . \"\$SANDHOME_HOME/env.sh\""
+        } > "$sh_bic_entry" 2>/dev/null && \
+            sh_step "wrote $sh_bic_entry (source it from a shell with no PATH)"
+    fi
     return 0
 }
 

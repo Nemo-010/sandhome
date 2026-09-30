@@ -9,11 +9,13 @@ cannot be added without recording it.
 | --- | --- | --- | --- |
 | bun | `https://github.com/oven-sh/bun/releases/download/` | latest-release redirect tag | caller pin only (`SANDHOME_SHA256_BUN*`); hashed and printed otherwise |
 | clang | `https://github.com/llvm/llvm-project/releases/download/` | latest-release redirect tag (`llvmorg-*`) | caller pin only (`SANDHOME_SHA256_CLANG*`); hashed and printed otherwise |
+| cmake | `https://github.com/Kitware/CMake/releases/download/` | latest-release redirect tag | caller pin only (`SANDHOME_SHA256_CMAKE*`); hashed and printed otherwise |
 | deno | `https://github.com/denoland/deno/releases/download/` | latest-release redirect tag | `<asset>.sha256sum` sidecar published beside the zip, shape-validated hex64 |
 | fd | `https://github.com/sharkdp/fd/releases/download/` | latest-release redirect tag | caller pin only (`SANDHOME_SHA256_FD*`); hashed and printed otherwise |
 | gh | `https://github.com/cli/cli/releases/download/` | latest-release redirect tag | caller pin only (`SANDHOME_SHA256_GH*`); hashed and printed otherwise |
 | go | `https://go.dev/dl/` | `https://go.dev/VERSION?m=text`, first line | `https://go.dev/dl/?mode=json`, `filename` entry, shape-validated hex64 |
 | jq | `https://github.com/jqlang/jq/releases/latest/download/` | latest-release redirect | caller pin only (`SANDHOME_SHA256_JQ*`); hashed and printed otherwise |
+| meson | `https://pypi.org/` (via `uv tool install`, which resolves and hashes the wheel) | PyPI index at install time | uv verifies the wheel digest it resolved; caller pin only (`SANDHOME_SHA256_MESON*`) for the launcher copy |
 | mold | `https://github.com/rui314/mold/releases/download/` | latest-release redirect tag | caller pin only (`SANDHOME_SHA256_MOLD*`); hashed and printed otherwise |
 | ninja | `https://github.com/ninja-build/ninja/releases/download/` | latest-release redirect (`ninja-linux.zip`, `ninja-mac.zip` carry no version) | caller pin only (`SANDHOME_SHA256_NINJA*`); hashed and printed otherwise |
 | node | `https://nodejs.org/dist/` | `https://nodejs.org/dist/index.json`, first entry | `SHASUMS256.txt` entry for the tarball, shape-validated hex64 |

@@ -248,6 +248,30 @@ detout=$(cd "$proj" && SANDHOME_HOME="$work/det-home" SANDHOME_EXEC="$work/det-e
     sh "$ROOT/bootstrap.sh" --toolset minimal --no-profile --no-path-line --dry-run 2>&1)
 t_contains "$detout" 'detected a project marker for rust' 'a rust marker folds rust into the request (#116)'
 t_contains "$detout" 'detected a project marker for go' 'a go marker folds go into the request (#116)'
+# A CMake or meson project folds in the BUILD SYSTEM itself, not only its
+# compiler and linker: `cmake -S . -B build` failed with `command not found`
+# on a CMakeLists project before the catalog shipped cmake (issue #123).
+cmproj="$work/cmproject"
+mkdir -p "$cmproj" 2>/dev/null
+printf 'cmake_minimum_required(VERSION 3.10)\nproject(x C)\n' > "$cmproj/CMakeLists.txt"
+cmout=$(cd "$cmproj" && SANDHOME_HOME="$work/cm-home" SANDHOME_EXEC="$work/cm-exec" \
+    sh "$ROOT/bootstrap.sh" --toolset minimal --no-profile --no-path-line --no-skills --dry-run 2>&1)
+t_contains "$cmout" 'detected a project marker for cmake' 'a CMakeLists folds cmake in (#123)'
+t_contains "$cmout" 'detected a project marker for clang' 'a CMakeLists still folds clang in (#116)'
+mesproj="$work/mesproject"
+mkdir -p "$mesproj" 2>/dev/null
+printf "project('x', 'c')\n" > "$mesproj/meson.build"
+mesout=$(cd "$mesproj" && SANDHOME_HOME="$work/mes-home" SANDHOME_EXEC="$work/mes-exec" \
+    sh "$ROOT/bootstrap.sh" --toolset minimal --no-profile --no-path-line --no-skills --dry-run 2>&1)
+t_contains "$mesout" 'detected a project marker for meson' 'a meson.build folds meson in (#123)'
+# The project toolset names the whole from-source C/C++ chain in one command.
+# Read through the real command, not the function: sh_toolset_names lives inside
+# bootstrap.sh, which this test does not source.
+projout=$(SANDHOME_HOME="$work/proj-home" SANDHOME_EXEC="$work/proj-exec" \
+    sh "$ROOT/bootstrap.sh" --toolset project --no-profile --no-path-line --no-skills --dry-run 2>&1)
+t_contains "$projout" 'cmake' 'the project toolset names cmake (#123)'
+t_contains "$projout" 'meson' 'the project toolset names meson (#123)'
+t_contains "$projout" 'clang' 'the project toolset names clang (#123)'
 detout_off=$(cd "$proj" && SANDHOME_HOME="$work/det-home2" SANDHOME_EXEC="$work/det-exec2" \
     sh "$ROOT/bootstrap.sh" --toolset minimal --no-profile --no-path-line --no-detect --dry-run 2>&1)
 case "$detout_off" in
@@ -439,6 +463,24 @@ if [ -r "$cmd_home/env.sh" ]; then
         *) t_ok 1 "the installed sandhome is found on the exec root, not the checkout (got $byname)" ;;
     esac
     t_contains "$byname" 'sandhome/1' 'a bare env.sh shell can run sandhome by name'
+
+    # # THE ENTRY POINT IS THE PATH-FREE WAY IN (issue #122). The clauses above
+    # still need SANDHOME_HOME (or PATH) handed to them; the bootstrap also
+    # leaves a SOURCEABLE snippet beside the home, so a shell that inherited
+    # nothing finds the command and the toolchains from the home alone. It is
+    # sourced and not executed because the home is often noexec: a copy there
+    # cannot run at all. The clause runs it in a bare environment with only the
+    # documented home path available.
+    if [ -r "$cmd_home/entry.sh" ]; then
+        t_ok 0 'the bootstrap leaves an entry point beside the home'
+        entryout=$(env -i HOME="$cmd_fake_home" PATH=/usr/bin:/bin \
+                   sh -c '. "${XDG_DATA_HOME:-$HOME/.local/share}/sandhome/entry.sh"; sandhome version; printf "|%s" "$SANDHOME_EXEC"' \
+                   </dev/null 2>&1)
+        t_contains "$entryout" 'sandhome/1' 'a shell with no PATH runs sandhome through the entry point'
+        t_contains "$entryout" "|$cmd_exec" 'the entry point exports the exec root it baked'
+    else
+        t_ok 1 'the bootstrap leaves an entry point beside the home'
+    fi
 
     # # STOP: `eval "$(sandhome env)"` WORKS IN A SHELL THAT SOURCED NOTHING.
     # ROUTE.md step 4 offers the eval form for a shell where sourcing is not

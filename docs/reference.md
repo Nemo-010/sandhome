@@ -105,7 +105,7 @@ Environment:
 ```
 usage: sh bootstrap.sh [options]
 
-  --toolset NAME      minimal | cli | developer | languages | agent.
+  --toolset NAME      minimal | cli | developer | project | languages | agent.
                       Default developer.
   --with NAME         add a toolchain. Repeatable, and also takes a
                       comma-separated list.
@@ -185,16 +185,18 @@ usage: sh bootstrap.sh [options]
 | `developer` | jq ripgrep fd python node |
 | `languages` | jq ripgrep fd python node rust go zig deno bun mold |
 | `agent` | jq ripgrep fd python node rust go zig deno bun mold |
+| `project` | jq ripgrep fd python node go rust clang cmake meson ninja mold |
 
 ## Environment variables
 
 | variable | read by | default |
 | --- | --- | --- |
 | `SANDHOME_BIN_DIR` | bootstrap.sh sandhome | `$SH_REPO_DIR/bin` |
+| `SANDHOME_CMAKE_VERSION` | cmake.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_CRIT_MB` | space.sh sandhome | `unset, and the feature is off until it is set` |
 | `SANDHOME_DOH_CANARY` | fetch.sh | `https://github.com` |
 | `SANDHOME_DOH_URL` | fetch.sh bootstrap.sh sandhome | `unset, and the feature is off until it is set` |
-| `SANDHOME_EXEC` | env.sh report.sh space.sh bootstrap.sh sandhome fd.sh go.sh jq.sh node.sh python.sh ripgrep.sh rust.sh zig.sh | `*)` |
+| `SANDHOME_EXEC` | env.sh report.sh space.sh bootstrap.sh sandhome fd.sh go.sh jq.sh meson.sh node.sh python.sh ripgrep.sh rust.sh zig.sh | `*)` |
 | `SANDHOME_FAKEPTY` | env.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_FAKEPTY_ID` | env.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_FETCH_CHUNK_MB` | fetch.sh | `256` |
@@ -230,6 +232,7 @@ usage: sh bootstrap.sh [options]
 | `SANDHOME_SHA256` | fetch.sh bootstrap.sh sandhome | `unset, and the feature is off until it is set` |
 | `SANDHOME_SHA256_BUN` | fetch.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_SHA256_CLANG` | fetch.sh | `unset, and the feature is off until it is set` |
+| `SANDHOME_SHA256_CMAKE` | fetch.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_SHA256_DENO` | fetch.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_SHA256_FD` | fetch.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_SHA256_GO` | fetch.sh | `unset, and the feature is off until it is set` |
@@ -238,6 +241,7 @@ usage: sh bootstrap.sh [options]
 | `SANDHOME_SHA256_JQ_LINUX_ARM64` | fetch.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_SHA256_JQ_LINUX_I386` | fetch.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_SHA256_JQ_MACOS_AMD64` | fetch.sh | `unset, and the feature is off until it is set` |
+| `SANDHOME_SHA256_MESON` | fetch.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_SHA256_MOLD` | fetch.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_SHA256_NODE` | fetch.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_SHA256_PYTHON` | fetch.sh | `unset, and the feature is off until it is set` |
@@ -279,11 +283,13 @@ usage: sh bootstrap.sh [options]
 | --- | --- | --- |
 | `bun` | `bun` | Bun, a JavaScript/TypeScript runtime and toolkit (single binary) |
 | `clang` | `bin/clang bin/clang++` | Clang/LLVM, from the official LLVM release tarball (a >1GB download) |
+| `cmake` | `bin/cmake bin/ctest bin/cpack` | CMake, the build system for C/C++/Fortran projects |
 | `deno` | `deno` | Deno, a TypeScript/JavaScript runtime (single binary, from GitHub) |
 | `fd` | `bin/fd` | fd, a fast and user-friendly find replacement |
 | `gh` | `bin/gh` | gh, the GitHub command-line tool (single binary from its tarball) |
 | `go` | `go/bin/go go/bin/gofmt` | Go, from the official go.dev tarball (GOROOT stays in the home root) |
 | `jq` | `bin/jq` | jq, the command-line JSON processor (single static binary) |
+| `meson` | `bin/meson` | Meson, the build system for C/C++/Rust/Vala projects |
 | `mold` | `bin/mold bin/ld.mold` | mold, a fast ELF linker (gcc/clang/rust via -fuse-ld=mold) |
 | `ninja` | `ninja` | ninja, a small build system (single static binary) |
 | `node` | `bin/node bin/npm bin/npx` | Node.js with the bundled npm, from the official nodejs.org tarball |

@@ -242,35 +242,68 @@ rm -f "$(sh_shims_dir)/fakepwd.so"
 t_is "$(sh_shim_present)" 'antiptrace fakedrm fakeinput fakexenv fakedisplay' 'the reader tracks removals one at a time'
 rm -f "$(sh_shims_dir)/antiptrace.so" "$(sh_shims_dir)/fakedrm.so" "$(sh_shims_dir)/fakeinput.so" "$(sh_shims_dir)/fakexenv.so" "$(sh_shims_dir)/fakedisplay.so"
 t_is "$(sh_shim_present)" '' 'the present-shim reader names nothing when nothing is there'
-# The headless needs read the real machine (/dev/dri, /dev/input, DISPLAY),
-# so the full missing list only holds where the machine lacks all of them;
-# anywhere else the clause reports it could not run rather than asserting a
-# shape that is not this host's.
-if [ ! -e /dev/dri ] && [ ! -e /dev/input ] && [ ! -e /dev/uinput ] && \
-   [ -z "${DISPLAY:-}" ] && [ -z "${WAYLAND_DISPLAY:-}" ]; then
-    t_is "$(sh_shim_needed_missing)" 'fakepty fakepwd antiptrace fakedrm fakeinput fakexenv fakedisplay' 'the needed-and-missing reader names each shim'
-else
-    t_skip 'this host has dri, input or a display, so the full missing list is not its shape'
-fi
+# # STOP: THE NEEDED-AND-MISSING READER IS ASSERTED OVER A TABLE OF SHAPES, NOT
+# OVER THIS HOST. The old clause branched on an OR of the four headless facts and
+# then asserted the empty string, which needs ALL FOUR unneeded - so a host with
+# /dev/dri but no DISPLAY took the "headed" branch and got `fakexenv fakedisplay`
+# against a wanted ``, which is exactly the six-hour-red shape a GitHub runner has
+# (issue #121). The facts are now detectors that write SH_DRM, SH_INPUT, SH_XENV
+# and SH_DISPLAY (like SH_PTY/SH_PASSWD/SH_PTRACE before them), so every shape is
+# built here and the expectation is computed from the same facts the reader uses.
+#
+# The expected string is derived, never a literal per branch: dri/input/xenv/
+# display each contribute their shim when absent, so a reader that dropped one or
+# a need-rule that changed would fail the table rather than pass on one host.
+sh_tbl_expected() {
+    sh_te_want=''
+    [ "$SH_PTY" = no ] && sh_te_want="$sh_te_want fakepty"
+    [ "$SH_PASSWD" = no ] && sh_te_want="$sh_te_want fakepwd"
+    case "$SH_PTRACE" in no|partial) sh_te_want="$sh_te_want antiptrace" ;; esac
+    [ "$SH_DRM" = no ] && sh_te_want="$sh_te_want fakedrm"
+    [ "$SH_INPUT" = no ] && sh_te_want="$sh_te_want fakeinput"
+    [ "$SH_XENV" = no ] && sh_te_want="$sh_te_want fakexenv"
+    [ "$SH_DISPLAY" = no ] && sh_te_want="$sh_te_want fakedisplay"
+    printf '%s' "${sh_te_want# }"
+}
+# A GitHub ubuntu-latest runner: pty yes, passwd yes, ptrace works, /dev/dri and
+# /dev/input present, no DISPLAY and no Wayland socket. This is the row that was
+# red in CI; it is now built here and would be red on every host, not only there.
+SH_PTY=yes; SH_PASSWD=yes; SH_PTRACE=yes; SH_DRM=yes; SH_INPUT=yes; SH_XENV=no; SH_DISPLAY=no
+t_is "$(sh_shim_needed_missing)" "$(sh_tbl_expected)" 'the runner shape names exactly fakexenv and fakedisplay'
+t_is "$(sh_shim_needed_missing)" 'fakexenv fakedisplay' 'the runner shape is fakexenv fakedisplay, not the empty string'
+# A cage: nothing answers, every shim is needed.
+SH_PTY=no; SH_PASSWD=no; SH_PTRACE=no; SH_DRM=no; SH_INPUT=no; SH_XENV=no; SH_DISPLAY=no
+t_is "$(sh_shim_needed_missing)" "$(sh_tbl_expected)" 'the cage shape names every shim'
+t_is "$(sh_shim_needed_missing)" 'fakepty fakepwd antiptrace fakedrm fakeinput fakexenv fakedisplay' 'the needed-and-missing reader names each shim'
+# A desktop with dri, input and an X display but no Wayland session: only the
+# Wayland shim remains. This row failed on any such host under the old OR/AND bug.
+SH_PTY=yes; SH_PASSWD=yes; SH_PTRACE=yes; SH_DRM=yes; SH_INPUT=yes; SH_XENV=yes; SH_DISPLAY=no
+t_is "$(sh_shim_needed_missing)" "$(sh_tbl_expected)" 'a headed host with no Wayland socket needs only fakedisplay'
+t_is "$(sh_shim_needed_missing)" 'fakedisplay' 'the headed-without-wayland shape is exactly fakedisplay'
+# A fully headed host: needs nothing.
+SH_PTY=yes; SH_PASSWD=yes; SH_PTRACE=yes; SH_DRM=yes; SH_INPUT=yes; SH_XENV=yes; SH_DISPLAY=yes
+t_is "$(sh_shim_needed_missing)" "$(sh_tbl_expected)" 'a fully headed host needs no shim'
+t_is "$(sh_shim_needed_missing)" '' 'a headed machine needs no shim at all'
+# A host whose only lack is uinput-class input: /dev/input absent but uinput
+# absent too, phrased through the detector's own answer so the row is about the
+# fact and not about the node.
+SH_PTY=yes; SH_PASSWD=yes; SH_PTRACE=yes; SH_DRM=yes; SH_INPUT=no; SH_XENV=yes; SH_DISPLAY=yes
+t_is "$(sh_shim_needed_missing)" "$(sh_tbl_expected)" 'a host with no input devices needs fakeinput'
+t_is "$(sh_shim_needed_missing)" 'fakeinput' 'the no-input shape is exactly fakeinput'
+unset sh_tbl_expected
 # With nothing present and both needed, the report must say so rather than
 # reporting an empty list, which reads as "none were ever needed".
+SH_PTY=no; SH_PASSWD=no; SH_PTRACE=no; SH_DRM=no; SH_INPUT=no; SH_XENV=no; SH_DISPLAY=no
 t_contains "$(sh_shim_report)" 'fakepty_built=no' 'a missing shim is reported as not built'
-# A machine with a pty and a passwd database needs nothing, and an empty
-# MISSING list is the right answer there - the same empty string as a machine
-# that needs two and has neither, and only the second is a problem. The two
-# fields exist so neither is read as the other.
-SH_PTY=yes; SH_PASSWD=yes; SH_PTRACE=yes
-# The headless needs still read the machine here, so emptiness only holds
-# where the host has dri, input and a display; the headed clause above is
-# the one that asserts the full list.
-if [ -e /dev/dri ] || [ -e /dev/input ] || [ -e /dev/uinput ] || \
-   [ -n "${DISPLAY:-}" ] || [ -n "${WAYLAND_DISPLAY:-}" ]; then
-    t_is "$(sh_shim_needed_missing)" '' 'a headed machine needs no shim at all'
-else
-    t_is "$(sh_shim_needed_missing)" 'fakedrm fakeinput fakexenv fakedisplay' 'only the headless needs remain when pty/passwd/ptrace are fine'
-fi
+# A machine with a pty and a passwd database and every headless device needs
+# nothing, and an empty MISSING list is the right answer there - the same empty
+# string as a machine that needs two and has neither, and only the second is a
+# problem. The two fields exist so neither is read as the other. This is now
+# forced through the facts rather than branched on an OR of the host's.
+SH_PTY=yes; SH_PASSWD=yes; SH_PTRACE=yes; SH_DRM=yes; SH_INPUT=yes; SH_XENV=yes; SH_DISPLAY=yes
+t_is "$(sh_shim_needed_missing)" '' 'a fully provisioned machine needs no shim at all'
 t_is "$(sh_shim_present)" '' 'and has none present, which is the right answer'
-SH_PTY=no; SH_PASSWD=no; SH_PTRACE=no
+SH_PTY=no; SH_PASSWD=no; SH_PTRACE=no; SH_DRM=no; SH_INPUT=no; SH_XENV=no; SH_DISPLAY=no
 # Rebuilt for the LD_PRELOAD clauses below.
 sh_shim_build fakepty "$ROOT/shims/fakepty.c" >/dev/null 2>&1
 sh_shim_build fakepwd "$ROOT/shims/fakepwd.c" >/dev/null 2>&1
@@ -325,23 +358,40 @@ if command -v cc >/dev/null 2>&1 && [ ! -e "$nocc_bin/cc" ] && [ ! -e "$nocc_bin
         SANDHOME_REPO_DIR="$ROOT" sh "$ROOT/bootstrap.sh" --toolset minimal \
         --no-profile --no-path-line --no-shell 2>"$tmp/nocc-err.txt")
     nocc_rc=$?
-    # What THIS machine needs, read from the DETECTORS and not from SH_PTY/
-    # SH_PASSWD: this file force-sets those variables for its own clauses, so
-    # sh_shim_need would answer about the forcing, not the machine. The
-    # subprocess's own sh_detect_all answers from the real machine, and the
-    # branch below must see the same machine it saw.
+    # What THIS machine needs, read from the SAME seven-fact answer the child
+    # computes, not from two of them. The old predictor asked only sh_detect_pty
+    # and sh_detect_passwd; the child's bootstrap also weighs /dev/dri,
+    # /dev/input, DISPLAY and WAYLAND_DISPLAY, so a runner that has a pty and a
+    # passwd database but no display took the "needs no shim" branch while the
+    # child correctly named fakexenv/fakedisplay missing, and four clauses
+    # cascaded red (issue #121). The parent now re-reads the real machine and
+    # asks the product's own need rule, so the branch and the child answer the
+    # same question. The forced SH_* values above are cleared first so they
+    # cannot leak into this prediction.
+    #
+    # The prediction is the NEED set, not sh_shim_needed_missing: the child runs
+    # with a fresh SANDHOME_HOME, so every shim it needs is missing there. Asking
+    # the presence-filtered reader would subtract the parent's already-built .so
+    # files and predict "nothing missing" while the child names them all.
+    SH_PTY=$(sh_detect_pty); SH_PASSWD=$(sh_detect_passwd); SH_PTRACE=$(sh_detect_ptrace)
+    SH_DRM=$(sh_detect_dri); SH_INPUT=$(sh_detect_input)
+    SH_XENV=$(sh_detect_xenv); SH_DISPLAY=$(sh_detect_display)
+    nocc_want=''
+    for nocc_s in $(sh_shim_names); do
+        [ "$(sh_shim_need "$nocc_s")" = yes ] && nocc_want="$nocc_want $nocc_s"
+    done
+    nocc_want="${nocc_want# }"
     nocc_needs_shims=no
-    if [ "$(sh_detect_pty)" = no ] || [ "$(sh_detect_passwd)" = no ]; then
-        nocc_needs_shims=yes
-    fi
+    [ -n "$nocc_want" ] && nocc_needs_shims=yes
     if [ "$nocc_needs_shims" = yes ]; then
         t_ok "$([ "$nocc_rc" -ne 0 ]; echo $?)" \
             'a needed shim that could not be built makes the bootstrap exit non-zero'
-        nocc_missing=$(printf '%s\n' "$nocc_out" | sed -n 's/.*shims_missing=\([^ ]*\).*/\1/p')
-        case "$nocc_missing" in
-            '') t_ok 1 'a run that failed for shims names what is missing' ;;
-            *)  t_ok 0 'a run that failed for shims names what is missing' ;;
-        esac
+        # shims_missing is a SPACE-SEPARATED list, so the first-token sed only
+        # ever tested emptiness. Capture the whole value: it is the field that
+        # names every shim the run could not build, and the clause must compare
+        # all of them, not just the first.
+        nocc_missing=$(printf '%s\n' "$nocc_out" | sed -n 's/^shims_missing=//p')
+        t_is "$nocc_missing" "$nocc_want" 'a run that failed for shims names exactly what is missing'
         # failures must NOT be 0 here. Checked directly, because a `contains`
         # clause for `failures=` would also match a run that says failures=0.
         case "$nocc_out" in
@@ -366,6 +416,7 @@ if command -v cc >/dev/null 2>&1 && [ ! -e "$nocc_bin/cc" ] && [ ! -e "$nocc_bin
             *)              t_ok 1 'a clean run reports a zero failure count' ;;
         esac
     fi
+    unset nocc_want
 else
     t_skip 'cc is absent or on the hermetic PATH, so the no-compiler bootstrap did not run'
 fi
@@ -623,21 +674,43 @@ t_contains "$modeprobe" 'made' 'a create with a mode still works through the shi
 
 # The two behaviours are separately switchable, because faking the self-check is
 # a bigger change than zeroing a field.
+#
+# # STOP: "RESTORES THE HOST ANSWER" COMPARES AGAINST THE HOST, NOT AGAINST 0.
+# The clause hardcoded `traceme=0`, the answer a host that ALLOWS ptrace gives.
+# On a host where TRACEME is refused (measured: a GitHub ubuntu-latest runner),
+# the corrected passthrough returns the host's real `traceme=1`, which is right,
+# and the clause failed anyway - a test asserting one machine shape while
+# measuring whether the shim restores the machine it is on (issue #121).
+# real_traceme is the recorded answer from the unshimmed probe above; the
+# clause now requires the passthrough to reproduce exactly that.
 out=$( SANDHOME_ANTIPTRACE_TRACEME=0 LD_PRELOAD="$(sh_shims_dir)/antiptrace.so" "$tmp/antiptrace-probe" 2>/dev/null )
-t_ok "$(case "$out" in *'traceme=0'*) echo 1 ;; *) echo 0 ;; esac)" 'SANDHOME_ANTIPTRACE_TRACEME=0 restores the host answer'
+pt_traceme=$(printf '%s\n' "$out" | sed -n 's/^traceme=\([0-9-]*\).*/\1/p')
+t_is "$pt_traceme" "$real_traceme" 'SANDHOME_ANTIPTRACE_TRACEME=0 restores the host answer'
 out=$( SANDHOME_ANTIPTRACE_STATUS=0 SANDHOME_ANTIPTRACE_WCHAN=0 LD_PRELOAD="$(sh_shims_dir)/antiptrace.so" "$tmp/antiptrace-probe" 2>/dev/null )
 t_contains "$out" 'traceme=0' 'with only the self-check faked, TRACEME still succeeds'
 
 # Detection: the probe this shim is gated on must answer, and must answer what
 # this host really is. A detection that always said 'no' would build the shim
 # everywhere and hide a host where it is not needed.
+#
+# # STOP: THE DETECTOR HAS THREE ANSWERS AND THE BRANCH HAD TWO. sh_detect_ptrace
+# answers yes, no OR partial (lib/detect.sh), and its own comment says partial
+# counts as needed. A host that refuses TRACEME but answers a bogus request with
+# EIO/ESRCH instead of EPERM returns partial; the yes/no branch had no arm for it
+# and failed with `got partial, wanted yes` (issue #121). The clauses below assert
+# the property that matters - a detector answer is never unknown, and the shim is
+# needed exactly when the answer is no or partial - rather than a two-way guess.
 det=$(sh_detect_ptrace)
 t_ok "$([ "$det" != unknown ]; echo $?)" 'the ptrace detector answers on this host'
+t_ok "$(case "$det" in yes|no|partial) echo 0 ;; *) echo 1 ;; esac)" 'the detector answer is one of yes, no or partial'
 if [ "$real_traceme" = 0 ]; then
-    t_is "$det" 'yes' 'ptrace works here, and the detector says so'
+    t_ok "$(case "$det" in yes|partial) echo 0 ;; *) echo 1 ;; esac)" 'ptrace answers here, and the detector agrees it is not denied'
 else
-    t_is "$det" 'no' 'ptrace is denied here, and the detector says so'
+    t_ok "$(case "$det" in no|partial) echo 0 ;; *) echo 1 ;; esac)" 'ptrace is denied here, and the detector says so'
 fi
+# The detector's answer and the shim's need must agree, whatever the host.
+SH_PTRACE=$det
+t_ok "$( { [ "$det" = no ] || [ "$det" = partial ]; } && [ "$(sh_shim_need antiptrace)" = yes ] && echo 0 || { [ "$det" = yes ] && [ "$(sh_shim_need antiptrace)" = no ] && echo 0; } || echo 1)" 'the detector answer and the shim need agree'
 
 # And the shim is NEEDED exactly when ptrace is denied, so a healthy host builds
 # nothing. This is the clause that keeps the shim off a machine that does not
@@ -717,23 +790,24 @@ if [ ! -e /dev/dri ] && [ ! -e /dev/input ] && [ ! -e /dev/uinput ]; then
 else
     t_skip 'this host has dri or input devices, so the headless smoke clauses did not run'
 fi
-# Need-gating reads the machine: absent devices and unset displays need the
-# shims, present ones do not. The display variables are saved and restored
-# around the clauses: an assignment prefix on a function call persists in
-# POSIX sh, and leaking an emptied DISPLAY into the rest of the file would
-# fake every later display question.
-t_is "$(sh_shim_need fakedrm)" "$([ -e /dev/dri ] && printf no || printf yes)" 'fakedrm is needed exactly where /dev/dri is absent'
-t_is "$(sh_shim_need fakeinput)" "$([ -e /dev/input ] || [ -e /dev/uinput ] && printf no || printf yes)" 'fakeinput is needed exactly where input devices are absent'
-sh_hs_disp=${DISPLAY:-__sandhome_unset}; sh_hs_way=${WAYLAND_DISPLAY:-__sandhome_unset}
-DISPLAY=''; WAYLAND_DISPLAY=''; export DISPLAY WAYLAND_DISPLAY
-t_is "$(sh_shim_need fakexenv)" 'yes' 'fakexenv is needed with no DISPLAY'
-t_is "$(sh_shim_need fakedisplay)" 'yes' 'fakedisplay is needed with no Wayland socket'
-DISPLAY=':0'; export DISPLAY
-t_is "$(sh_shim_need fakexenv)" 'no' 'fakexenv steps aside for a set DISPLAY'
-WAYLAND_DISPLAY='wayland-0'; export WAYLAND_DISPLAY
-t_is "$(sh_shim_need fakedisplay)" 'no' 'fakedisplay steps aside for a set socket'
-if [ "$sh_hs_disp" = __sandhome_unset ]; then unset DISPLAY; else DISPLAY=$sh_hs_disp; export DISPLAY; fi
-if [ "$sh_hs_way" = __sandhome_unset ]; then unset WAYLAND_DISPLAY; else WAYLAND_DISPLAY=$sh_hs_way; export WAYLAND_DISPLAY; fi
+# Need-gating reads the seven facts, and every fact is now an SH_* value the
+# test sets directly, so each clause asserts the rule for a NAMED shape rather
+# than for whatever this host happens to be. Before issue #121 the headless facts
+# were read from the filesystem inside sh_shim_need, so the test mutated DISPLAY
+# and compared against `[ -e /dev/dri ]`; a host that had /dev/dri could not
+# test the absent case at all.
+SH_DRM=no;  t_is "$(sh_shim_need fakedrm)" 'yes' 'fakedrm is needed exactly where /dev/dri is absent'
+SH_DRM=yes; t_is "$(sh_shim_need fakedrm)" 'no'  'fakedrm stands aside where /dev/dri answers'
+SH_INPUT=no;  t_is "$(sh_shim_need fakeinput)" 'yes' 'fakeinput is needed exactly where input devices are absent'
+SH_INPUT=yes; t_is "$(sh_shim_need fakeinput)" 'no'  'fakeinput stands aside where input devices answer'
+SH_XENV=no;  t_is "$(sh_shim_need fakexenv)" 'yes' 'fakexenv is needed with no DISPLAY'
+SH_XENV=yes; t_is "$(sh_shim_need fakexenv)" 'no'  'fakexenv steps aside for a set DISPLAY'
+SH_DISPLAY=no;  t_is "$(sh_shim_need fakedisplay)" 'yes' 'fakedisplay is needed with no Wayland socket'
+SH_DISPLAY=yes; t_is "$(sh_shim_need fakedisplay)" 'no'  'fakedisplay steps aside for a set socket'
+# The detectors answer the machine the same way the variables are set here, so a
+# rule that read the wrong fact would disagree with its own detector.
+SH_DRM=$(sh_detect_dri); SH_INPUT=$(sh_detect_input)
+SH_XENV=$(sh_detect_xenv); SH_DISPLAY=$(sh_detect_display)
 
 
 t_end

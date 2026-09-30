@@ -25,6 +25,13 @@ sh_shims_dir() { printf '%s/shims' "$SH_HOME"; }
 sh_shim_names() { printf 'fakepty fakepwd antiptrace fakedrm fakeinput fakexenv fakedisplay'; }
 
 # sh_shim_need NAME -> yes when the machine lacks what the shim supplies.
+#
+# Every fact is read from an SH_* variable that sh_detect_all fills from the
+# machine and a test may override, so a need-rule and the answer it gives for a
+# given shape are both testable without the shape being the running host's. An
+# unset or unknown fact is treated as "the machine has it" for the presence
+# facts (no), which is the conservative direction: it never claims a shim is
+# needed on a machine that was not probed.
 sh_shim_need() {
     case "$1" in
         fakepty)    [ "${SH_PTY:-unknown}" = no ] && printf 'yes' || printf 'no' ;;
@@ -35,18 +42,18 @@ sh_shim_need() {
         # request it should not have, and the shim can only help.
         antiptrace) case "${SH_PTRACE:-unknown}" in no|partial) printf 'yes' ;; *) printf 'no' ;; esac ;;
         # fakedrm answers GPU enumeration opens where /dev/dri does not exist;
-        # fakeinput answers input opens where /dev/input does not exist. Both
-        # read the filesystem directly: presence is the need, and no probe
-        # infrastructure is required to ask whether a path exists.
-        fakedrm)    if [ -e /dev/dri ]; then printf 'no'; else printf 'yes'; fi ;;
-        fakeinput)  if [ -e /dev/input ] || [ -e /dev/uinput ]; then printf 'no'; else printf 'yes'; fi ;;
+        # fakeinput answers input opens where /dev/input does not exist. The
+        # facts are the detectors' answers (sh_detect_dri, sh_detect_input),
+        # overridable so the shim test can build a shape that is not this host's.
+        fakedrm)    [ "${SH_DRM:-unknown}" = no ] && printf 'yes' || printf 'no' ;;
+        fakeinput)  [ "${SH_INPUT:-unknown}" = no ] && printf 'yes' || printf 'no' ;;
         # fakexenv/fakedisplay answer client display probes where no server
         # can exist (bind is denied, so no in-cage Xvfb). Needed when neither
         # a DISPLAY nor a Wayland socket is set: a set one means something
         # answered already, real or not, and this shim is not the one to
         # second-guess it.
-        fakexenv)   if [ -n "${DISPLAY:-}" ]; then printf 'no'; else printf 'yes'; fi ;;
-        fakedisplay) if [ -n "${WAYLAND_DISPLAY:-}" ]; then printf 'no'; else printf 'yes'; fi ;;
+        fakexenv)   [ "${SH_XENV:-unknown}" = no ] && printf 'yes' || printf 'no' ;;
+        fakedisplay) [ "${SH_DISPLAY:-unknown}" = no ] && printf 'yes' || printf 'no' ;;
         *)          printf 'no' ;;
     esac
 }

@@ -62,11 +62,13 @@ number to appear in its row, so the table and the modules cannot drift.
 | --- | --- | --- |
 | bun | 200 | 12 |
 | clang | 3000 | 32 |
+| cmake | 64 | 16 |
 | deno | 150 | 8 |
 | fd | 16 | 16 |
 | gh | 16 | 16 |
 | go | 150 | 12 |
 | jq | 8 | 8 |
+| meson | 32 | 8 |
 | mold | 60 | 8 |
 | ninja | 8 | 8 |
 | node | 200 | 16 |

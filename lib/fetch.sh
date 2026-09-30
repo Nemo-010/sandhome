@@ -167,9 +167,10 @@ sh_resolver_failed_twice() {
 }
 
 # sh_mirror_url URL -> the mirror URL for URL, or nothing. A GitHub API
-# path goes through the API mirror; anything else through the general
-# passthrough with the original URL appended. Empty when the matching base
-# is emptied (opt-out) or the URL is not http(s). Pure string work, so it is
+# path goes through the AUTHENTICATED API mirror (it serves api.github.com JSON
+# at 5000/hour where a caller's own IP would get 60/hour); anything else through
+# the general passthrough with the original URL appended. Empty when the matching
+# base is emptied (opt-out) or the URL is not http(s). Pure string work, so it is
 # unit-tested without a network (issue #104).
 sh_mirror_url() {
     case "${1:-}" in
@@ -193,14 +194,30 @@ sh_mirror_url() {
 # sh_fetch_via_mirror URL DEST -> 0 when the mirror leg fetched the URL. Runs
 # after the plain downloaders and before the failure message: a downloader
 # failure that is not a resolver failure may still be a blocked origin. The
-# mirror answers wget and BSD fetch with 420, so this leg is curl-only with
-# an explicit curl-like agent, and says so when curl is absent rather than
-# reporting a UA refusal as a fetch failure. The bytes are the origin's
-# bytes under a different route, so the caller's pin still applies unchanged.
+# bytes are the origin's bytes under another route, so the caller's pin still
+# applies unchanged.
+#
+# # TWO BASES, TWO JOBS, AND BOTH ARE CURL-ONLY. The general passthrough
+# (SANDHOME_MIRROR_URL, default api.rv.pkgforge.dev) carries any origin URL,
+# appended whole, and is a second egress path for a download; whatever rate
+# limit applies still applies to it, per egress IP. The API mirror
+# (SANDHOME_MIRROR_GH_URL, default api.gh.pkgforge.dev) is an AUTHENTICATED,
+# READ-ONLY GitHub API proxy: it serves api.github.com JSON with the proxy's
+# own credential, so a read that the caller's IP would have limited to 60/hour
+# answers at 5000/hour (measured). It is API-shaped on purpose - a release-asset
+# download URL returns 420 there (measured), because carrying downloads is the
+# passthrough's job, not the API proxy's. A 420 is therefore not a user-agent
+# refusal for the API mirror; it is the proxy declining a path shape it does not
+# serve, which is why the routing in sh_mirror_url sends only api.github.com
+# paths to it.
+#
+# Both bases want a curl-like agent; wget and BSD fetch are answered with 420, so
+# this leg is curl-only and says so when curl is absent rather than reporting a
+# UA refusal as a fetch failure.
 sh_fetch_via_mirror() {
     sh_fm_mirror=$(sh_mirror_url "$1") || return 1
     if ! sh_have curl; then
-        sh_warn "the mirror leg needs curl (the mirror answers wget with 420) and none is here; skipping $sh_fm_mirror"
+        sh_warn "the mirror leg needs curl (both mirror bases answer wget with 420) and none is here; skipping $sh_fm_mirror"
         return 1
     fi
     if curl -fSL --retry 2 --retry-delay 2 -A 'curl/sandhome' -o "$2" "$sh_fm_mirror" 2>/dev/null && [ -s "$2" ]; then
@@ -517,10 +534,12 @@ sh_pin_for() {
         case "$sh_pf_name" in
             bun)     [ -n "${SANDHOME_SHA256_BUN:-}" ] && { printf '%s' "$SANDHOME_SHA256_BUN"; return 0; } ;;
             clang)   [ -n "${SANDHOME_SHA256_CLANG:-}" ] && { printf '%s' "$SANDHOME_SHA256_CLANG"; return 0; } ;;
+            cmake)   [ -n "${SANDHOME_SHA256_CMAKE:-}" ] && { printf '%s' "$SANDHOME_SHA256_CMAKE"; return 0; } ;;
             deno)    [ -n "${SANDHOME_SHA256_DENO:-}" ] && { printf '%s' "$SANDHOME_SHA256_DENO"; return 0; } ;;
             fd)      [ -n "${SANDHOME_SHA256_FD:-}" ] && { printf '%s' "$SANDHOME_SHA256_FD"; return 0; } ;;
             go)      [ -n "${SANDHOME_SHA256_GO:-}" ] && { printf '%s' "$SANDHOME_SHA256_GO"; return 0; } ;;
             jq)      [ -n "${SANDHOME_SHA256_JQ:-}" ] && { printf '%s' "$SANDHOME_SHA256_JQ"; return 0; } ;;
+            meson)   [ -n "${SANDHOME_SHA256_MESON:-}" ] && { printf '%s' "$SANDHOME_SHA256_MESON"; return 0; } ;;
             mold)    [ -n "${SANDHOME_SHA256_MOLD:-}" ] && { printf '%s' "$SANDHOME_SHA256_MOLD"; return 0; } ;;
             node)    [ -n "${SANDHOME_SHA256_NODE:-}" ] && { printf '%s' "$SANDHOME_SHA256_NODE"; return 0; } ;;
             python)  [ -n "${SANDHOME_SHA256_PYTHON:-}" ] && { printf '%s' "$SANDHOME_SHA256_PYTHON"; return 0; } ;;
@@ -625,7 +644,7 @@ sh_pin_for() {
 # sh_pin_names -> every toolchain name a `SANDHOME_SHA256_<NAME>` pin answers to.
 # Printed so tests/unit.sh can require one entry per module in tools/, which is
 # what keeps the closed `case` above from going stale when a module is added.
-sh_pin_names() { printf ' fd go jq node python ripgrep rust zig mold clang deno bun qemuuser shellcheck shfmt yq ninja gh\n'; }
+sh_pin_names() { printf ' fd go jq node python ripgrep rust zig mold clang deno bun qemuuser shellcheck shfmt yq ninja gh cmake meson\n'; }
 
 # sh_pin_from URL [NAME] [PUBLISHED] -> the NAME of the pin that answered for
 # this URL, or nothing. The provenance line in the report names it, because a

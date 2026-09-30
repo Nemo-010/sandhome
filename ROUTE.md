@@ -251,6 +251,24 @@ eval "$(sandhome env)"
 sh -c 'eval "$(sandhome env)"; sandhome doctor'
 ```
 
+**A shell with no PATH at all sources the entry point by its durable path.** The
+`eval` forms above need `sandhome` already on PATH, and a harness that spawns a
+non-login shell per call has no PATH until something loads it. The bootstrap
+leaves a snippet beside the durable home for exactly that case:
+
+```sh
+. "${XDG_DATA_HOME:-$HOME/.local/share}/sandhome/entry.sh"
+sandhome doctor
+```
+
+It is sourced, not executed, because the home is often noexec and a file there
+cannot run; sourcing needs no exec permission. It sets `SANDHOME_HOME` and
+`SANDHOME_EXEC`, defines `sandhome`, and sources `env.sh`, so one line from
+`sh -c`, a harness tool call, or any process that inherited nothing reaches both
+the command and the toolchains. The snippet lives on the home, so a tmpfs
+restart does not clear it; `sandhome resume` rewrites it when it moves the exec
+view.
+
 A toolchain that installed without an error and still does not answer is
 reported as a failure. Run the `install` subcommand for that name again:
 it rebuilds the exec view and probes the tool afterwards, on the adopt

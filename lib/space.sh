@@ -1405,9 +1405,22 @@ sh_space_probe_report() {
         sh_exec_probe "$sh_spr_c" && sh_spr_x=yes
         sh_spr_pick=''
         [ "$sh_spr_c" = "$sh_spr_chosen" ] && sh_spr_pick=' chosen=yes'
-        printf 'candidate=%s exists=yes writable=%s exec=%s mount=%s free_mb=%s%s\n' \
+        # # A VERDICT, NOT ONLY A TABLE OF NUMBERS. The plan already decides
+        # whether a candidate runs a file, and prints why only in `space`; a
+        # consumer reading `--probe` sees a roomy candidate and cannot tell why
+        # it was passed over. The verdict names the reason in one word so the
+        # list is a decision (issue #125).
+        sh_spr_verdict=usable
+        if [ "$sh_spr_w" = no ]; then
+            sh_spr_verdict=not-writable
+        elif [ "$sh_spr_x" = no ]; then
+            sh_spr_verdict=noexec
+        elif [ "$sh_spr_c" = "$sh_spr_chosen" ]; then
+            sh_spr_verdict=chosen
+        fi
+        printf 'candidate=%s exists=yes writable=%s exec=%s mount=%s free_mb=%s verdict=%s%s\n' \
             "$sh_spr_c" "$sh_spr_w" "$sh_spr_x" \
-            "$(sh_mount_opts "$sh_spr_c")" "$(sh_free_mb "$sh_spr_c")" "$sh_spr_pick"
+            "$(sh_mount_opts "$sh_spr_c")" "$(sh_free_mb "$sh_spr_c")" "$sh_spr_verdict" "$sh_spr_pick"
     done
 }
 
@@ -1680,15 +1693,29 @@ sh_space_largest() {
         case "$sh_sl_k" in
             ''|*[!0-9]*) continue ;;
         esac
-        printf '%s\t%s\n' "$sh_sl_k" "$sh_sl_e"
+        # # TAG THE OWNER OF EACH ENTRY, AFTER THE PATH. When an exec root drains
+        # during a session the biggest thing is usually the consumer's OWN build
+        # output (a cargo install root, an npm prefix, a project venv), not
+        # sandhome's caches, and `gc` deliberately does not touch those. Without
+        # a tag the list reads as though `gc` could reclaim all of it, so the
+        # consumer deletes the wrong thing or waits for a command that will not
+        # help (issue #125). `sandhome` marks what gc/repair own; `yours` marks
+        # build output only the caller can remove. The tag is appended after the
+        # path so the size-then-path shape callers already parse is unchanged.
+        sh_sl_tag=yours
+        case "${sh_sl_e##*/}" in
+            views|cache|staging|npm-global|uv-bin|uv-tools|go-bin|cargo-install|projects) sh_sl_tag=sandhome ;;
+        esac
+        printf '%s\t%s\t%s\n' "$sh_sl_k" "$sh_sl_e" "$sh_sl_tag"
     done | $sh_sl_sort 2>/dev/null | {
         sh_sl_i=0
-        while IFS="	" read -r sh_sl_k sh_sl_p; do
+        while IFS="	" read -r sh_sl_k sh_sl_p sh_sl_tag; do
             sh_sl_i=$((sh_sl_i + 1))
             [ "$sh_sl_i" -le "$sh_sl_n" ] || break
-            printf '%sKB\t%s\n' "$sh_sl_k" "$sh_sl_p"
+            printf '%sKB\t%s\t(%s)\n' "$sh_sl_k" "$sh_sl_p" "$sh_sl_tag"
         done
     }
+    printf '%s\n' 'tag: sandhome = a cache gc/prune can reclaim; yours = build output you remove when the root drains'
     return 0
 }
 

@@ -358,6 +358,20 @@ esac
 # (unset takes the default); non-http answers nothing.
 t_is "$(sh_mirror_url 'https://github.com/x/y.tar.gz')" 'https://api.rv.pkgforge.dev/https://github.com/x/y.tar.gz' 'a release URL maps onto the passthrough'
 t_is "$(sh_mirror_url 'https://api.github.com/repos/x/y/releases/latest')" 'https://api.gh.pkgforge.dev/repos/x/y/releases/latest' 'an API path maps onto the API mirror'
+# # THE TWO BASES DO DIFFERENT JOBS (issue #124). The API mirror is an
+# authenticated read-only proxy for api.github.com JSON, so an API path goes
+# there; a release-asset download is the passthrough's job, because the API
+# mirror answers a download URL with 420 (measured). These clauses pin the
+# routing so a future edit cannot send downloads to the API proxy or API reads
+# past the credential that removes the 60/hour per-IP limit.
+t_is "$(sh_mirror_url 'https://api.github.com/repos/x/y')" 'https://api.gh.pkgforge.dev/repos/x/y' 'a bare API repo path goes to the authenticated mirror'
+t_is "$(sh_mirror_url 'https://github.com/x/y/releases/download/v1/y.tar.gz')" \
+    'https://api.rv.pkgforge.dev/https://github.com/x/y/releases/download/v1/y.tar.gz' \
+    'a release-asset download goes to the passthrough, not the API mirror'
+case "$(sh_mirror_url 'https://github.com/x/y/releases/download/v1/y.tar.gz')" in
+    *api.gh.pkgforge.dev*) t_ok 1 'a download is never routed to the API mirror (it answers 420 there)' ;;
+    *) t_ok 0 'a download is never routed to the API mirror (it answers 420 there)' ;;
+esac
 t_is "$(SANDHOME_MIRROR_URL= sh_mirror_url 'https://github.com/x/y' || printf empty)" 'empty' 'an emptied mirror base opts out'
 t_is "$(sh_mirror_url 'ftp://x/y' || printf empty)" 'empty' 'a non-http URL maps nowhere'
 t_is "$(SANDHOME_MIRROR_URL=https://m.example/ sh_mirror_url 'https://github.com/x/y')" 'https://m.example/https://github.com/x/y' 'the mirror base is configurable'

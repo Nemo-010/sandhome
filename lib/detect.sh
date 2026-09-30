@@ -186,6 +186,58 @@ sh_detect_pty() {
     printf 'no'
 }
 
+# sh_detect_dri -> yes when a GPU device node answers. Presence is the whole
+# question: fakedrm interposes the enumeration opens a renderer makes, and a
+# machine that has /dev/dri needs no help answering them.
+#
+# # WHY EACH HEADLESS FACT IS A DETECTOR AND NOT AN INLINE `[ -e ]`. The four
+# headless facts were read directly inside sh_shim_need, which made them
+# unforceable, and a need-rule that cannot be asked "what would you answer for
+# facts X" cannot be tested off the running host. Every other fact (pty, passwd,
+# ptrace, bind) was already a detector writing an SH_* variable, and the shim
+# test forces those to build machine shapes. These four join that set so the
+# same table-driven test covers all seven shims and the runner shape that used
+# to fail only in CI becomes reproducible anywhere (issue #121).
+sh_detect_dri() {
+    if [ -e /dev/dri ]; then
+        printf 'yes'
+        return 0
+    fi
+    printf 'no'
+}
+
+# sh_detect_input -> yes when input device nodes answer. /dev/uinput counts:
+# a machine with the uinput interface can create an input device, so fakeinput
+# has nothing to supply.
+sh_detect_input() {
+    if [ -e /dev/input ] || [ -e /dev/uinput ]; then
+        printf 'yes'
+        return 0
+    fi
+    printf 'no'
+}
+
+# sh_detect_xenv -> yes when an X display is named. A set DISPLAY means
+# something already answered the client probe, real or not, and fakexenv is not
+# the one to second-guess it.
+sh_detect_xenv() {
+    if [ -n "${DISPLAY:-}" ]; then
+        printf 'yes'
+        return 0
+    fi
+    printf 'no'
+}
+
+# sh_detect_display -> yes when a Wayland socket is named, the fakedisplay
+# counterpart of sh_detect_xenv.
+sh_detect_display() {
+    if [ -n "${WAYLAND_DISPLAY:-}" ]; then
+        printf 'yes'
+        return 0
+    fi
+    printf 'no'
+}
+
 # sh_detect_passwd -> yes when a passwd database answers. `getent` is absent on
 # some cages; reading /etc/passwd is the fallback. A cage with neither gets no,
 # which is the case fakepwd exists for.
@@ -424,8 +476,13 @@ sh_detect_all() {
     SH_PASSWD=$(sh_detect_passwd)
     SH_PTRACE=$(sh_detect_ptrace)
     SH_BIND=$(sh_detect_bind)
+    SH_DRM=$(sh_detect_dri)
+    SH_INPUT=$(sh_detect_input)
+    SH_XENV=$(sh_detect_xenv)
+    SH_DISPLAY=$(sh_detect_display)
     export SH_OS_ID SH_KERNEL SH_ARCH SH_LIBC SH_WSL SH_PRIVILEGE SH_PROVIDER
     export SH_PTY SH_PASSWD SH_PTRACE SH_BIND
+    export SH_DRM SH_INPUT SH_XENV SH_DISPLAY
 }
 
 # sh_arch_go -> the GOARCH spelling of this machine.

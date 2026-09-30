@@ -119,6 +119,24 @@ case "$absent_report" in
     *) t_ok 1 'a missing candidate is reported at all' ;;
 esac
 t_ok "$([ ! -d "$ghost" ]; echo $?)" 'the probe report did not create the candidate it named'
+# A present candidate carries a verdict, so a consumer reading the list knows
+# why a roomy directory was passed over (issue #125). The exec root this test
+# runs against is exec-capable, so its verdict is chosen or usable.
+exec_report=$(SANDHOME_EXEC="$tmp/probed" sh_space_probe_report 2>/dev/null)
+case "$exec_report" in
+    *'verdict=chosen'*|*'verdict=usable'*) t_ok 0 'a present candidate carries a verdict' ;;
+    *) t_ok 1 "a present candidate carries a verdict (got: $exec_report)" ;;
+esac
+# A noexec candidate is named as noexec, not left as a bare row of numbers.
+if [ -r /state/home ] && ! sh_exec_probe /state/home 2>/dev/null; then
+    noexec_report=$(sh_space_probe_report 2>/dev/null)
+    case "$noexec_report" in
+        *'verdict=noexec'*) t_ok 0 'a noexec candidate is named noexec' ;;
+        *) t_ok 1 'a noexec candidate is named noexec' ;;
+    esac
+else
+    t_skip 'no known noexec candidate on this host to check the noexec verdict'
+fi
 
 # NOTE: THE CANDIDATE LIST IS DEDUPLICATED. A $HOME equal to the home root put
 # the same directory in the list twice, and it was probed and reported twice.
@@ -1044,6 +1062,12 @@ case "$sl_out" in
     *KB"$sl"*) t_ok 1 "space --largest prints sizes (got: $sl_out)" ;;
     *KB*) t_ok 0 'space --largest prints sizes' ;;
     *) t_ok 1 "space --largest prints sizes (got: $sl_out)" ;;
+esac
+# The tag names the owner of each entry, so a consumer draining an exec root
+# knows what gc reclaims and what they must remove themselves (issue #125).
+case "$sl_out" in
+    *'(yours)'*) t_ok 0 'space --largest tags the consumer build output' ;;
+    *) t_ok 1 "space --largest tags the consumer build output (got: $sl_out)" ;;
 esac
 rm -rf "$sl"
 

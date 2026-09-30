@@ -470,6 +470,16 @@ cmd_space() {
 cmd_toolchains() {
     case "${1:-}" in
         -h|--help) cmd_help toolchains; return 0 ;;
+        --json) : ;;
+        # # STOP: AN UNKNOWN FLAG IS REFUSED, NOT IGNORED. This case handled only
+        # --help, and any other argument fell through to the plain table with
+        # exit 0 - so `sandhome toolchains --bogus` printed the whole listing as
+        # if nothing had happened and a script could not tell. Every other
+        # command already refuses with rc=2 (install, doctor, gc, ...); this one,
+        # cmd_shims and cmd_report were the three that did not (issue #125). The
+        # accepted flag is named in the case above so the refusal cannot swallow
+        # it.
+        -*) sh_die "toolchains does not take '$1'; run 'sandhome help toolchains' for the flags it takes" ;;
     esac
     if [ "${1:-}" = --json ]; then
         printf '['
@@ -478,6 +488,7 @@ cmd_toolchains() {
             sh_toolchain_load "$sh_c_t" >/dev/null 2>&1
             eval "sh_c_desc=\${TC_${sh_c_t}_DESC:-}"
             eval "sh_c_bins=\${TC_${sh_c_t}_BINS:-}"
+            eval "sh_c_dynamic=\${TC_${sh_c_t}_DYNAMIC:-}"
             [ "$sh_c_n" -gt 0 ] && printf ','
             # The version is read only for a present toolchain: probing
             # already bounded the hung-binary case, and re-running its
@@ -487,13 +498,14 @@ cmd_toolchains() {
             if [ "$sh_c_st" = present ]; then
                 sh_c_ver=$(sh_toolchain_version "$sh_c_t")
             fi
-            printf '{"name":"%s","desc":"%s","bins":"%s","status":"%s","version":"%s","origin":"%s","view":"%s"}' \
+            printf '{"name":"%s","desc":"%s","bins":"%s","status":"%s","version":"%s","origin":"%s","view":"%s","dynamic":"%s"}' \
                 "$(sh_json_escape "$sh_c_t")" "$(sh_json_escape "$sh_c_desc")" \
                 "$(sh_json_escape "$sh_c_bins")" \
                 "$(sh_json_escape "$sh_c_st")" \
                 "$(sh_json_escape "$sh_c_ver")" \
                 "$(sh_toolchain_origin "$sh_c_t")" \
-                "$(sh_toolchain_view_kind "$sh_c_t")"
+                "$(sh_toolchain_view_kind "$sh_c_t")" \
+                "$(sh_json_escape "$sh_c_dynamic")"
             sh_c_n=$((sh_c_n + 1))
         done
         printf ']\n'
@@ -503,6 +515,7 @@ cmd_toolchains() {
         sh_toolchain_load "$sh_c_t" >/dev/null 2>&1
         eval "sh_c_desc=\${TC_${sh_c_t}_DESC:-}"
         eval "sh_c_bins=\${TC_${sh_c_t}_BINS:-}"
+        eval "sh_c_dynamic=\${TC_${sh_c_t}_DYNAMIC:-}"
         if [ -n "$sh_c_bins" ]; then
             sh_c_path="via $(sh_commas_to_spaces "$sh_c_bins")"
         else
@@ -524,6 +537,12 @@ cmd_toolchains() {
             "$sh_c_t" "$sh_c_st" \
             "$sh_c_ver" "$sh_c_desc"
         printf '          path: %s\n' "$sh_c_path"
+        # A toolchain that fetches after install says so here, where a consumer
+        # lists what is here, so "run this with the network down" is answered
+        # before it fails rather than after (issue #125).
+        if [ -n "$sh_c_dynamic" ]; then
+            printf '          dynamic: %s\n' "$sh_c_dynamic"
+        fi
         # Qemu guests are opt-in and otherwise invisible: `install qemuuser`
         # alone holds only the host emulator, and the failure is a bare
         # `command not found` (issue #117). The hint is printed here, where a
@@ -764,6 +783,8 @@ cmd_repair() {
 cmd_shims() {
     case "${1:-}" in
         -h|--help) cmd_help shims; return 0 ;;
+        # An unknown flag is refused, matching every other command (issue #125).
+        -*) sh_die "shims does not take '$1'; run 'sandhome help shims' for the form it takes" ;;
     esac
     if [ "${1:-build}" = build ]; then
         sh_shim_build_all "$SH_REPO_DIR/shims"
@@ -798,12 +819,36 @@ cmd_exec() {
     if [ "$#" -eq 0 ]; then
         sh_die 'exec needs a command'
     fi
+    # # STOP: A SINGLE NON-EXECUTABLE ARGUMENT IS A SHELL STRING, NOT A PROGRAM.
+    # `exec "$@"` with one argument that is not on PATH died with the
+    # interpreter's own error and the installed copy's line number:
+    #   sandhome: 802: exec: echo hi: not found
+    # which reads like a corrupted tree rather than "exec takes argv". The
+    # documented working form is `sandhome exec sh -c '...'`; the single-argument
+    # form is now honoured the way a caller means it, by running it through the
+    # shell, so the common "run this line with the environment loaded" case works
+    # (issue #125). Two or more arguments stay exec-argv: `sandhome exec make -j4`
+    # must exec make, not pass "-j4" to a shell.
+    if [ "$#" -eq 1 ]; then
+        case "$1" in
+            */*) : ;;
+            *)
+                if ! command -v "$1" >/dev/null 2>&1; then
+                    sh_env_load
+                    exec sh -c "$1"
+                fi ;;
+        esac
+    fi
     sh_env_load
     exec "$@"
 }
 cmd_report() {
     case "${1:-}" in
         -h|--help) cmd_help report; return 0 ;;
+        --json) : ;;
+        # An unknown flag is refused, matching every other command (issue #125);
+        # the accepted flag is named above so the refusal cannot swallow it.
+        -*) sh_die "report does not take '$1'; run 'sandhome help report' for the flags it takes" ;;
     esac
     sh_env_load
     if [ "${1:-}" = --json ]; then
@@ -1164,6 +1209,20 @@ cmd_resume() {
     export SANDHOME_HOME SANDHOME_EXEC
     sh_memexec_ensure
     sh_exec_install_launchers
+    # Refresh the stable entry point after a tmpfs restart moved the exec root:
+    # the snippet bakes the exec-bin path, and the restart is exactly when a cold
+    # non-login shell needs it (issue #122).
+    if [ -d "$SH_HOME" ] && [ -n "$SH_EXEC_BIN" ]; then
+        {
+            printf '%s\n' '# sandhome entry point. Generated; sourced, not executed.'
+            printf '%s\n' "# Written because a non-login shell has no PATH (issue #122)."
+            printf '%s\n' "SANDHOME_HOME=\${SANDHOME_HOME:-'$SH_HOME'}"
+            printf '%s\n' "SANDHOME_EXEC=\${SANDHOME_EXEC:-'$SH_EXEC'}"
+            printf '%s\n' 'export SANDHOME_HOME SANDHOME_EXEC'
+            printf 'sandhome() { "%s/sandhome" "$@"; }\n' "$SH_EXEC_BIN"
+            printf '%s\n' "[ -r \"\$SANDHOME_HOME/env.sh\" ] && . \"\$SANDHOME_HOME/env.sh\""
+        } > "$SH_HOME/entry.sh" 2>/dev/null
+    fi
     # Repair, not install: payloads that survived rebuild their views with
     # no download, and genuinely missing toolchains fail loudly in doctor.
     cmd_repair || sh_warn 'resume could not rebuild every view; doctor names what is missing'
