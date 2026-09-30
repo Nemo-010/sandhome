@@ -615,6 +615,31 @@ sh_toolchain_bins() {
     eval "printf '%s' \"\${TC_${sh_tb_name}_BINS:-}\""
 }
 
+# sh_toolchain_has_doctor NAME -> 0 when the module declares a
+# tc_<name>_doctor health check. Used by the readiness gate so a check that has
+# to do what a USER does (a language runtime re-executing itself, which is what
+# every Playwright, webpack and worker spawn does) runs on exactly the
+# toolchains that can answer it, and so a module that needs no such check costs
+# nothing (issue #139).
+sh_toolchain_has_doctor() {
+    sh_thd_name=$1
+    sh_toolchain_load "$sh_thd_name" >/dev/null 2>&1 || return 1
+    command -v "tc_${sh_thd_name}_doctor" >/dev/null 2>&1
+}
+
+# sh_toolchain_doctor NAME -> 0 when the module's own health check passes, and
+# non-zero when the module declares none, so a failure is a failure and not a
+# silent pass. Isolated and bounded like the probe: a check that hangs is read
+# as a failure rather than allowed to hold the readiness gate open, and it runs
+# in its own process because a module hook may use anything the module sourced.
+sh_toolchain_doctor() {
+    sh_td_name=$1
+    sh_toolchain_load "$sh_td_name" >/dev/null 2>&1 || return 1
+    command -v "tc_${sh_td_name}_doctor" >/dev/null 2>&1 || return 1
+    sh_run_isolated "${SH_PROBE_TIMEOUT_SECS:-60}" "${SH_LIB_DIR:-.}" \
+        "$(sh_toolchain_module "$sh_td_name")" "tc_${sh_td_name}_doctor" >/dev/null 2>&1
+}
+
 # sh_toolchain_view_kind NAME -> how this toolchain runs: launch or copy for
 # an installed tree (the machine's view mode), direct for an adopted copy
 # with no home tree. This is the mapping a `/memfd:sandhome` path in a trace

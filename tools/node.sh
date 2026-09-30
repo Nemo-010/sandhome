@@ -9,13 +9,27 @@ TC_node_DESC='Node.js with the bundled npm, from the official nodejs.org tarball
 TC_node_BINS='bin/node bin/npm bin/npx'
 TC_node_EXEC_MB=200
 
-# tc_node_exec_mb -> the fresh-install exec need in MB: 16 in launch mode
-# (launcher copies for node, npm and npx; the tree measured 5MB), 200 in copy
-# mode (the full tree). Read by the install gate below and the feasibility
-# plan so the two never disagree (issues #92, #105).
+# tc_node_copy_bins -> node MUST BE A REAL FILE IN THE VIEW, EVEN IN LAUNCH
+# MODE. Every UI tool re-executes node: Playwright and Puppeteer spawn a
+# download helper, webpack/vite/jest spawn workers, esbuild and native CLIs
+# spawn children. A launcher copy makes process.execPath an anonymous memfd
+# (`/memfd:sandhome (deleted)`, a path that no longer exists by the time it is
+# read), and every one of those spawns dies with ENOENT while `node --version`
+# still answers and `doctor` stays green (issue #139). The copy-list is the
+# existing per-module lever for "this executable cannot run from memory"; node
+# is the canonical member. npm and npx stay launchers: they exec node, which is
+# a real file, so their own process.execPath is a real path too.
+tc_node_copy_bins() { printf 'bin/node'; }
+
+# tc_node_exec_mb -> the fresh-install exec need in MB. node is on the copy
+# list, so launch mode already pays for the real runtime: 149711504 bytes
+# measured for the bin/node inside the linux-x64 tarball, plus the launcher
+# copies for npm and npx, and the declared 200 leaves room for both modes to
+# agree. Copy mode is the full tree. Read by the install gate below and the
+# feasibility plan so the two never disagree (issues #92, #105, #139).
 tc_node_exec_mb() {
     if [ "${SH_VIEW_MODE:-copy}" = launch ]; then
-        printf '16'
+        printf '200'
     else
         printf '200'
     fi
@@ -23,6 +37,40 @@ tc_node_exec_mb() {
 
 tc_node_probe() {
     sh_have node && node --version >/dev/null 2>&1
+}
+
+# tc_node_doctor -> 0 when node can re-execute itself, which is what every UI
+# tool and every worker does. A launcher view makes process.execPath an
+# anonymous memfd and the spawn dies with ENOENT while `node --version` still
+# answers, so the readiness gate used to report that tree green (issue #139).
+#
+# The view copy is named explicitly, not taken from the PATH doctor inherited:
+# a doctor run in a fresh shell resolves node through the hook, which is a
+# dispatcher and not the file, and a run where the hook serves a DIFFERENT
+# toolchain's node would then check the wrong bytes. The PATH copy is the
+# fallback for an adopted toolchain, which has no view of its own.
+#
+# The check is the one the failing tool performs, not a proxy for it: node
+# spawning ITSELF through process.execPath. `--eval` is kept because a child
+# that only prints a version would pass on a runtime whose spawn path is
+# broken in some other way; the exit status is what the caller reads.
+tc_node_doctor() {
+    sh_nd_node=''
+    # NOT sh_toolchain_view: the isolated runner sources common.sh and this
+    # module only, so the library helper is not defined there. SH_EXEC_VIEWS is
+    # exported by the space plan, and SANDHOME_EXEC is exported by env.sh, so
+    # the view is reachable from either shape the hook can run in.
+    sh_nd_view=${SH_EXEC_VIEWS:-}
+    if [ -z "$sh_nd_view" ] && [ -n "${SANDHOME_EXEC:-}" ]; then
+        sh_nd_view="$SANDHOME_EXEC/views"
+    fi
+    if [ -n "$sh_nd_view" ] && [ -x "$sh_nd_view/node/bin/node" ]; then
+        sh_nd_node="$sh_nd_view/node/bin/node"
+    elif sh_have node; then
+        sh_nd_node=node
+    fi
+    [ -n "$sh_nd_node" ] || return 1
+    "$sh_nd_node" -e 'const r=require("child_process").spawnSync(process.execPath,["-e","0"]); process.exit(r.status===0?0:1)' >/dev/null 2>&1
 }
 
 # STOP: THE `latest/` REDIRECT NAMES A TRAIN, NOT A VERSION. nodejs.org/dist/latest/

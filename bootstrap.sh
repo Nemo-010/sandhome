@@ -569,47 +569,16 @@ sh_bootstrap_install_command() {
         return 0
     fi
     mkdir -p "$SH_EXEC_BIN" 2>/dev/null || true
-    cp -f "$sh_bic_src" "$SH_EXEC_BIN/sandhome" || {
+    # The bake lives in the library (sh_bake_command), because install and
+    # repair write this same file and used to overwrite the bake with the raw
+    # template; one writer means one bake (issue #133). The library function
+    # also reads the written file back, so the step it prints describes the
+    # artefact rather than the attempt.
+    if ! sh_bake_command "$sh_bic_src" "$SH_EXEC_BIN/sandhome"; then
         sh_fail 'could not install sandhome onto the exec root'
         return 1
-    }
-    chmod 0755 "$SH_EXEC_BIN/sandhome" 2>/dev/null || true
+    fi
     sh_step "installed $SH_EXEC_BIN/sandhome"
-    # Bake the durable checkout path into the installed copy: a process with
-    # no HOME and no inherited environment finds its library from itself
-    # (issue #88). A shell read-loop, because this file cannot require sed
-    # or grep; a path with a quote in it is refused rather than half-baked.
-    # Each path bakes independently: a future copy with only one marker still
-    # gets the other, and a copy with neither keeps both empty rather than
-    # failing the whole bake because one line was renamed.
-    case "$SH_REPO_DIR:$SH_HOME" in
-        *\'*) sh_warn "not baking the paths (a quote in $SH_REPO_DIR or $SH_HOME)" ;;
-        *)
-            sh_bic_tmp="$SH_EXEC_BIN/.sandhome.cmd.$$"
-            sh_bic_repo=0; sh_bic_home=0
-            sh_bic_ok=0
-            {
-                while IFS= read -r sh_bic_l || [ -n "$sh_bic_l" ]; do
-                    case "$sh_bic_l" in
-                        SH_BAKED_REPO_DIR=*)
-                            printf "SH_BAKED_REPO_DIR='%s'\n" "$SH_REPO_DIR"
-                            sh_bic_repo=1 ;;
-                        SH_BAKED_HOME=*)
-                            printf "SH_BAKED_HOME='%s'\n" "$SH_HOME"
-                            sh_bic_home=1 ;;
-                        *) printf '%s\n' "$sh_bic_l" ;;
-                    esac
-                done < "$SH_EXEC_BIN/sandhome"
-            } > "$sh_bic_tmp" 2>/dev/null && { [ "$sh_bic_repo" = 1 ] || [ "$sh_bic_home" = 1 ]; } && \
-                mv -f "$sh_bic_tmp" "$SH_EXEC_BIN/sandhome" 2>/dev/null && \
-                chmod 0755 "$SH_EXEC_BIN/sandhome" 2>/dev/null && sh_bic_ok=1
-            rm -f "$sh_bic_tmp" 2>/dev/null
-            if [ "$sh_bic_ok" = 1 ]; then
-                sh_step "baked $SH_REPO_DIR and $SH_HOME into $SH_EXEC_BIN/sandhome"
-            else
-                sh_warn "could not bake the paths; no-HOME launches fall back to HOME lookup"
-            fi ;;
-    esac
     # # A STABLE ABSOLUTE WAY IN, BECAUSE A NON-LOGIN SHELL HAS NO PATH. The exec
     # bin is on PATH only through ~/.profile, which a login shell reads; an agent
     # harness spawns a non-login shell per tool call, so nothing sources the

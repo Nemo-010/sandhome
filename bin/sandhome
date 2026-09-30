@@ -33,10 +33,28 @@ elif [ -n "${SH_REPO_DIR:-}" ]; then
 elif [ -n "$SH_BAKED_REPO_DIR" ] && [ -r "$SH_BAKED_REPO_DIR/lib/common.sh" ]; then
     sh_repo=$SH_BAKED_REPO_DIR
 else
+    # # STOP: THE PRIVATE MIRROR COMES BEFORE EVERY POINTER. The bake and the
+    # `.sandhome-home` pointer are absolute paths, and a checkout that a tmpfs
+    # restart or a cleanup took away makes both of them wrong; a directory
+    # BESIDE this copy cannot be, because it moves with the copy. The bootstrap
+    # mirrors lib/ and bin/ into $SANDHOME_EXEC/.sandhome-lib and `repair`
+    # re-mirrors it, so `env -i <exec>/bin/sandhome doctor` still works on a
+    # host whose checkout is gone and whose home pointer is stale. That is the
+    # case issue #133 left behind: the fix made the bake durable, and this
+    # makes the thing the bake points at optional.
+    sh_priv=''
     case "$0" in
-        */*) sh_repo=$(CDPATH='' cd -- "${0%/*}/.." && pwd) ;;
-        *)   sh_repo='' ;;
+        */*) sh_priv=${0%/*}/.. ;;
     esac
+    if [ -n "$sh_priv" ] && [ -r "$sh_priv/.sandhome-lib/lib/common.sh" ]; then
+        sh_repo=$(CDPATH='' cd -- "$sh_priv" 2>/dev/null && pwd) || sh_repo=''
+    fi
+    if [ -z "${sh_repo:-}" ] || [ ! -r "$sh_repo/lib/common.sh" ]; then
+        case "$0" in
+            */*) sh_repo=$(CDPATH='' cd -- "${0%/*}/.." && pwd) ;;
+            *)   sh_repo='' ;;
+        esac
+    fi
     # # STOP: A BARE SHELL FINDS THE CHECKOUT FROM THE ENV FILE, WHICH IS WHERE
     # IT WAS ALREADY WRITTEN. ROUTE.md step 4 offers `eval "$(sandhome env)"`
     # for a shell where sourcing is not possible, and it is the form a tool
@@ -130,13 +148,25 @@ fi
 # carried nothing about SANDHOME_HOME, so with no environment it fell back to
 # /tmp/sandhome, found no env.sh there, picked an unrelated exec root and
 # reported home=/tmp/sandhome. `env -i <exec>/bin/sandhome exec jq` then exited
-# 127 because jq was not on the PATH it had invented. Four routes, in order,
-# so a copy that predates the bake, whose home moved, or whose exec root was
-# cleared still recovers: the baked home, a `.sandhome-home` pointer written
+# 127 because jq was not on the PATH it had invented. Five routes, in order,
+# so a copy that predates the bake, whose checkout is gone, whose home moved,
+# or whose exec root was cleared still recovers: the private library mirror
+# beside the copy (above), the baked home, a `.sandhome-home` pointer written
 # on the exec root beside the copy, the conventional home paths, and the
 # recorded exec root's own pointer. Every pointer is validated (absolute path
 # plus a readable env.sh) before it is trusted, because a stale or hostile
 # file must not redirect the home.
+#
+# The library mirror beside the copy is looked for FIRST, in the block above
+# (sh_priv/.sandhome-lib/lib/common.sh): a directory beside the copy cannot be
+# stale in the way an absolute path can, because it moves with the copy, and a
+# checkout that a tmpfs restart or a cleanup took away is exactly the state
+# every pointer here describes as "present" until the copy reads it and finds
+# nothing. The bootstrap mirrors lib/ and bin/ into
+# $SANDHOME_EXEC/.sandhome-lib and `repair` re-mirrors it, so
+# `env -i <exec>/bin/sandhome doctor` works on a host whose checkout is gone
+# and whose home pointer is stale. Issue #133 measured the BAKE dying; this
+# makes the thing the bake points at optional.
 if [ -z "${SANDHOME_HOME:-}" ] && [ -n "$SH_BAKED_HOME" ]; then
     case "$SH_BAKED_HOME" in
         /*)
@@ -232,6 +262,10 @@ usage: sandhome COMMAND [args]
   space --largest [N]    the N biggest entries on the exec root (default 10)
   space --reclaim        reclaimable cache bytes without removing anything
   toolchains             name, one-line description, PATH binaries, versions
+  skills                 where the skills are installed, one line per skill per
+                         location, with the origin (this tree's copy, a link
+                         into the checkout, or something else that was left
+                         alone). Exits non-zero when none is installed
   install NAME...        adopt or install each toolchain, then write the env
   install --only NAMES   install exactly these and replace the recorded request
   install --with NAMES   add to the request and install it (comma list)
@@ -475,11 +509,30 @@ to the state install found. When no writable PATH entry can host it, entry.sh
 and `sandhome exec` remain.
 HELP
             return 0 ;;
+        skills)
+            cat <<'HELP'
+usage: sandhome skills
+Where the harness skills are installed, one line per skill per location
+(~/.agents/skills and, when Pi state exists, ~/.pi/agent/skills), with the
+state (installed, foreign, absent) and the origin (this tree's copy, a link
+into the checkout, or a file that differs from it). Ends in
+skills_installed=N and exits non-zero when none is installed. The setup
+installs them; this command confirms it instead of asking a consumer to
+fetch them again by hand.
+HELP
+            return 0 ;;
         env|path|project|shims|shell|pty|test|selftest|version)
             usage; return 0 ;;
+        # # STOP: A HELP WORD WITH NO HELP PAGE PRINTS THE COMMAND LIST, NOT AN
+        # ERROR. `sandhome --help` reached this arm with $1 = --help and died
+        # with "no help for '--help'", exit 2, on the one command whose whole
+        # job is to print help (issue #136). The list is the right answer for
+        # any name this file has no page for, because a person who typed a
+        # wrong subcommand and then asked for help wants to be shown the
+        # subcommands. A NAME that is a real command with no page of its own
+        # is the same case, so the refusal was never earning anything.
         *)
-            sh_die "no help for '$1'; run 'sandhome help' for the command list"
-            ;;
+            usage; return 0 ;;
     esac
 }
 cmd_env()    { sh_env_print; }
@@ -634,6 +687,64 @@ cmd_toolchains() {
             fi
         fi
     done
+}
+
+# # STOP: THE SKILLS ARE THE SETUP'S TO REPORT, NOT A CONSUMER'S TO FETCH. ROUTE.md
+# step 2 spent three curl round-trips and three mkdirs telling a consumer to
+# fetch three SKILL.md files the bootstrap had already installed into both
+# locations a harness reads, and the `ls` that followed proved nothing that was
+# not already true (issue #134). The check is now a command that READS the
+# machine: one line per skill per location with where it came from, so a
+# harness with a resource reload can confirm in one call and a person can see
+# that a skill is a stale link rather than a copy.
+#
+# Each line is `name location=... state=... origin=...`, state being
+#   installed  a file this tree wrote (or a link into this checkout)
+#   foreign    something is there that this tree did not write; left alone
+#   absent     not there
+# and origin naming the bytes, so "installed" and "the same bytes as the
+# checkout" are two different claims and a reader can tell which one holds.
+cmd_skills() {
+    sh_sk_home=${SANDHOME_HOME:-${SH_HOME:-}}
+    sh_sk_repo=${SH_REPO_DIR:-}
+    sh_sk_n=0
+    printf 'skills_home=%s\n' "${HOME:-unset}"
+    for sh_sk_name in sandhome errandsh sealed-sandbox; do
+        for sh_sk_base in "$HOME/.agents/skills" "$HOME/.pi/agent/skills"; do
+            case "$sh_sk_base" in
+                "$HOME/.pi/agent/skills") [ -d "$HOME/.pi" ] || continue ;;
+            esac
+            sh_sk_path=$sh_sk_base/$sh_sk_name/SKILL.md
+            sh_sk_state=absent
+            sh_sk_origin=''
+            if [ -L "$sh_sk_path" ]; then
+                sh_sk_state=installed
+                sh_sk_origin="link -> $(readlink "$sh_sk_path" 2>/dev/null || printf '?')"
+            elif [ -r "$sh_sk_path" ]; then
+                sh_sk_state=installed
+                if [ -n "$sh_sk_repo" ] && [ -r "$sh_sk_repo/skills/$sh_sk_name/SKILL.md" ]; then
+                    if cmp -s "$sh_sk_path" "$sh_sk_repo/skills/$sh_sk_name/SKILL.md" 2>/dev/null; then
+                        sh_sk_origin='same bytes as the checkout'
+                    else
+                        sh_sk_origin='a file that differs from the checkout'
+                    fi
+                else
+                    sh_sk_origin='a file (no checkout to compare with)'
+                fi
+            elif [ -e "$sh_sk_base/$sh_sk_name" ]; then
+                sh_sk_state=foreign
+                sh_sk_origin="something that is not a SKILL.md: $sh_sk_base/$sh_sk_name"
+            fi
+            printf '%-16s %s state=%s origin=%s\n' "$sh_sk_name" "$sh_sk_base" "$sh_sk_state" "${sh_sk_origin:--}"
+            [ "$sh_sk_state" = installed ] && sh_sk_n=$((sh_sk_n + 1))
+        done
+    done
+    printf 'skills_installed=%s\n' "$sh_sk_n"
+    if [ "$sh_sk_n" -eq 0 ]; then
+        printf 'skills_hint=none installed; re-run the setup without --no-skills, or fetch them by URL as ROUTE.md step 2 says\n'
+        return 1
+    fi
+    return 0
 }
 cmd_install() {
     if [ "$#" -eq 0 ]; then
@@ -1470,6 +1581,7 @@ cmd_project() {
         sh_pj_node=1
     fi
     sh_pj_dir=$SH_EXEC/projects/$sh_pj_name
+    sh_pj_failed=0
     if ! mkdir -p "$sh_pj_dir" 2>/dev/null; then
         sh_fail "could not create $sh_pj_dir"
         return 1
@@ -1496,6 +1608,16 @@ cmd_project() {
         fi
     fi
     if [ "$sh_pj_py" = 1 ]; then
+        # A CALLER OF `sandhome project` MAY HAVE NO ENVIRONMENT LOADED, AND
+        # THE COMMAND EXISTS FOR THAT CALLER (issues #74, #137). Both halves
+        # are run through the written environment rather than the caller's
+        # bare PATH: `uv` and `npm` are the toolchain's own view wrappers, and
+        # a wrapper that has not read env.sh cannot map itself back to its
+        # payload. The python half did not show it because uv happened to be
+        # exposed as a working copy on a host that had one; npm is a symlink
+        # into a view, so `sh_have node` was true and `npm init` died with
+        # "cannot map this copy back", swallowed by 2>&1.
+        sh_env_apply 2>/dev/null || true
         if [ -d "$sh_pj_dir/.venv" ]; then
             sh_say "python: .venv already present"
         elif sh_have uv; then
@@ -1506,25 +1628,61 @@ cmd_project() {
             # puts pip in; when the uv at hand predates the flag, pip is
             # installed into the venv afterwards, and a venv that still has
             # no working pip is reported rather than announced as ready.
-            if uv venv --seed "$sh_pj_dir/.venv" >/dev/null 2>&1 || \
-               uv venv "$sh_pj_dir/.venv" >/dev/null 2>&1; then
+            # # STOP: A HALF-BUILT VENV IS CLEARED BEFORE THE RETRY, BECAUSE THE
+            # FIRST FORM CAN LEAVE ONE BEHIND. `uv venv --seed` builds the
+            # environment and THEN installs pip into it, so a seed that fails -
+            # a cage with no resolver, measured here: "Failed to fetch
+            # https://pypi.org/simple/pip/, dns error" - leaves a .venv with no
+            # pip in it, and the retry then answered "A virtual environment
+            # already exists at: .venv" and the command reported a python half
+            # that had failed when it had in fact half worked. The retry
+            # therefore clears what the first form left, and the cleared copy is
+            # announced rather than done silently, because a person watching
+            # for a state change should see the venv they already have replaced.
+            sh_pj_uvout=$( ( CDPATH='' cd -- "$sh_pj_dir" 2>/dev/null && uv venv --seed "$sh_pj_dir/.venv" ) 2>&1 )
+            sh_pj_uvrc=$?
+            if [ "$sh_pj_uvrc" != 0 ] || [ ! -d "$sh_pj_dir/.venv" ]; then
+                if [ -d "$sh_pj_dir/.venv" ]; then
+                    rm -rf "$sh_pj_dir/.venv" 2>/dev/null || true
+                    sh_say "python: cleared the half-built .venv $sh_pj_dir/.venv (uv venv --seed left it without pip)"
+                fi
+                sh_pj_uvout=$( ( CDPATH='' cd -- "$sh_pj_dir" 2>/dev/null && uv venv "$sh_pj_dir/.venv" ) 2>&1 )
+                sh_pj_uvrc=$?
+            fi
+            if [ "$sh_pj_uvrc" = 0 ] && [ -d "$sh_pj_dir/.venv" ]; then
                 sh_say "python: uv venv $sh_pj_dir/.venv"
                 if [ -x "$sh_pj_dir/.venv/bin/python" ] && \
                    ! "$sh_pj_dir/.venv/bin/python" -m pip --version >/dev/null 2>&1; then
                     if uv pip install --python "$sh_pj_dir/.venv/bin/python" pip >/dev/null 2>&1; then
                         sh_say 'python: pip installed into the venv'
                     else
-                        sh_warn 'the venv has no working pip; run `<venv>/bin/python -m ensurepip` before installing dependencies'
+                        # # STOP: A VENV WITHOUT pip IS A WARNING, NOT A
+                        # FAILED HALF, AND THE DIFFERENCE IS MEASURED. The
+                        # venv itself answers: `.venv/bin/python -c "print(1)"`
+                        # runs, and `uv pip install` installs into it without
+                        # pip ever existing. What is missing is one of three
+                        # ways to install into it. Measured here: the seed fails
+                        # with "Failed to fetch https://pypi.org/simple/pip/,
+                        # dns error" on a cage with no resolver, so a non-zero
+                        # exit here would report the project command as broken
+                        # on every such host while the venv beside it works.
+                        # A half that produced NOTHING is a failure (the two
+                        # `sh_pj_failed=1` below); a half that produced
+                        # something usable with one gap named is a warning.
+                        sh_warn 'the venv has no working pip; run `<venv>/bin/python -m ensurepip` or `uv pip install --python <venv>/bin/python pip` before installing dependencies'
                     fi
                 fi
             else
-                sh_warn 'uv venv failed; python half skipped'
+                sh_pj_failed=1
+                sh_warn "uv venv failed${sh_pj_uvout:+: $(sh_first_line "$sh_pj_uvout")}; python half skipped"
             fi
         elif sh_have python3; then
-            if python3 -m venv "$sh_pj_dir/.venv" >/dev/null 2>&1; then
+            sh_pj_pyout=$( ( CDPATH='' cd -- "$sh_pj_dir" 2>/dev/null && python3 -m venv "$sh_pj_dir/.venv" ) 2>&1 )
+            if [ "$?" = 0 ] && [ -d "$sh_pj_dir/.venv" ]; then
                 sh_say "python: venv $sh_pj_dir/.venv"
             else
-                sh_warn 'python -m venv failed; python half skipped'
+                sh_pj_failed=1
+                sh_warn "python -m venv failed${sh_pj_pyout:+: $(sh_first_line "$sh_pj_pyout")}; python half skipped"
             fi
         else
             sh_warn 'no uv or python3 on PATH; python half skipped (sandhome install python)'
@@ -1534,17 +1692,29 @@ cmd_project() {
         fi
     fi
     if [ "$sh_pj_node" = 1 ]; then
+        # The readiness line is gated on package.json existing, so the command
+        # cannot tell a consumer that `npm install` and `npx` "all run there"
+        # in the same breath as the npm half failing (issue #137), and the
+        # first line of npm's own error is printed rather than swallowed by
+        # 2>&1: "npm: not found", "cannot map this copy back" and a registry
+        # error are three different problems and a reader cannot tell them
+        # apart from one word.
         if sh_have node; then
             if [ ! -f "$sh_pj_dir/package.json" ]; then
-                if ( CDPATH='' cd -- "$sh_pj_dir" 2>/dev/null && npm init -y >/dev/null 2>&1 ); then
+                sh_pj_npmout=$( ( CDPATH='' cd -- "$sh_pj_dir" 2>/dev/null && npm init -y ) 2>&1 )
+                sh_pj_npmrc=$?
+                if [ "$sh_pj_npmrc" = 0 ] && [ -f "$sh_pj_dir/package.json" ]; then
                     sh_say "node: npm init in $sh_pj_dir"
                 else
-                    sh_warn 'npm init failed; node half skipped'
+                    sh_pj_failed=1
+                    sh_warn "npm init failed${sh_pj_npmout:+: $(sh_first_line "$sh_pj_npmout")}; node half skipped"
                 fi
             else
                 sh_say 'node: package.json already present'
             fi
-            sh_say "node: work in ./$sh_pj_name (npm install, npx, native CLIs all run there)"
+            if [ -f "$sh_pj_dir/package.json" ]; then
+                sh_say "node: work in ./$sh_pj_name (npm install, npx, native CLIs all run there)"
+            fi
         else
             sh_warn 'no node on PATH; node half skipped (sandhome install node)'
         fi
@@ -1553,7 +1723,10 @@ cmd_project() {
     # exec root does not survive a restart (re-run this command), and a
     # native payload must live here, not on the work tree (issue #72).
     sh_say "note: $sh_pj_dir lives on the exec root; a tmpfs restart clears it, and this command rebuilds it"
-    return 0
+    # A tool that was PRESENT and failed is a non-zero exit so a script can
+    # react; a tool that is ABSENT still leaves the other half usable and the
+    # warning says so, which is the old behavior and stays exit 0 (issue #137).
+    return "$sh_pj_failed"
 }
 # # NOTE: BOTH PROGRAMS REPORT THE SAME SCHEMA STRING, AND A READER WHO CHECKS
 # ONE HAS TO CHECK THE SAME ONE. `bootstrap.sh --version` printed `bootstrap/1`
@@ -1716,40 +1889,96 @@ cmd_test() {
 case "${2:-}" in
     -h|--help)
         case "${1:-}" in
-            doctor|env|path|global|space|status|resume|toolchains|install|ensure|repair|shims|shell|pty|exec|report|gc|prune|add|project|test|selftest|version|help)
+            doctor|env|path|global|space|status|resume|toolchains|skills|install|ensure|repair|shims|shell|pty|exec|report|gc|prune|add|project|test|selftest|version|help)
                 cmd_help "${1:-help}"
                 exit 0 ;;
         esac ;;
 esac
 
+# # STOP: A BARE `sandhome` IS THE DISCOVERY PATH, AND EVERY DISPATCHER BRANCH
+# GUARDS ITS OWN SHIFT. The case word defaulted to `help`, so with no arguments
+# the help branch ran `shift` with $#=0: bash ignores that, dash writes "shift:
+# can't shift that many" to stderr, and the reader of a command they forgot the
+# subcommand of gets a shell diagnostic instead of the usage text (issue #136).
+#
+# A GUARD IS `if [ "$#" -gt 0 ]; then shift; fi`, SPELLED AT EVERY CALL SITE, and
+# that is not a style preference. It was written here first as a FUNCTION,
+# `sh_dispatch_shift`, and it is a silent no-op: inside a POSIX function `$#` and
+# `$1` are the function's own, so the guard read 0, the branch never ran, and
+# the caller's list never moved. Measured three ways, all agreeing: a two-line
+# program printing the function's own `$#` (0) against the caller's (1);
+# `cmd_project` receiving "project pj-x --no-link" and reading the name as
+# "project"; and the trace of that call. So there is no function here, and the
+# guard is visible where the shift is, and the clause in tests/syntax.sh refuses
+# a dispatcher branch that guards a shift with anything else.
+#
+# The two branches that can be reached with NOTHING to shift (a bare
+# `sandhome`, and a second help flag) are answered before the dispatcher and
+# never shift at all, which is the other half of the fix: `sandhome --help`
+# used to reach cmd_help with $1 still reading --help and answer "no help for
+# '--help'" with exit 2 on the one command whose job is to print help.
+if [ "$#" -eq 0 ]; then
+    cmd_help ''
+    exit 0
+fi
+if [ "$1" = -h ] || [ "$1" = --help ]; then
+    cmd_help ''
+    exit 0
+fi
+
 case "${1:-help}" in
-    doctor)      shift; cmd_doctor "$@" ;;
-    status)      shift; cmd_status "$@" ;;
-    resume)      shift; cmd_resume "$@" ;;
+    doctor)      if [ "$#" -gt 0 ]; then shift; fi; cmd_doctor "$@" ;;
+    status)      if [ "$#" -gt 0 ]; then shift; fi; cmd_status "$@" ;;
+    resume)      if [ "$#" -gt 0 ]; then shift; fi; cmd_resume "$@" ;;
     env)         cmd_env ;;
     path)        cmd_path ;;
-    global)      sh_cmd_needs_roots global; shift; cmd_global "$@" ;;
-    space)       shift; cmd_space "$@" ;;
-    toolchains)  shift; cmd_toolchains "$@" ;;
-    install|ensure) case "${2:-}" in -h|--help) shift; cmd_install "$@" ;; *) sh_cmd_needs_roots install; shift; cmd_install "$@" ;; esac ;;
-    repair) case "${2:-}" in -h|--help) shift; cmd_repair "$@" ;; *) sh_cmd_needs_roots repair; shift; cmd_repair "$@" ;; esac ;;
-    shims)       sh_cmd_needs_roots shims; shift; cmd_shims "$@" ;;
-    shell)       shift; cmd_shell "$@" ;;
-    pty)         shift; cmd_pty "$@" ;;
-    exec)        shift; cmd_exec "$@" ;;
-    report)      shift; cmd_report "$@" ;;
-    gc) case "${2:-}" in -h|--help) shift; cmd_gc "$@" ;; *) sh_cmd_needs_roots_recover; shift; cmd_gc "$@" ;; esac ;;
-    prune) case "${2:-}" in -h|--help) shift; cmd_prune "$@" ;; *) sh_cmd_needs_roots_recover; shift; cmd_prune "$@" ;; esac ;;
-    add) case "${2:-}" in -h|--help) shift; cmd_add "$@" ;; *) sh_cmd_needs_roots add; shift; cmd_add "$@" ;; esac ;;
-    project) case "${2:-}" in -h|--help) shift; cmd_project "$@" ;; *) sh_cmd_needs_roots project; shift; cmd_project "$@" ;; esac ;;
+    global)      sh_cmd_needs_roots global; if [ "$#" -gt 0 ]; then shift; fi; cmd_global "$@" ;;
+    space)       if [ "$#" -gt 0 ]; then shift; fi; cmd_space "$@" ;;
+    toolchains)  if [ "$#" -gt 0 ]; then shift; fi; cmd_toolchains "$@" ;;
+    skills)      if [ "$#" -gt 0 ]; then shift; fi; cmd_skills "$@" ;;
+    install|ensure) case "${2:-}" in -h|--help) if [ "$#" -gt 0 ]; then shift; fi; cmd_install "$@" ;; *) sh_cmd_needs_roots install; if [ "$#" -gt 0 ]; then shift; fi; cmd_install "$@" ;; esac ;;
+    repair) case "${2:-}" in -h|--help) if [ "$#" -gt 0 ]; then shift; fi; cmd_repair "$@" ;; *) sh_cmd_needs_roots repair; if [ "$#" -gt 0 ]; then shift; fi; cmd_repair "$@" ;; esac ;;
+    shims)       sh_cmd_needs_roots shims; if [ "$#" -gt 0 ]; then shift; fi; cmd_shims "$@" ;;
+    shell)       if [ "$#" -gt 0 ]; then shift; fi; cmd_shell "$@" ;;
+    pty)         if [ "$#" -gt 0 ]; then shift; fi; cmd_pty "$@" ;;
+    exec)        if [ "$#" -gt 0 ]; then shift; fi; cmd_exec "$@" ;;
+    report)      if [ "$#" -gt 0 ]; then shift; fi; cmd_report "$@" ;;
+    gc) case "${2:-}" in -h|--help) if [ "$#" -gt 0 ]; then shift; fi; cmd_gc "$@" ;; *) sh_cmd_needs_roots_recover; if [ "$#" -gt 0 ]; then shift; fi; cmd_gc "$@" ;; esac ;;
+    prune) case "${2:-}" in -h|--help) if [ "$#" -gt 0 ]; then shift; fi; cmd_prune "$@" ;; *) sh_cmd_needs_roots_recover; if [ "$#" -gt 0 ]; then shift; fi; cmd_prune "$@" ;; esac ;;
+    add) case "${2:-}" in -h|--help) if [ "$#" -gt 0 ]; then shift; fi; cmd_add "$@" ;; *) sh_cmd_needs_roots add; if [ "$#" -gt 0 ]; then shift; fi; cmd_add "$@" ;; esac ;;
+    project) case "${2:-}" in -h|--help) if [ "$#" -gt 0 ]; then shift; fi; cmd_project "$@" ;; *) sh_cmd_needs_roots project; if [ "$#" -gt 0 ]; then shift; fi; cmd_project "$@" ;; esac ;;
     test)        cmd_test ;;
-    selftest)    shift; cmd_selftest "${1:-}" ;;
+    selftest)    if [ "$#" -gt 0 ]; then shift; fi; cmd_selftest "${1:-}" ;;
     version|--version) cmd_version ;;
-    help|-h|--help) shift; cmd_help "${1:-}" ;;
+    help|-h|--help)
+        # # STOP: THE SUBCOMMAND IS TAKEN BEFORE THE SHIFT, AS A VALUE. The
+        # branch reads the name, then shifts, then hands the name on: with the
+        # read AFTER the shift, `sandhome help doctor` printed the command list
+        # instead of the doctor's page, because what the docs call the page for
+        # a command is the word that followed `help`, and reading it after the
+        # shift is impossible in POSIX sh. `sandhome --help` and `sandhome -h`
+        # name nothing: they are answered before the dispatcher, and this
+        # branch's case drops the flag when a reader reaches it anyway.
+        sh_dispatch_subcommand=${1:-}
+        case "$sh_dispatch_subcommand" in
+            -h|--help) sh_dispatch_subcommand='' ;;
+            help) sh_dispatch_subcommand=${2:-} ;;
+        esac
+        if [ "$#" -gt 0 ]; then shift; fi
+        cmd_help "$sh_dispatch_subcommand" ;;
     *)           usage >&2; sh_die "unknown command $1" ;;
 esac
 
-if [ "$SH_FAILURES" -gt 0 ]; then
-    exit 1
+# # STOP: THE DISPATCHER KEEPS THE COMMAND'S EXIT STATUS. It read only the
+# failure COUNTER, so every `return 1` a command ended with was discarded and
+# the process always exited 0: `sandhome skills` with nothing installed printed
+# `skills_installed=0` and a hint naming the fix, and a script that branched on
+# its status saw success. The status is read first, then the counter is allowed
+# to turn a 0 into a 1 (a command that reported a failure and forgot to return
+# one is the case the counter was built for), and an explicit non-zero is never
+# softened to 0.
+sh_dispatch_status=$?
+if [ "${SH_FAILURES:-0}" -gt 0 ] && [ "$sh_dispatch_status" -eq 0 ]; then
+    sh_dispatch_status=1
 fi
-exit 0
+exit "$sh_dispatch_status"

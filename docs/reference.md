@@ -24,6 +24,10 @@ usage: sandhome COMMAND [args]
   space --largest [N]    the N biggest entries on the exec root (default 10)
   space --reclaim        reclaimable cache bytes without removing anything
   toolchains             name, one-line description, PATH binaries, versions
+  skills                 where the skills are installed, one line per skill per
+                         location, with the origin (this tree's copy, a link
+                         into the checkout, or something else that was left
+                         alone). Exits non-zero when none is installed
   install NAME...        adopt or install each toolchain, then write the env
   install --only NAMES   install exactly these and replace the recorded request
   install --with NAMES   add to the request and install it (comma list)
@@ -217,7 +221,7 @@ usage: sh bootstrap.sh [options]
 | `SANDHOME_CRIT_MB` | space.sh sandhome | `unset, and the feature is off until it is set` |
 | `SANDHOME_DOH_CANARY` | fetch.sh | `https://github.com` |
 | `SANDHOME_DOH_URL` | fetch.sh bootstrap.sh sandhome | `unset, and the feature is off until it is set` |
-| `SANDHOME_EXEC` | common.sh env.sh report.sh space.sh bootstrap.sh sandhome cmake.sh fd.sh go.sh jq.sh meson.sh node.sh python.sh ripgrep.sh rust.sh zig.sh | `*)` |
+| `SANDHOME_EXEC` | common.sh env.sh profile.sh report.sh space.sh bootstrap.sh sandhome bun.sh cmake.sh deno.sh fd.sh go.sh jq.sh meson.sh node.sh python.sh ripgrep.sh rust.sh zig.sh | `*)` |
 | `SANDHOME_FAKEPTY` | env.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_FAKEPTY_ID` | env.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_FETCH_CHUNK_MB` | fetch.sh | `256` |
@@ -229,12 +233,13 @@ usage: sh bootstrap.sh [options]
 | `SANDHOME_GO_DL_JSON_URL` | sandhome go.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_GO_VERSION_URL` | sandhome go.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_HERE` | profile.sh | `unset, and the feature is off until it is set` |
-| `SANDHOME_HOME` | env.sh profile.sh space.sh bootstrap.sh sandhome go.sh node.sh python.sh rust.sh | `$SH_BAKED_HOME` |
+| `SANDHOME_HOME` | env.sh profile.sh space.sh bootstrap.sh sandhome go.sh node.sh python.sh rust.sh | `''` |
 | `SANDHOME_LLVM_TAG` | clang.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_LOW_EXEC_MB` | space.sh sandhome | `unset, and the feature is off until it is set` |
 | `SANDHOME_LOW_EXEC_PCT` | space.sh sandhome | `unset, and the feature is off until it is set` |
 | `SANDHOME_MIN_EXEC_MB` | space.sh sandhome | `128` |
 | `SANDHOME_MIRROR_GH_URL` | fetch.sh bootstrap.sh | `unset, and the feature is off until it is set` |
+| `SANDHOME_MIRROR_LIB` | env.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_MIRROR_URL` | fetch.sh bootstrap.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_MOLD_VERSION` | mold.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_NODE_INDEX_URL` | sandhome node.sh | `unset, and the feature is off until it is set` |
@@ -248,8 +253,8 @@ usage: sh bootstrap.sh [options]
 | `SANDHOME_PROFILE` | profile.sh | `1` |
 | `SANDHOME_QEMUUSER_EXTRA` | sandhome qemuuser.sh | `$SANDHOME_QEMUUSER_EXTRA $sh_c_x` |
 | `SANDHOME_REF` | bootstrap.sh sandhome | `unset, and the feature is off until it is set` |
-| `SANDHOME_REPO` | env.sh bootstrap.sh sandhome | `unset, and the feature is off until it is set` |
-| `SANDHOME_REPO_DIR` | env.sh bootstrap.sh sandhome | `unset, and the feature is off until it is set` |
+| `SANDHOME_REPO` | env.sh profile.sh bootstrap.sh sandhome | `unset, and the feature is off until it is set` |
+| `SANDHOME_REPO_DIR` | env.sh profile.sh bootstrap.sh sandhome | `unset, and the feature is off until it is set` |
 | `SANDHOME_REQUIRE_DIGEST` | fetch.sh sandhome | `unset, and the feature is off until it is set` |
 | `SANDHOME_RUST_TARGETS` | sandhome rust.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_SHA256` | fetch.sh bootstrap.sh sandhome | `unset, and the feature is off until it is set` |
@@ -279,7 +284,7 @@ usage: sh bootstrap.sh [options]
 | `SANDHOME_SHFMT_VERSION` | shfmt.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_SHIMS` | env.sh shim.sh sandhome | `unset, and the feature is off until it is set` |
 | `SANDHOME_VIEW_MODE` | env.sh memexec.sh report.sh space.sh bootstrap.sh sandhome | `unset, and the feature is off until it is set` |
-| `SANDHOME_WANTED_TOOLCHAINS` | env.sh report.sh sandhome | `*)` |
+| `SANDHOME_WANTED_TOOLCHAINS` | env.sh profile.sh report.sh sandhome | `*)` |
 | `SANDHOME_WORKSPACE` | space.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_ZIG_INDEX_URL` | sandhome zig.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_ZIG_VERSION` | sandhome zig.sh | `unset, and the feature is off until it is set` |
@@ -324,7 +329,7 @@ usage: sh bootstrap.sh [options]
 | `python` | `(via its own PATH fragment)` | CPython, installed by uv (uv is always left on PATH) |
 | `qemuuser` | `bin/qemu-x86_64` | qemu-user, the static user-mode emulators (run a guest ELF, trace its syscalls without ptrace) |
 | `ripgrep` | `bin/rg` | ripgrep (rg), the fast recursive search tool |
-| `rust` | `cargo/bin/rustup cargo/bin/cargo` | Rust via rustup (rustc, cargo, rustup; minimal profile) |
+| `rust` | `cargo/bin/rustup cargo/bin/cargo cargo/bin/rustc cargo/bin/rustdoc cargo/bin/cargo-clippy cargo/bin/cargo-fmt` | Rust via rustup (rustc, cargo, rustup, rustdoc, cargo-clippy, cargo-fmt; minimal profile) |
 | `shellcheck` | `bin/shellcheck` | ShellCheck, the shell script linter (single static binary) |
 | `shfmt` | `bin/shfmt` | shfmt, a shell script formatter (single static binary) |
 | `yq` | `bin/yq` | yq, a YAML/TOML/XML command-line processor (single binary) |

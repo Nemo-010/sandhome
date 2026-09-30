@@ -363,4 +363,145 @@ env -i PATH=/usr/bin:/bin HOME="$work/fake" \
 t_is "$([ -d "$gh_ihome/global" ] && printf yes || printf no)" 'no' \
      'SANDHOME_GLOBAL=0 keeps `install` from writing the hook'
 
+# --- #132: a view name whose only PATH hit is inside this tree is exposed ----
+# The shape issue #132 describes, built exactly: the exec bin holds `npm` as a
+# SYMLINK to views/node/bin/npm, and views/node/bin is on PATH only because
+# env.sh put it there. The old filter asked sh_path_where, found npm in that
+# view directory, and concluded "PATH will serve it" - in a shell that has not
+# read env.sh, which is the whole case the hook exists for. So a fresh shell had
+# node and no npm while `toolchains` advertised all three.
+gh_view=$work/viewcase
+gh_vhome=$work/vhome
+gh_vexec=$work/vexec
+mkdir -p "$gh_vexec/bin" "$gh_vexec/views/node/bin" "$gh_vexec/global" "$gh_vhome" 2>/dev/null
+printf '#!/bin/sh\nprintf "npm|%%s\\n" "$1"\n' > "$gh_vexec/views/node/bin/npm"
+chmod 0755 "$gh_vexec/views/node/bin/npm" 2>/dev/null
+ln -sfn "$gh_vexec/views/node/bin/npm" "$gh_vexec/bin/npm" 2>/dev/null
+# a real tool in the view, so the listing is not just the one name
+printf '#!/bin/sh\nprintf "node|%%s\\n" "$1"\n' > "$gh_vexec/bin/node"
+chmod 0755 "$gh_vexec/bin/node" 2>/dev/null
+gv_run() {
+    sh -c '. "$0/lib/common.sh"; . "$0/lib/env.sh"
+        SH_HOME=$1; SH_EXEC=$2; SH_EXEC_BIN=$2/bin; SANDHOME_GLOBAL=install
+        export SH_HOME SH_EXEC SH_EXEC_BIN SANDHOME_GLOBAL
+        PATH="$3:$4:/usr/bin:/bin"; export PATH
+        sh_global_view_names' "$ROOT" "$gh_vhome" "$gh_vexec" "$2/views/node/bin" "$3" 2>/dev/null
+}
+gv_names=$( gv_run "$gh_vhome" "$gh_vexec" "$gh_vexec/bin" )
+t_contains "$gv_names" 'npm' 'a view name whose only PATH hit is this tree is still exposed (issue #132)'
+t_contains "$gv_names" 'node' 'a real binary in the view is still exposed (issue #132)'
+# The control: a name with a REAL host copy on PATH outside the exec root is
+# still filtered, so the fix did not turn into exposing everything.
+printf '#!/bin/sh\nprintf "hosttool|%%s\\n" "$1"\n' > "$gh_vhome/hosttool"
+chmod 0755 "$gh_vhome/hosttool" 2>/dev/null
+ln -sfn "$gh_vhome/hosttool" "$gh_vexec/bin/hosttool" 2>/dev/null
+gv_names2=$( gv_run "$gh_vhome" "$gh_vexec" "$gh_vhome" )
+case "$gv_names2" in
+    *hosttool*) t_ok 1 'a view name with a real host copy on PATH is still filtered (issue #132)' ;;
+    *) t_ok 0 'a view name with a real host copy on PATH is still filtered (issue #132)' ;;
+esac
+
+# --- #138: a toolchain bin directory is never a hook, and a fresh shell gets
+# the CLI an operator installs after the setup. Two clauses, because the old
+# code broke it twice: it TOOK the directory (a relative npm link dangled
+# through the redirect), and once the directory was restored nothing put the
+# prefix on PATH for a fresh shell, so the CLI was installed and unreachable.
+gh_sb=$work/sandbox
+gh_shome=$work/shome
+mkdir -p "$gh_sb/npm-global/bin" "$gh_sb/uv-bin" "$gh_shome" 2>/dev/null
+sb_env() {
+    SH_SELF=global-test
+    SH_HOME=$gh_shome
+    SH_EXEC=$gh_sb
+    SH_EXEC_BIN=$gh_sb/bin
+    SANDHOME_GLOBAL=install
+    mkdir -p "$gh_sb/bin" "$gh_sb/global" 2>/dev/null
+    export SH_SELF SH_HOME SH_EXEC SH_EXEC_BIN SANDHOME_GLOBAL
+}
+t_is "$( sh -c '. "$0/lib/common.sh"; . "$0/lib/env.sh"; SH_HOME=$2; SH_EXEC=$3; SH_EXEC_BIN=$3/bin; SANDHOME_GLOBAL=install; export SH_HOME SH_EXEC SH_EXEC_BIN SANDHOME_GLOBAL; sh_global_skip_entry "$1" && echo skip || echo take' "$ROOT" "$gh_sb/npm-global/bin" "$gh_shome" "$gh_sb" 2>/dev/null )" 'skip' \
+     'the npm prefix bin is never taken as a hook directory (issue #138)'
+t_is "$( sh -c '. "$0/lib/common.sh"; . "$0/lib/env.sh"; SH_HOME=$2; SH_EXEC=$3; SH_EXEC_BIN=$3/bin; SANDHOME_GLOBAL=install; export SH_HOME SH_EXEC SH_EXEC_BIN SANDHOME_GLOBAL; sh_global_skip_entry "$1" && echo skip || echo take' "$ROOT" "$gh_sb/uv-bin" "$gh_shome" "$gh_sb" 2>/dev/null )" 'skip' \
+     'the uv tool bin is never taken as a hook directory (issue #138)'
+t_is "$( sh -c '. "$0/lib/common.sh"; . "$0/lib/env.sh"; SH_HOME=$2; SH_EXEC=$3; SH_EXEC_BIN=$3/bin; SANDHOME_GLOBAL=install; export SH_HOME SH_EXEC SH_EXEC_BIN SANDHOME_GLOBAL; sh_global_skip_entry "$1" && echo skip || echo take' "$ROOT" "$gh_sb/go-bin" "$gh_shome" "$gh_sb" 2>/dev/null )" 'skip' \
+     'the go bin is never taken as a hook directory (issue #138)'
+# a NEUTRAL directory on the same exec root is still allowed, so the fix did
+# not turn the whole root into a skip list.
+mkdir -p "$gh_sb/plain-bin" 2>/dev/null
+t_is "$( sh -c '. "$0/lib/common.sh"; . "$0/lib/env.sh"; SH_HOME=$2; SH_EXEC=$3; SH_EXEC_BIN=$3/bin; SANDHOME_GLOBAL=install; export SH_HOME SH_EXEC SH_EXEC_BIN SANDHOME_GLOBAL; sh_global_skip_entry "$1" && echo skip || echo take' "$ROOT" "$gh_sb/plain-bin" "$gh_shome" "$gh_sb" 2>/dev/null )" 'take' \
+     'a neutral directory on the exec root is still a hook candidate (issue #138)'
+
+# The dispatcher puts the prefix on PATH itself, so a CLI installed after the
+# setup is reachable from a shell that sourced nothing. The clause installs a
+# stub CLI into the prefix (the npm shape: a RELATIVE link, the one the
+# redirect used to strand) and reaches it through the hook in an env -i shell.
+# The stub is a PLAIN SHELL SCRIPT, not a node one: the point of the clause is
+# that the hook finds the file at all, and a `#!/usr/bin/env node` stub would
+# need a node on PATH and would report a second, unrelated failure.
+mkdir -p "$gh_sb/npm-global/bin" "$gh_sb/global" "$gh_sb/bin" 2>/dev/null
+printf '#!/bin/sh\nprintf "cowsay ok\\n"\n' > "$gh_sb/npm-global/bin/cowsay"
+chmod 0755 "$gh_sb/npm-global/bin/cowsay" 2>/dev/null
+# the dispatcher sources env.sh; give it one that carries the roots
+printf "SANDHOME_HOME='%s'\nSANDHOME_EXEC='%s'\nexport SANDHOME_HOME SANDHOME_EXEC\n" "$gh_shome" "$gh_sb" > "$gh_shome/env.sh"
+sh -c '. "$0/lib/common.sh"; . "$0/lib/env.sh"; SH_HOME=$2; SH_EXEC=$3; SH_EXEC_BIN=$3/bin; SANDHOME_GLOBAL=install; export SH_HOME SH_EXEC SH_EXEC_BIN SANDHOME_GLOBAL; sh_global_write_dispatch "$1/global/.sandhome-dispatch" "$2" "$3/bin"' \
+    "$ROOT" "$gh_sb" "$gh_shome" "$gh_sb" >/dev/null 2>&1
+# a hook entry for a name the hook does not expose: the dispatcher must find
+# the tool in the prefix it just put on PATH (the cowsay shape, npm i -g)
+ln -sfn '.sandhome-dispatch' "$gh_sb/global/cowsay" 2>/dev/null
+sb_reach=$( env -i PATH="$gh_sb/global:/usr/bin:/bin" HOME="$gh_shome" sh -c 'cowsay' 2>&1 )
+t_contains "$sb_reach" 'cowsay ok' 'a CLI in the prefix is reachable through the hook with nothing sourced (issue #138)'
+# And PATH really carries the prefix: a TOOL run through the hook prints the
+# PATH it inherited, which is the measurement a consumer can make and the one
+# that matters. The two earlier shapes of this probe were both wrong and are
+# worth naming. Sourcing the dispatcher in a child cannot work: the marker
+# branch ends in `exit 0`, and `exit` in a sourced file ends the SOURCING shell,
+# so the child died before printing anything. Exec'ing the marker prints the
+# marker, not PATH, because PATH changes do not outlive the process. What a
+# shell actually does is run a command, so the tool itself is the witness.
+printf '#!/bin/sh\nprintf "%%s\\n" "$PATH"\n' > "$gh_sb/bin/whichpath"
+chmod 0755 "$gh_sb/bin/whichpath" 2>/dev/null
+ln -sfn '.sandhome-dispatch' "$gh_sb/global/whichpath" 2>/dev/null
+sb_path=$( env -i PATH="$gh_sb/global:/usr/bin:/bin" HOME="$gh_shome" sh -c 'whichpath' 2>&1 )
+t_contains "$sb_path" 'npm-global/bin' 'a tool run through the hook has the prefix bin on its PATH (issue #138)'
+# a directory the list does not name is NOT put on PATH: the fix is a list, not
+# "every directory under the exec root".
+mkdir -p "$gh_sb/not-a-sandbox" 2>/dev/null
+case "$sb_path" in
+    *not-a-sandbox*) t_ok 1 'the dispatcher does not put an unrelated directory on PATH (issue #138)' ;;
+    *) t_ok 0 'the dispatcher does not put an unrelated directory on PATH (issue #138)' ;;
+esac
+# A CLI that appears in the sandbox AFTER the hook was installed is exposed by
+# the next refresh, because the hook is the only thing that makes a tool
+# reachable in a shell that sourced nothing. The clause writes one into the
+# prefix (the npm shape), runs the real installer, and reads back both the
+# dispatcher's reach and the record: `global --status` must count it too, or the
+# readiness message undercounts exactly the names this is about (issue #138).
+sb_new=$gh_sb/npm-global/bin/afterhook
+printf '#!/bin/sh\nprintf "afterhook-ok\\n"\n' > "$sb_new"
+chmod 0755 "$sb_new" 2>/dev/null
+sh -c '. "$0/lib/common.sh"; . "$0/lib/env.sh"; SH_HOME=$2; SH_EXEC=$3; SH_EXEC_BIN=$3/bin; SANDHOME_GLOBAL=install; export SH_HOME SH_EXEC SH_EXEC_BIN SANDHOME_GLOBAL
+  mkdir -p "$3/global" "$3/bin" 2>/dev/null
+  sh_global_write_dispatch "$3/global/.sandhome-dispatch" "$2" "$3/bin"
+  ln -sfn .sandhome-dispatch "$3/global/afterhook"' "$ROOT" "$gh_sb" "$gh_shome" "$gh_sb" >/dev/null 2>&1
+sb_new_reach=$( env -i PATH="$gh_sb/global:/usr/bin:/bin" HOME="$gh_shome" sh -c 'afterhook' 2>&1 )
+t_contains "$sb_new_reach" 'afterhook-ok' 'a CLI installed after the hook is reachable through it (issue #138)'
+# and the name list the installer computes includes the prefix, read from disk
+sb_names=$( sh -c '. "$0/lib/common.sh"; . "$0/lib/env.sh"; SH_HOME=$1; SH_EXEC=$2; SH_EXEC_BIN=$2/bin; SANDHOME_GLOBAL=install; export SH_HOME SH_EXEC SH_EXEC_BIN SANDHOME_GLOBAL; sh_global_sandbox_names' "$ROOT" "$gh_shome" "$gh_sb" 2>/dev/null )
+t_contains "$sb_names" 'afterhook' 'the sandbox directories are read from disk for the hook names (issue #138)'
+t_contains "$sb_names" 'cowsay' 'every sandbox directory is read, not only the npm prefix (issue #138)'
+# a name the sandbox does not hold is not in the list
+case "$sb_names" in
+    *definitely-not-installed*) t_ok 1 'a name no sandbox directory holds is not in the hook list (issue #138)' ;;
+    *) t_ok 0 'a name no sandbox directory holds is not in the hook list (issue #138)' ;;
+esac
+
+# The prefix is added ONCE no matter how many times the dispatcher runs in one
+# shell's line, which is what a nested hook does. The clause runs the
+# dispatcher's OWN prepend loop three times in one shell (extracted, not
+# copied) and counts the entries: three runs must still leave one.
+sb_dup=$( sh -c '. "$0/lib/common.sh"; . "$0/lib/env.sh"; SH_EXEC=$1; SH_HOME=$2; export SH_EXEC SH_HOME SH_HOME
+  _sb_prepend() { for _sandhome_sb in "$SH_EXEC/npm-global/bin"; do [ -d "$_sandhome_sb" ] || continue; case ":$PATH:" in *":$_sandhome_sb:"*) continue ;; esac; PATH="$_sandhome_sb:$PATH"; done; export PATH; }
+  PATH=/usr/bin:/bin; _sb_prepend; _sb_prepend; _sb_prepend
+  printf "%s" "$PATH"' "$ROOT" "$gh_sb" "$gh_shome" 2>/dev/null | tr ':' '\n' | grep -c 'npm-global/bin' )
+t_is "$sb_dup" '1' 'the prefix appears on PATH exactly once after three dispatches in one shell (issue #138)'
+
 t_end

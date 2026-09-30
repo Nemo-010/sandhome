@@ -1471,5 +1471,58 @@ lang_line=$(sh -c "$sh_ts_fn; sh_toolset_names languages" 2>/dev/null)
 t_contains "$lang_line" 'cmake' 'languages carries cmake, not just compilers'
 t_contains "$lang_line" 'pkgconf' 'languages carries pkgconf'
 
+
+# --- #131: a non-interactive login shell loads the environment ---------------
+# The profile fragment reads env.sh BEFORE the interactive guard, because a
+# login shell is the harness shape and it gets the exec bin on PATH from
+# ~/.profile unconditionally. This clause runs the real fragment in dash with a
+# real env.sh beside it and a non-interactive $-, and reads the roots back: on
+# the old code the fragment returned before the read and SANDHOME_EXEC stayed
+# unset, which is the whole mechanism of the issue in one variable.
+p131="$tmp/p131"
+mkdir -p "$p131/home/.local/share/sandhome" "$p131/exec/bin"
+printf 'SANDHOME_HOME=%s\nSANDHOME_EXEC=%s\nexport SANDHOME_HOME SANDHOME_EXEC\nPATH="$SANDHOME_EXEC/bin:$PATH"\nexport PATH\n' \
+    "$p131/home/.local/share/sandhome" "$p131/exec" > "$p131/home/.local/share/sandhome/env.sh"
+cp "$ROOT/lib/profile.sh" "$p131/home/.local/share/sandhome/profile.sh"
+p131_out=$(env -i HOME="$p131/home" PATH="/usr/bin:/bin" dash -c '. "$HOME/.local/share/sandhome/profile.sh"; printf "%s" "${SANDHOME_EXEC:-UNSET}"' 2>&1)
+t_is "$p131_out" "$p131/exec" 'a non-interactive login shell loads env.sh (issue #131)'
+# and it must not print anything: the fragment is read by every login shell
+p131_noise=$(env -i HOME="$p131/home" PATH="/usr/bin:/bin" dash -c '. "$HOME/.local/share/sandhome/profile.sh"' 2>&1)
+t_is "$p131_noise" '' 'loading the profile for a non-interactive shell is silent (issue #131)'
+# a HOME with no env.sh is left alone, not turned into an error
+mkdir -p "$p131/empty"
+p131_miss=$(env -i HOME="$p131/empty" PATH="/usr/bin:/bin" dash -c 'if [ -r "$HOME/.local/share/sandhome/profile.sh" ]; then . "$HOME/.local/share/sandhome/profile.sh"; fi; printf "rc=$?"' 2>&1)
+t_contains "$p131_miss" 'rc=0' 'a login shell with no sandhome profile is left alone, not aborted (issue #131)'
+
+# --- #133: one writer for the bake, and the copy is self-sufficient ---------
+# The bake is written by sh_bake_command and nothing else, so an install and a
+# repair both end with the paths in the installed copy. The clause runs the
+# real writer, then the real launcher path (sh_exec_install_launchers), and
+# reads the baked values back out of the written file: the old code put the raw
+# template back and the read returned empty, which is exactly what issue #133
+# measured.
+p133="$tmp/p133"
+mkdir -p "$p133/repo/bin" "$p133/repo/lib" "$p133/exec/bin" "$p133/home"
+printf '#!/bin/sh\nSH_BAKED_REPO_DIR=%s\nSH_BAKED_HOME=%s\n' "''" "''" > "$p133/repo/bin/sandhome"
+chmod 0755 "$p133/repo/bin/sandhome"
+# the library mirror only lands when the checkout it copies from is a real one,
+# so the fixture carries the one file the mirror checks for.
+printf '# fixture\n' > "$p133/repo/lib/common.sh"
+( SH_REPO_DIR="$p133/repo" SH_HOME="$p133/home" SH_EXEC="$p133/exec" \
+  SH_EXEC_BIN="$p133/exec/bin" sh -c '. "$0/lib/common.sh"; . "$0/lib/env.sh"; sh_bake_command "$1/bin/sandhome" "$2/bin/sandhome"' \
+  "$ROOT" "$p133/repo" "$p133/exec" >/dev/null 2>&1 )
+p133_repo=$(sh -c '. "$0/lib/common.sh"; . "$0/lib/env.sh"; sh_bake_value "$1/bin/sandhome" SH_BAKED_REPO_DIR' "$ROOT" "$p133/exec" 2>/dev/null)
+p133_home=$(sh -c '. "$0/lib/common.sh"; . "$0/lib/env.sh"; sh_bake_value "$1/bin/sandhome" SH_BAKED_HOME' "$ROOT" "$p133/exec" 2>/dev/null)
+t_is "$p133_repo" "$p133/repo" 'sh_bake_command bakes the checkout into the installed copy (issue #133)'
+t_is "$p133_home" "$p133/home" 'sh_bake_command bakes the home into the installed copy (issue #133)'
+# the launcher path re-bakes on every call, so a repair cannot erase it
+rm -f "$p133/exec/bin/sandhome"
+( SH_REPO_DIR="$p133/repo" SH_HOME="$p133/home" SH_EXEC="$p133/exec" \
+  SH_EXEC_BIN="$p133/exec/bin" sh -c '. "$0/lib/common.sh"; . "$0/lib/env.sh"; sh_exec_install_launchers' "$ROOT" >/dev/null 2>&1 )
+p133_after=$(sh -c '. "$0/lib/common.sh"; . "$0/lib/env.sh"; sh_bake_value "$1/bin/sandhome" SH_BAKED_REPO_DIR' "$ROOT" "$p133/exec" 2>/dev/null)
+t_is "$p133_after" "$p133/repo" 'the install/repair path re-bakes the copy, so the bake survives (issue #133)'
+# the private library mirror lands beside the copy
+t_is "$([ -r "$p133/exec/.sandhome-lib/lib/common.sh" ] && echo yes || echo no)" 'yes' \
+     'the installed copy carries its own library mirror beside it (issue #133)'
 rm -rf "$tmp"
 t_end

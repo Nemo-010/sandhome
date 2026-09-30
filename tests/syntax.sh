@@ -179,4 +179,61 @@ else
     t_skip 'no shellcheck on PATH to lint with (sandhome install shellcheck)'
 fi
 
+# --- #136: the bare command, and the help word, on a POSIX shell ------------
+# A scratch dir for the stderr captures below, on a root that runs binaries (a
+# noexec root would refuse the command and the clause would report a property
+# of the host instead of of the code).
+work=$(t_exec_tmpdir sandhome-syntax136)
+mkdir -p "$work" 2>/dev/null
+
+# `sandhome` with no arguments matched the help branch, which then ran `shift`
+# with $#=0. bash ignores that, dash writes "shift: can't shift that many" to
+# stderr, and the one screen a person sees when they forget the subcommand was
+# a shell diagnostic instead of the usage text (issue #136). The clause runs the
+# real command under every shell this host has and reads stderr SEPARATELY
+# from the status, because the two are the whole claim: exit 0 on stdout, and
+# nothing on stderr.
+for sh_136 in dash sh bash; do
+    command -v "$sh_136" >/dev/null 2>&1 || continue
+    sh_136_out=$("$sh_136" "$ROOT/bin/sandhome" 2>"$work/.e136" </dev/null); sh_136_rc=$?
+    sh_136_err=$(cat "$work/.e136" 2>/dev/null)
+    t_is "$sh_136_rc" '0' "a bare sandhome exits 0 on $sh_136 (issue #136)"
+    t_is "$sh_136_err" '' "a bare sandhome writes nothing to stderr on $sh_136 (issue #136)"
+    case "$sh_136_out" in
+        'usage: sandhome'*) t_ok 0 "a bare sandhome prints the usage on stdout on $sh_136 (issue #136)" ;;
+        *) t_ok 1 "a bare sandhome prints the usage on stdout on $sh_136 (issue #136)" ;;
+    esac
+    # `sandhome help <cmd>` must reach the page for that command, which the
+    # first fix for #136 broke by reading the word AFTER the shift.
+    sh_136_h=$("$sh_136" "$ROOT/bin/sandhome" help doctor 2>"$work/.e136h" </dev/null); sh_136_hrc=$?
+    case "$sh_136_h" in
+        'usage: sandhome doctor'*) t_ok 0 "sandhome help doctor prints the doctor page on $sh_136 (issue #136)" ;;
+        *) t_ok 1 "sandhome help doctor prints the doctor page on $sh_136 (issue #136)" ;;
+    esac
+    t_is "$sh_136_hrc" '0' "sandhome help doctor exits 0 on $sh_136 (issue #136)"
+    # and the flag form, which used to answer "no help for '--help'" with exit 2
+    "$sh_136" "$ROOT/bin/sandhome" --help >/dev/null 2>"$work/.e136f" </dev/null
+    t_is "$?" '0' "sandhome --help exits 0 on $sh_136 (issue #136)"
+    t_is "$(cat "$work/.e136f" 2>/dev/null)" '' "sandhome --help writes nothing to stderr on $sh_136 (issue #136)"
+    "$sh_136" "$ROOT/bin/sandhome" -h >/dev/null 2>&1 </dev/null
+    t_is "$?" '0' "sandhome -h exits 0 on $sh_136 (issue #136)"
+done
+# A shift inside a function cannot move the caller's list, and a guard written
+# there is a silent no-op: the file once routed every dispatcher branch through
+# a `sh_dispatch_shift` helper, and `cmd_project` then received the SUBCOMMAND as
+# its first argument. The clause refuses that shape outright, because the guard
+# looks right and does nothing: $# and $1 inside a function are the function's.
+# The rule is about the DISPATCHER specifically: a `shift` inside a function
+# cannot move the caller's list, and a guard written there is a silent no-op
+# (measured: $# read 0 inside the function while the caller held one argument,
+# and cmd_project then received the subcommand as its first argument). The
+# clause reads only the dispatcher's own function, so an ordinary command's
+# `for arg; do shift; done` is not implicated.
+ds_fn=$(sed -n '/^sh_dispatch_shift() {/,/^}/p' "$ROOT/bin/sandhome" 2>/dev/null)
+case "$ds_fn" in
+    '') t_ok 0 'the dispatcher has no shift helper whose shift would be a no-op (POSIX sh)' ;;
+    *shift*) t_ok 1 'the dispatcher has no shift helper whose shift would be a no-op (POSIX sh)' ;;
+    *) t_ok 0 'the dispatcher has no shift helper whose shift would be a no-op (POSIX sh)' ;;
+esac
+
 t_end

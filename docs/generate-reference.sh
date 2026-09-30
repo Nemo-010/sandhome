@@ -187,10 +187,27 @@ for var in $(cat "$ROOT"/lib/*.sh "$ROOT"/bootstrap.sh "$ROOT"/bin/sandhome \
     # not end after the default - was reported as unset while the code used
     # 128. The pattern is now the two real spellings, and the default is taken
     # from the INNERMOST `${...:-...}` inside it.
+    # # STOP: THE := FORM IS TRIED ACROSS EVERY READER BEFORE THE PLAIN = ONE.
+    # gen_default_of takes the FIRST line that mentions the variable and has a
+    # `:=`, across lib/, bootstrap.sh, bin/sandhome and tools/. If that sweep
+    # finds nothing, the plain-`=` fallback below used the first line in the
+    # SAME grep order, so where a variable had both an early plain assignment
+    # (`: "${SANDHOME_HOME:=${SH_HOME:-}}"` is the := one; a bare
+    # `SANDHOME_HOME=$SH_BAKED_HOME` later in bin/sandhome is the plain one)
+    # the reported default depended on which file grep happened to list first,
+    # and it changed when a file was added. A generated reference whose value
+    # moves because an unrelated module was created is a reference nobody can
+    # trust. So the two sweeps are explicit and ordered, and within each the
+    # := spelling is preferred wherever it exists.
     def=$(gen_default_of "$var")
     if [ -z "$def" ]; then
+        # The plain-`=` fallback, but ONLY over lines that are not a `:=`
+        # (those are the first sweep's business) and not a printf/expansion of
+        # the generated file, so the value is a real assignment in the code.
         def=$(grep -h "^ *${var}=" "$ROOT"/lib/*.sh "$ROOT"/bootstrap.sh \
               "$ROOT"/bin/sandhome "$ROOT"/tools/*.sh 2>/dev/null |
+              grep -v ':=' |
+              grep -v "printf" |
               head -1 | sed "s/^ *${var}=//; s/^\"//; s/\"$//" | cut -c1-40)
     fi
     [ -n "$def" ] || def='unset, and the feature is off until it is set'

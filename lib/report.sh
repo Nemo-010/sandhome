@@ -487,6 +487,23 @@ sh_doctor() {
             sh_doc_version=$(sh_toolchain_version "$sh_doc_t")
             sh_doctor_check "toolchain_$sh_doc_t" \
                 "$([ -n "$sh_doc_version" ] && printf yes || printf no)" yes
+            # # STOP: A TOOLCHAIN CAN ANSWER A VERSION AND STILL BE UNUSABLE. A
+            # launcher-view node prints `node --version` and then fails every
+            # spawn, because process.execPath is an anonymous memfd: Playwright,
+            # Puppeteer, webpack and every worker die with ENOENT while doctor
+            # reported `toolchain_node=yes` and zero failures (issue #139). A
+            # module that declares tc_<name>_doctor gets that check run here,
+            # so the gate cannot be green over a runtime that cannot fork
+            # itself, and the line names the one command that fixes it.
+            if [ -n "$sh_doc_version" ] && sh_toolchain_has_doctor "$sh_doc_t"; then
+                sh_doc_spawn=no
+                if sh_toolchain_doctor "$sh_doc_t"; then
+                    sh_doc_spawn=yes
+                else
+                    sh_doc_spawn="no; a runtime that cannot re-execute itself breaks Playwright, webpack and every worker (run: sandhome install --force $sh_doc_t)"
+                fi
+                sh_doctor_check "toolchain_${sh_doc_t}_spawn" "$sh_doc_spawn" yes
+            fi
         done
     else
         # A root without its views is a wiped or half-built root. The loop

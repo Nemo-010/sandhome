@@ -180,8 +180,25 @@ code, so it overrules any other page that disagrees with it.
 
 ### The skills, where the harness finds them.
 
-A harness discovers skills from `~/.agents/skills/` (Pi also reads
-`~/.pi/agent/skills/`). Without a clone, fetch each one by URL:
+**The setup already installed them.** The command above copies all three into
+`$HOME/.agents/skills/` and, when Pi state exists, `$HOME/.pi/agent/skills/` -
+the two places a harness scans. So there is nothing to fetch here, and one
+command confirms it:
+
+```sh
+sandhome skills
+```
+
+It prints one line per skill per location with where the bytes came from (this
+tree's copy, a link into a clone's checkout, or a file that differs from it),
+ends in `skills_installed=N`, and exits non-zero when none is installed. A
+harness with a resource reload (Pi: `/reload`) picks up new or changed skills
+without a restart; a harness that scans skills at startup picks them up in the
+next session. Read the three in this session.
+
+Only if the setup was run with `--no-skills`, or you want a clone's skills
+linked by name rather than copied so later pulls update them, do it by hand.
+Without a clone, fetch each one by URL:
 
 ```sh
 mkdir -p "$HOME/.agents/skills/sandhome" "$HOME/.agents/skills/errandsh" "$HOME/.agents/skills/sealed-sandbox"
@@ -194,16 +211,6 @@ From a clone, link each skill by name instead of copying, so later pulls update 
 
 ```sh
 for s in sandhome errandsh sealed-sandbox; do ln -s "$PWD/skills/$s" "$HOME/.agents/skills/$s"; done
-```
-
-Confirm all three landed, then read them in this session. A new session picks
-them up on start, and a harness with a resource reload (Pi: `/reload`) picks up
-new or changed skills without one. A harness that scans skills at startup picks
-them up in the next session; if yours supports a resource reload, use it rather
-than restarting.
-
-```sh
-ls "$HOME/.agents/skills/sandhome/SKILL.md" "$HOME/.agents/skills/errandsh/SKILL.md" "$HOME/.agents/skills/sealed-sandbox/SKILL.md"
 ```
 
 ---
@@ -225,11 +232,15 @@ More than one row can apply and then both are read.
 | `doctor` reports `FAIL exec_space=low` or `=critical` | the exec root is draining and the next build will fail with `no space left on device`. `sandhome space` names the state and the numbers, `sandhome space --probe` lists roomier candidates, `sandhome gc` reclaims sandhome's own caches, and re-running the first command with `--exec DIR` moves everything |
 | `doctor` reports `FAIL exec_link_<tool>=broken` | a link in the exec view is not executable, or points at itself; `sandhome repair <tool>` rebuilds it and downloads nothing. A tool that was adopted rather than installed is the usual cause, and `install` is the command that adopts, so it is not the one to reach for first |
 | a tool is on PATH but a shell that inherited nothing cannot find it | it was adopted and could not be linked into the exec view; `sandhome repair <tool>` retries the link and `sandhome install --force <tool>` puts a copy there |
+| a non-interactive login shell (`bash -lc`, `sh -l -c`) answers `cannot map this copy back to its payload` for node, jq, cargo or another launcher copy, while `sandhome doctor` is green | that shell resolved the exec bin before the environment was loaded. The profile fragment now loads `env.sh` for every login shell, so re-run the setup once to rewrite it; `. "${XDG_DATA_HOME:-$HOME/.local/share}/sandhome/entry.sh"` is the immediate way in, and the same shell is fine once the fragment is in place |
+| a headless browser, Playwright, Puppeteer, webpack, vite, jest or any other worker dies with `spawn /memfd:sandhome (deleted) ENOENT` | the runtime ran from an anonymous memfd, so `process.execPath` is a path that no longer exists. node, deno and bun are real copies in the view now; `sandhome doctor` fails with `toolchain_node_spawn` when it is not, and `sandhome report` names the per-toolchain view. `sandhome install --force node` rebuilds it, and `SANDHOME_VIEW_MODE=copy` is the whole-tree answer |
 | `sandhome global --status` shows `state=stale`, or a fresh shell does not find `sandhome` | a recorded hook directory no longer answers a fresh shell; `sandhome global` repairs every recorded directory. When the report says `global=none` the host had no usable directory, and the entry point beside the home is the way in: `. "${XDG_DATA_HOME:-$HOME/.local/share}/sandhome/entry.sh"` |
 | `doctor` reports a `FAIL <VAR>=unset` for `GOBIN`, `GOCACHE`, `CARGO_INSTALL_ROOT` or `NPM_CONFIG_PREFIX` | that toolchain was adopted, so its fragment did not carry the exec-root paths; `sandhome install --force <tool>` writes a fragment that does |
 | the exec root was cleared by a restart (tmpfs) and `sandhome` is gone | run `sandhome resume`: it re-plans the roots, rebuilds every recorded view without fetching, then runs `doctor` and exits with its code. Only when `env.sh` itself is gone, re-run step 2 instead |
+| `env -i $SANDHOME_EXEC/bin/sandhome doctor` answers `cannot find the sandhome library` | the bake and the `.sandhome-home` pointer both point at a checkout or a home that is gone. The installed copy keeps its own copy of the library in `$SANDHOME_EXEC/.sandhome-lib`, so re-run the setup (or `sandhome repair`) once to write it; after that the command works with no HOME, no PATH and no environment |
 | the detected exec root is too small to hold the toolset, or the setup names `--exec` with no roomier candidate to point at | `sandhome space --probe` lists every candidate with free space; `sandhome space` names the ceiling (`max_exec_free_mb`, `exec_ceiling`). The plan picks the roomiest working candidate, and the choice is then stable; `--exec DIR` moves it deliberately. A small ceiling restricts the *view*, not the toolchain: payloads live on the home, so installs that fit proceed and ones that cannot name their measured need against the measured free space. `gc` reclaims caches only, not views (`docs/guide.md` sections 1 and 7) |
 | the session died with a scratch-quota kill (tmpSize, shmSize, fileMax, diskTmp) while `doctor` was green | quota kills bypass the df-based space gate: `doctor`, `space` and `report` read `df`, and no quota signal is readable from inside, so nothing warns first. `docs/guide.md` section 7 names what counts against scratch and what `gc` reclaims |
+| a CLI installed after the setup (`npm install -g`, `uv tool install`, `go install`, `cargo install`) is not found by a shell that sourced nothing | the hook directory is on `PATH` and the prefix bin was not: the dispatcher now puts the prefix on `PATH` itself, so run `sandhome global` once to rewrite it. `sandhome exec --shell 'npm install -g <pkg>'` always works, because that is the one form that applies the environment |
 | the exact spelling of a flag, a variable or a command | `docs/reference.md` and nothing else; without a clone use `sandhome help` and `sandhome <cmd> --help` (per-command help, and `sandhome help <cmd>`) |
 | change this repository: a lib file, a toolchain, a shim, the line discipline | `AGENTS.md`, which is the maintainer router |
 

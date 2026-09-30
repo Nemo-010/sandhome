@@ -60,10 +60,10 @@ number to appear in its row, so the table and the modules cannot drift.
 
 | toolchain | copy view, MB | launch view, MB |
 | --- | --- | --- |
-| bun | 200 | 12 |
+| bun | 200 | 200 (a real copy: a runtime that forks itself cannot run from a memfd, issue #139) |
 | clang | 3000 | 32 |
 | cmake | 64 | 16 |
-| deno | 150 | 8 |
+| deno | 150 | 150 (a real copy: a runtime that forks itself cannot run from a memfd, issue #139) |
 | fd | 16 | 16 |
 | gh | 16 | 16 |
 | go | 150 | 12 |
@@ -73,7 +73,7 @@ number to appear in its row, so the table and the modules cannot drift.
 | pkgconf | 8 | 8 |
 | mold | 60 | 8 |
 | ninja | 8 | 8 |
-| node | 200 | 16 |
+| node | 200 | 200 (bin/node is a real copy; npm and npx stay launchers, issue #139) |
 | python | 30 | 30 (launch unmeasured; priced as copy until it is) |
 | qemuuser | 12 | 12 |
 | ripgrep | 32 | 32 |
@@ -86,13 +86,24 @@ number to appear in its row, so the table and the modules cannot drift.
 A launcher copy maps itself back to its home payload at runtime (the
 `views/<name>` to `toolchains/<name>` convention, argv unchanged), so
 exe-relative tools keep working: clang finds its resource dir and re-execs
-`-cc1` through the view path. Three shapes cannot run from a memfd image and
+`-cc1` through the view path. Four shapes cannot run from a memfd image and
 stay real copies, named per module by `tc_<name>_copy_bins`: a binary that
 is *spawned by path and locates its siblings exe-relative* (gcc's `ld.lld`
 wrapping, `cargo-clippy` finding `clippy-driver`), zig, which locates its
-install dir through `/proc/self/exe` that a memfd image hides, and the sysroot rustc
+install dir through `/proc/self/exe` that a memfd image hides, the sysroot rustc
 reports, which still needs the `--sysroot` wrapper because the driver loads
-from the home path in every mode. `SH_VIEW_MODE` is `launch` when the helper
+from the home path in every mode, and the language runtimes node, deno and
+bun, which are the PARENT of every worker and every download helper they
+spawn (issue #139).
+
+A launcher is right for a compiler you invoke once and wrong for an
+interpreter designed to fork itself thousands of times. With `bin/node` as a
+launcher, `node --version` answers and
+`require("child_process").spawnSync(process.execPath, ...)` dies with ENOENT
+naming `/memfd:sandhome (deleted)`, which is what Playwright, Puppeteer,
+webpack, vite and jest all do, and `doctor` was green throughout. The
+per-module doctor hook `tc_<name>_doctor` is the gate for that: it runs the
+spawn the user would run, and `doctor` reports `toolchain_node_spawn`. `SH_VIEW_MODE` is `launch` when the helper
 is built and passes its probe here, `copy` otherwise; `copy` is the old
 behavior and the fallback, and the report prints which (`view=`). A usable
 host copy is still adopted with no workaround at all; `SANDHOME_FORCE` (or

@@ -1224,6 +1224,12 @@ sh_copy_listed() {
 # because the copy-listed linkers were priced as launchers).
 sh_copy_only_set() {
     SH_COPY_ONLY=''
+    # The module has to be loaded before its list can be read: the function that
+    # declares the list IS the module, and a caller that has not sourced it sees
+    # nothing. sh_toolchain_load is idempotent, so this is safe from every path.
+    if command -v sh_toolchain_load >/dev/null 2>&1; then
+        sh_toolchain_load "${1:-}" >/dev/null 2>&1 || true
+    fi
     if command -v "tc_${1:-}_copy_bins" >/dev/null 2>&1; then
         SH_COPY_ONLY=$("tc_${1:-}_copy_bins" 2>/dev/null)
     fi
@@ -1240,6 +1246,20 @@ sh_promote_toolchain() {
     # The module's real-copy list, resolved against the tree it names (the
     # triple in rust's gcc-ld path is only known at install time, so this
     # is a function, not a variable). Empty when the module names none.
+    #
+    # # STOP: THE MODULE IS LOADED FIRST, BECAUSE THE LIST LIVES IN IT. The
+    # caller here had never sourced tools/<name>.sh, so `command -v
+    # tc_<name>_copy_bins` answered no and SH_COPY_ONLY came back EMPTY for
+    # every toolchain that declares one. Measured with node in launch mode and
+    # the list read straight out of the module:
+    #   tc_node_copy_bins -> bin/node
+    #   SH_COPY_ONLY after sh_promote_toolchain -> (empty)
+    # so `bin/node` was stamped as a launcher anyway - the exact defect
+    # tc_node_copy_bins exists to prevent (issue #139) - and the same held for
+    # rust's ld.lld wrappers and zig, whose copy lists had been inert on this
+    # path since they were added. sh_toolchain_load is idempotent, so loading
+    # here costs one read and cannot disturb a caller that loaded it already.
+    sh_toolchain_load "$sh_ptc_name" >/dev/null 2>&1 || true
     sh_copy_only_set "$sh_ptc_name"
     sh_ptc_root=$(sh_toolchain_root "$sh_ptc_name")
     sh_ptc_view=$(sh_toolchain_view "$sh_ptc_name")

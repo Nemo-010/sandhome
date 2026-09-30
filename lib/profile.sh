@@ -23,36 +23,63 @@ sandhome_profile_main() {
     return 0
   fi
 
-  # # STOP: INTERACTIVE, NOT LOGIN. A tool that sends commands to a LOGIN shell would
-  # otherwise have its environment changed silently and after the caller's own
-  # setup. `$-` carries `i` only for a shell a person is typing at.
-  # A harness that spawns a non-login, non-interactive shell per tool call never
-  # reads this file at all (neither profile nor rc), so widening this guard
-  # would not reach it and would run env.sh on every shell start that does.
-  # That shell loads `$SANDHOME_HOME/entry.sh` instead, which needs no PATH
-  # and no login: `. "${XDG_DATA_HOME:-$HOME/.local/share}/sandhome/entry.sh"`
-  # (issue #122). This guard stays, and the entry point is the non-interactive
-  # path, so neither depends on the other.
+  # # STOP: THE ENVIRONMENT IS LOADED BEFORE THE INTERACTIVE GUARD, BECAUSE A
+  # NON-INTERACTIVE LOGIN SHELL IS THE HARNESS SHAPE. `bash -lc`, `sh -l -c` and
+  # anything that reads ~/.profile without an interactive `$-` got the
+  # bootstrap's unconditional `PATH=$SANDHOME_EXEC/bin:...` line but never the
+  # exec and home roots, so a launch-mode view resolved to its own copies and
+  # every one of them died with "cannot map this copy back to its payload"
+  # while `doctor` stayed green (issue #131). Measured: on a launch-mode install
+  # `bash -lc 'node --version'` answered exactly that, and the same shell
+  # reported SANDHOME_EXEC unset, which is the whole mechanism in one line.
+  #
+  # Only the environment is loaded. History, the PATH tidy and the WSL move stay
+  # interactive-only below, because those DO change what a person sees and
+  # nothing about a tool call needs them. A harness that reads neither profile
+  # nor rc still uses entry.sh, so the two paths stay independent (issue #122).
+  #
+  # THE READ IS THE SAFE ONE. env.sh starts with `set -u`-era expansions and
+  # creates directories; a shell that is merely non-interactive is not a shell
+  # that wants a login's side effects, and a fragment that fails on a missing
+  # HOME would put a stderr line in front of every command. So the file is read
+  # in a SUBSHELL and its assignments are kept only when the read succeeded:
+  # a success is the whole environment (that is env.sh's contract, and the
+  # entry point and the dispatcher already rely on it), and a failure changes
+  # nothing at all, which is what the old `break` did not guarantee.
+  if [ -z "${SANDHOME_HOME:-}" ]; then
+    _shp_envcand=''
+    for _shp_env in "${SANDHOME_HOME:-}/env.sh" \
+                    "$HOME/.local/share/sandhome/env.sh" \
+                    "$HOME/.sandhome/env.sh" \
+                    "${XDG_DATA_HOME:-$HOME/.local/share}/sandhome/env.sh"
+    do
+      [ -n "${_shp_env:-}" ] || continue
+      [ -r "$_shp_env" ] || continue
+      _shp_envcand=$_shp_env
+      break
+    done
+    if [ -n "$_shp_envcand" ]; then
+      _shp_envout=$(. "$_shp_envcand" 2>/dev/null; :; printf '%s' "${PATH:-}") || _shp_envout=''
+      if [ -n "$_shp_envout" ]; then
+        # One eval, one source of truth: the same bytes the dispatcher applies
+        # and `sandhome env` prints. PATH is set from the captured value rather
+        # than taken from the subshell, because a subshell's PATH does not
+        # survive the read.
+        SANDHOME_HOME=''
+        eval "$( . "$_shp_envcand" 2>/dev/null; printf '%s' \
+          "SANDHOME_HOME=${SANDHOME_HOME-}; SANDHOME_EXEC=${SANDHOME_EXEC-}; SANDHOME_REPO_DIR=${SANDHOME_REPO_DIR-}; SANDHOME_WANTED_TOOLCHAINS=${SANDHOME_WANTED_TOOLCHAINS-}; PATH=$_shp_envout" )" 2>/dev/null || true
+        [ -n "${SANDHOME_HOME:-}" ] || SANDHOME_HOME=${_shp_envcand%/env.sh}
+      fi
+    fi
+  fi
+
+  # # NOTE: INTERACTIVE-ONLY FROM HERE. A tool that sends commands to a LOGIN
+  # shell would have the rest of its environment changed silently and after the
+  # caller's own setup. `$-` carries `i` only for a shell a person is typing at.
   case "$-" in
     *i*) ;;
     *)   return 0 ;;
   esac
-
-  # -- the environment, if a shell has not read it already ---------------------
-  # # NOTE: LOADING env.sh IS WHY THIS FILE IS INSTALLED. It puts the exec view on
-  # PATH and every toolchain fragment into the environment, in one place. The
-  # guard is that the file exists; a login shell that already sourced it has
-  # SANDHOME_HOME set.
-  if [ -z "${SANDHOME_HOME:-}" ] && [ -n "${HOME:-}" ]; then
-    for _shp_env in "$HOME/.local/share/sandhome/env.sh" \
-                    "$HOME/.sandhome/env.sh" \
-                    "${XDG_DATA_HOME:-$HOME/.local/share}/sandhome/env.sh"; do
-      if [ -r "$_shp_env" ]; then
-        . "$_shp_env"
-        break
-      fi
-    done
-  fi
 
   # -- PATH, de-duplicated and nothing else ------------------------------------
   # # NOTE: A login shell inside a login shell runs /etc/profile again, and /etc/profile
@@ -144,6 +171,6 @@ sandhome_profile_main() {
 }
 
 sandhome_profile_main
-unset _shp_env _shp_new _shp_rest _shp_one _shp_release _shp_pwd _shp_root
+unset _shp_env _shp_envcand _shp_envout _shp_new _shp_rest _shp_one _shp_release _shp_pwd _shp_root
 unset -f sandhome_profile_main
 :

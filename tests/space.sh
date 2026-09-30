@@ -1133,4 +1133,34 @@ rm -rf "$sl" "$sl2"
 # one, even when it does not choose it. The tree is left as it was found.
 rm -rf "$ROOT/.sandhome" "$PWD/.sandhome" 2>/dev/null
 
+# --- the per-module real-copy list REACHES the promote ------------------------
+# # STOP: THE LIST LIVES IN THE MODULE, SO THE CALLER MUST LOAD IT FIRST. This
+# is the clause behind issue #139 being fixable at all: tc_node_copy_bins
+# declares that `bin/node` must stay a real copy even in launch mode, and
+# sh_promote_toolchain read that list through `command -v tc_node_copy_bins`
+# WITHOUT ever sourcing tools/node.sh - so the answer was no, SH_COPY_ONLY came
+# back empty, and `bin/node` was stamped as a launcher anyway. Measured with the
+# module sourced by hand (tc_node_copy_bins -> bin/node) and the promote's own
+# reader (SH_COPY_ONLY -> empty) for every module that declares a list: node,
+# deno, bun, zig and rust were all inert on that path.
+#
+# The clause calls the library's own resolver WITHOUT pre-loading anything, for
+# each module that declares a list, and requires a non-empty answer. rust is
+# globs its triple, so it is exempt here and covered by the clause in
+# tests/toolchain.sh that gives it a tree.
+for sh_cl in node deno bun zig; do
+    sh_cl_got=$(sh -c '. "$0/lib/common.sh"; . "$0/lib/space.sh"; . "$0/lib/fetch.sh"; . "$0/lib/env.sh"; . "$0/lib/toolchain.sh"
+        SH_REPO_DIR="$0"; SH_LIB_DIR="$0/lib"; SH_COPY_ONLY=""
+        sh_copy_only_set "$1"; printf "%s" "$SH_COPY_ONLY"' "$ROOT" "$sh_cl" 2>/dev/null)
+    case "$sh_cl_got" in
+        '') t_ok 1 "the real-copy list for $sh_cl reaches the promote (issue #139)" ;;
+        *)  t_ok 0 "the real-copy list for $sh_cl reaches the promote (issue #139): $sh_cl_got" ;;
+    esac
+done
+# The control: the resolver must be usable WITHOUT a pre-loaded module, which is
+# the whole claim. Loading it first and reading it would pass either way.
+sh_cl_probe=$(sh -c '. "$0/lib/common.sh"; . "$0/lib/space.sh"; . "$0/lib/fetch.sh"; . "$0/lib/env.sh"; . "$0/lib/toolchain.sh"
+    SH_REPO_DIR="$0"; command -v tc_node_copy_bins >/dev/null 2>&1 && echo preloaded || echo clean' "$ROOT" 2>/dev/null)
+t_is "$sh_cl_probe" 'clean' 'the copy-list resolver reads the module itself, not a pre-loaded one (issue #139)'
+
 t_end

@@ -486,6 +486,150 @@ sh_install_profile() {
     return 0
 }
 
+# sh_bake_command SRC DST -> install the sandhome launcher at DST with the
+# durable checkout and the home baked into it, and verify the result rather
+# than announcing it.
+#
+# # STOP: THERE IS EXACTLY ONE WRITER OF THAT FILE, BECAUSE EVERY INSTALL AND
+# REPAIR USED TO COPY THE UNBAKED TEMPLATE OVER THE BOOTSTRAP'S BAKE. The
+# bootstrap baked, reported "baked ... into ...", and the next `sandhome
+# install` or `sandhome repair` put the raw template back, so
+#   env -i $SANDHOME_EXEC/bin/sandhome doctor
+# exited 2 while the log still claimed a bake, and the promise the skill
+# makes about a process with no inherited environment was true only until the
+# first repair (issue #133). Measured here: 1 baked line after the bootstrap, 0
+# after one `repair jq`, 0 after one `install jq`.
+#
+# WHY A VERIFY AND NOT A LOG LINE. The old bake printed a step when the read
+# loop merely produced a file, and printed a different step when it did not, so
+# both a working bake and a broken one were a line of prose. Here the baked
+# values are read back out of the written file with the shell's own read and
+# compared to what was asked for. A path containing a single quote is refused
+# rather than half-baked, and a refused bake keeps the HOME lookup, which is
+# the documented fallback.
+sh_bake_command() {
+    sh_bc_src=$1
+    sh_bc_dst=$2
+    [ -r "$sh_bc_src" ] && [ -n "$sh_bc_dst" ] || return 1
+    if [ "$(sh_lex_normalize "$sh_bc_src")" = "$(sh_lex_normalize "$sh_bc_dst")" ]; then
+        # Same file: the caller is already running the copy. It was baked when
+        # it was written; re-baking it here would rewrite the file a running
+        # shell is reading.
+        return 0
+    fi
+    cp -f "$sh_bc_src" "$sh_bc_dst" 2>/dev/null || return 1
+    chmod 0755 "$sh_bc_dst" 2>/dev/null || true
+    case "${SH_REPO_DIR:-}:${SH_HOME:-}" in
+        *\'*)
+            sh_warn "not baking the paths into $sh_bc_dst (a quote in $SH_REPO_DIR or $SH_HOME); a launch with no HOME falls back to the conventional home"
+            return 0 ;;
+    esac
+    sh_bc_tmp="$sh_bc_dst.bake.$$"
+    sh_bc_ok=0
+    {
+        while IFS= read -r sh_bc_l || [ -n "$sh_bc_l" ]; do
+            case "$sh_bc_l" in
+                SH_BAKED_REPO_DIR=*) printf "SH_BAKED_REPO_DIR='%s'\n" "$SH_REPO_DIR" ;;
+                SH_BAKED_HOME=*)     printf "SH_BAKED_HOME='%s'\n" "$SH_HOME" ;;
+                *) printf '%s\n' "$sh_bc_l" ;;
+            esac
+        done < "$sh_bc_dst"
+    } > "$sh_bc_tmp" 2>/dev/null && mv -f "$sh_bc_tmp" "$sh_bc_dst" 2>/dev/null && \
+        chmod 0755 "$sh_bc_dst" 2>/dev/null && sh_bc_ok=1
+    rm -f "$sh_bc_tmp" 2>/dev/null
+    if [ "$sh_bc_ok" != 1 ]; then
+        sh_warn "could not bake the paths into $sh_bc_dst; a launch with no HOME falls back to the conventional home"
+        return 0
+    fi
+    # Read the written file back and compare. sh_bake_value reads the line and
+    # strips the quotes, so the comparison is against what a shell sourcing the
+    # file would see, not against a guess about the format.
+    sh_bc_r=$(sh_bake_value "$sh_bc_dst" SH_BAKED_REPO_DIR)
+    sh_bc_h=$(sh_bake_value "$sh_bc_dst" SH_BAKED_HOME)
+    if [ "$sh_bc_r" = "$SH_REPO_DIR" ] && [ "$sh_bc_h" = "$SH_HOME" ]; then
+        sh_step "baked $SH_REPO_DIR and $SH_HOME into $sh_bc_dst"
+    else
+        sh_warn "the bake at $sh_bc_dst is incomplete (repo='$sh_bc_r' home='$sh_bc_h'); a launch with no HOME falls back to the conventional home"
+    fi
+    return 0
+}
+
+# sh_bake_value FILE NAME -> the value of NAME= in FILE, quotes stripped.
+# The read is the same one every other reader of a generated file in this tree
+# uses, because the library may not use grep and because a read that stops at
+# the first match is all this needs.
+sh_bake_value() {
+    sh_bv_out=''
+    [ -r "$1" ] || return 1
+    while IFS= read -r sh_bv_l || [ -n "$sh_bv_l" ]; do
+        case "$sh_bv_l" in
+            "$2"=*)
+                sh_bv_out=${sh_bv_l#*=}
+                sh_bv_out=${sh_bv_out#\'}
+                sh_bv_out=${sh_bv_out%\'}
+                sh_bv_out=${sh_bv_out#\"}
+                sh_bv_out=${sh_bv_out%\"}
+                break ;;
+        esac
+    done < "$1"
+    printf '%s' "$sh_bv_out"
+    return 0
+}
+
+# sh_exec_mirror_library -> keep a private copy of lib/ and bin/ beside the
+# installed launcher, so `env -i <exec>/bin/sandhome` works on a host whose
+# checkout is gone. The launcher looks for it first (see bin/sandhome), which is
+# the one route that cannot go stale: it lives beside the copy, so it moves when
+# the copy moves and disappears when the copy does.
+#
+# COST, AND WHY IT IS NOT OPTIONAL. lib/ is about 400KB of text and bin/ one
+# script; the mirror is written once per install and once per repair, never on
+# a command, and it is replaced atomically per file so a running copy never
+# reads a half-written library. The alternative is that the whole command
+# depends on a checkout path staying valid for the life of the sandbox, which
+# issue #88's bake was supposed to buy and issue #133 measured dying anyway.
+# `--no-lib` and SANDHOME_MIRROR_LIB=0 turn it off for a host that would rather
+# not hold a second copy; the bake and the pointers still run.
+sh_exec_mirror_library() {
+    sh_eml_exec=${SH_EXEC:-}
+    sh_eml_repo=${SH_REPO_DIR:-}
+    [ -n "$sh_eml_exec" ] || return 0
+    [ -n "$sh_eml_repo" ] || return 0
+    [ "${SH_DRY_RUN:-0}" = 1 ] && return 0
+    case "${SANDHOME_MIRROR_LIB:-1}" in
+        0|no|off|false) return 0 ;;
+    esac
+    sh_eml_dst=$sh_eml_exec/.sandhome-lib
+    [ "$(sh_lex_normalize "$sh_eml_repo")" = "$(sh_lex_normalize "$sh_eml_dst")" ] && return 0
+    sh_eml_tmp=$sh_eml_dst.new.$$
+    rm -rf "$sh_eml_tmp" 2>/dev/null || true
+    for sh_eml_rel in lib bin; do
+        [ -d "$sh_eml_repo/$sh_eml_rel" ] || continue
+        mkdir -p "$sh_eml_tmp/$sh_eml_rel" 2>/dev/null || return 0
+        for sh_eml_f in "$sh_eml_repo/$sh_eml_rel"/*; do
+            [ -f "$sh_eml_f" ] || continue
+            cp -f "$sh_eml_f" "$sh_eml_tmp/$sh_eml_rel/${sh_eml_f##*/}" 2>/dev/null || true
+        done
+    done
+    [ -r "$sh_eml_tmp/lib/common.sh" ] || { rm -rf "$sh_eml_tmp" 2>/dev/null; return 0; }
+    # Per-file replace: the destination keeps serving a running command while
+    # the new library lands, and a file that is not copied keeps its old bytes
+    # rather than becoming an empty hole in a library.
+    for sh_eml_rel in lib bin; do
+        [ -d "$sh_eml_tmp/$sh_eml_rel" ] || continue
+        mkdir -p "$sh_eml_dst/$sh_eml_rel" 2>/dev/null || continue
+        for sh_eml_f in "$sh_eml_tmp/$sh_eml_rel"/*; do
+            [ -f "$sh_eml_f" ] || continue
+            cp -f "$sh_eml_f" "$sh_eml_dst/$sh_eml_rel/${sh_eml_f##*/}.new" 2>/dev/null || continue
+            mv -f "$sh_eml_dst/$sh_eml_rel/${sh_eml_f##*/}.new" "$sh_eml_dst/$sh_eml_rel/${sh_eml_f##*/}" 2>/dev/null || \
+                rm -f "$sh_eml_dst/$sh_eml_rel/${sh_eml_f##*/}.new" 2>/dev/null
+        done
+    done
+    rm -rf "$sh_eml_tmp" 2>/dev/null
+    unset sh_eml_exec sh_eml_repo sh_eml_dst sh_eml_tmp sh_eml_rel sh_eml_f
+    return 0
+}
+
 # sh_exec_install_launchers -> put sandhome and errandsh on the chosen exec bin.
 # STOP: ONLY THE BOOTSTRAP USED TO PLACE THE LAUNCHER. A create plan can move the
 # exec root (a new box, a cleared tmpfs, a root that filled and was replaced),
@@ -502,10 +646,10 @@ sh_exec_install_launchers() {
     [ "${SH_DRY_RUN:-0}" = 1 ] && return 0
     mkdir -p "$sh_eil_bin" 2>/dev/null || return 0
     sh_eil_src="$sh_eil_repo/bin/sandhome"
-    if [ -r "$sh_eil_src" ] && [ "$(sh_lex_normalize "$sh_eil_src")" != "$(sh_lex_normalize "$sh_eil_bin/sandhome")" ]; then
-        cp -f "$sh_eil_src" "$sh_eil_bin/sandhome" 2>/dev/null && \
-            chmod 0755 "$sh_eil_bin/sandhome" 2>/dev/null || true
-    fi
+    # ONE WRITER, EVERY PATH. The bootstrap and this function used to bake and
+    # copy respectively, which is how the bake survived until the first repair
+    # and then died (issue #133).
+    sh_bake_command "$sh_eil_src" "$sh_eil_bin/sandhome" || true
     # faketty as well as errandsh: errandsh finds it beside itself, so both
     # copies are needed for a full-screen program to work from the exec root.
     for sh_eil_rel in shell/errandsh shell/faketty; do
@@ -517,6 +661,7 @@ sh_exec_install_launchers() {
         fi
     done
     unset sh_eil_rel sh_eil_src sh_eil_dst
+    sh_exec_mirror_library
     return 0
 }
 
@@ -711,28 +856,138 @@ sh_global_view_names() {
         case "$sh_gv_n" in
             sandhome|errandsh|faketty|sandhome-memexec) continue ;;
         esac
-        # A view entry that is a symlink to a wrapper script which PATH already
-        # finds must not be exposed by the hook. The dispatcher execs the entry,
-        # so a wrapper that re-resolves its own name would find the hook link and
-        # exec itself forever: errand's /state/home/bin/gh is a #!/bin/sh script
-        # that does exactly this, and exposing it made `gh --version` never
-        # return (measured; `sandhome status` then paid its probe timeout for
-        # it). An ELF binary cannot look itself up, and a real file installed in
-        # the view is not a wrapper for another copy, so only a symlink to a
-        # script already on PATH is filtered; PATH keeps serving the tool.
-        if [ -L "$SH_EXEC_BIN/$sh_gv_n" ] && sh_is_script "$SH_EXEC_BIN/$sh_gv_n" && \
-           [ -n "$(sh_path_where "$sh_gv_n")" ]; then
-            continue
+        # # STOP: A PATH HIT INSIDE THIS TREE IS NOT "PATH WILL SERVE IT". The
+        # whole point of the hook is a shell that has NOT read env.sh, and
+        # views/<name>/bin and npm-global/bin are on PATH only BECAUSE env.sh
+        # put them there. `npm` and `npx` are symlinks to the node view's npm
+        # cli scripts, so the old filter dropped both and a fresh shell had
+        # node but no npm while `toolchains` advertised all three (issue #132).
+        #
+        # The test is the exec ROOT, not the view bin: everything under
+        # $SH_EXEC is this tree's own indirection, so a hit there can only be
+        # served by a shell that has already read the environment the hook
+        # exists to make unnecessary. A hit OUTSIDE it is a real host copy and
+        # PATH keeps serving the tool.
+        if [ -L "$SH_EXEC_BIN/$sh_gv_n" ] && sh_is_script "$SH_EXEC_BIN/$sh_gv_n"; then
+            sh_gv_hit=$(sh_path_where "$sh_gv_n" 2>/dev/null)
+            if [ -n "$sh_gv_hit" ] && [ -n "${SH_EXEC:-}" ]; then
+                case "$sh_gv_hit" in
+                    "$SH_EXEC"|"$SH_EXEC"/*) sh_gv_hit='' ;;
+                esac
+            fi
+            [ -n "$sh_gv_hit" ] && continue
         fi
         printf '%s\n' "$sh_gv_n"
     done
     return 0
 }
 
+# sh_global_sandbox_dirs -> every directory this tree may own under the exec
+# root that another installer writes into, one per line. The list is a FUNCTION
+# so a sandbox added later is named once and the three callers cannot disagree:
+#
+#   sh_global_is_sandbox   is this path one of them
+#   sh_global_write_dispatch   put them on PATH for a fresh shell
+#   sh_env_body (via the toolchain fragments)   the same order, at install time
+#
+# The names are relative to the exec root so the dispatcher bakes none of them:
+# it prepends "$SANDHOME_EXEC/$rel", which is correct even when the exec root
+# moves. Each one is a bin directory whose LINKS MAY BE RELATIVE, which is the
+# whole reason it is refused: a redirect symlink resolves such a link against
+# the wrong directory (issue #138).
+sh_global_sandbox_dirs() {
+    printf '%s\n' 'uv-bin'
+    printf '%s\n' 'npm-global/bin'
+    printf '%s\n' 'go-bin'
+    printf '%s\n' 'cargo-install/bin'
+    return 0
+}
+
+# sh_global_is_sandbox DIR -> 0 when DIR is a directory this tree created to
+# hold executables of its own, inside the exec root and outside the view bin.
+# These are the directories other installers WRITE INTO: the npm prefix bin, the
+# uv tool bin, the go bin, the cargo install root. A hook must never take one,
+# and the reason is measured rather than tidy: `npm install -g cowsay` writes
+#
+#     bin/cowsay -> ../lib/node_modules/cowsay/cli.js
+#
+# a RELATIVE link, resolved against the link's real directory. While `bin` was
+# the hook (a symlink to $SH_EXEC/global), that link resolved to
+# $SH_EXEC/lib/node_modules/... , which does not exist, so every `npm i -g` CLI
+# was a dangling symlink while npm reported success (issue #138). One list, one
+# test, used by the candidate scan, the install path and the record reader, so
+# the three cannot disagree about what is a sandbox.
+sh_global_is_sandbox() {
+    sh_gis_d=$1
+    [ -n "$sh_gis_d" ] || return 1
+    [ -n "${SH_EXEC:-}" ] || return 1
+    case "$sh_gis_d" in
+        "$SH_EXEC"/*) ;;
+        *) return 1 ;;
+    esac
+    # The view bin is not a sandbox: it holds this tree's links, which the hook
+    # re-exposes, and a hook there would shadow the binary with itself.
+    if [ -n "${SH_EXEC_BIN:-}" ]; then
+        case "$sh_gis_d" in
+            "$SH_EXEC_BIN"|"$SH_EXEC_BIN"/*) return 1 ;;
+        esac
+    fi
+    # The list is consulted as a WORD, not as a prefix: a sandbox is a bin
+    # directory, and `$SH_EXEC/npm-global/lib` is data that belongs to the
+    # prefix, not a directory anything writes executables into. A prefix test
+    # would refuse it, and then the hook could take the prefix's own lib
+    # directory and strand a different set of relative links.
+    for sh_gis_rel in $(sh_global_sandbox_dirs); do
+        [ "$sh_gis_d" = "$SH_EXEC/$sh_gis_rel" ] && return 0
+    done
+    return 1
+}
+
+# sh_global_sandbox_names -> every executable the sandbox bin directories hold,
+# one per line, basename only. These are the CLIs an operator installs AFTER
+# the setup (`npm install -g`, `uv tool install`, `go install`, `cargo install`),
+# and the hook is the only thing that makes a tool reachable in a shell that
+# sourced nothing, so they are exposed through it.
+#
+# # STOP: THE LIST IS READ FROM DISK, NOT RECORDED, AND THAT IS THE POINT. It
+# changes every time an operator installs something, so a recorded list would
+# be stale the moment it was written and the only repair would be a manual
+# `sandhome global` after every npm install. The directories are scanned at
+# install time instead, so a refresh picks up what is there now, and the names
+# are the basenames because that is what PATH resolves.
+#
+# The cost is bounded and named: one symlink per installed CLI in each hook
+# directory, and the scan is bounded by the directories themselves (a prefix
+# with a thousand CLIs is a thousand links, which is what a shell that had
+# sourced env.sh would have searched anyway). A name that is NOT executable is
+# skipped, so a half-written link from an interrupted install is not exposed.
+sh_global_sandbox_names() {
+    sh_gsn_exec=${SH_EXEC:-}
+    [ -n "$sh_gsn_exec" ] || return 0
+    sh_gsn_seen=' '
+    for sh_gsn_rel in $(sh_global_sandbox_dirs); do
+        sh_gsn_dir=$sh_gsn_exec/$sh_gsn_rel
+        [ -d "$sh_gsn_dir" ] || continue
+        for sh_gsn_f in "$sh_gsn_dir"/*; do
+            [ -e "$sh_gsn_f" ] || [ -L "$sh_gsn_f" ] || continue
+            [ -x "$sh_gsn_f" ] || continue
+            sh_gsn_n=${sh_gsn_f##*/}
+            case "$sh_gsn_seen" in
+                *" $sh_gsn_n "*) continue ;;
+            esac
+            sh_gsn_seen="$sh_gsn_seen$sh_gsn_n "
+            printf '%s\n' "$sh_gsn_n"
+        done
+    done
+    unset sh_gsn_exec sh_gsn_seen sh_gsn_rel sh_gsn_dir sh_gsn_f sh_gsn_n
+    return 0
+}
+
 # sh_global_skip_entry DIR -> 0 when DIR must never be taken as a hook
 # candidate: the view itself (a hook inside it would shadow the binary with
-# itself), the exec root (the hook belongs in `global/`, not at the top), and
-# anything outside a real parent.
+# itself), the exec root (the hook belongs in `global/`, not at the top), the
+# global dispatcher directory (a second hook there would collide with the first
+# on every name), and every sandbox (issue #138, sh_global_is_sandbox).
 sh_global_skip_entry() {
     [ -n "$1" ] || return 0
     if [ -n "${SH_EXEC_BIN:-}" ]; then
@@ -742,9 +997,10 @@ sh_global_skip_entry() {
     fi
     if [ -n "${SH_EXEC:-}" ]; then
         case "$1" in
-            "$SH_EXEC") return 0 ;;
+            "$SH_EXEC"|"$SH_EXEC/global") return 0 ;;
         esac
     fi
+    sh_global_is_sandbox "$1" && return 0
     return 1
 }
 
@@ -836,6 +1092,26 @@ sh_global_choose_dir() {
 # `loaded=yes exec=<path>` has proved the whole chain, not just file presence.
 # `VIEW` is the baked exec bin, a fallback for a shell whose home lost env.sh
 # while the view survived: a stale absolute path beats a dead command.
+#
+# # STOP: THE DISPATCHER PUTS THE PREFIX ON PATH, BECAUSE IT IS THE ONLY PATH A
+# FRESH SHELL GETS. env.sh prepends the sandbox bin directories (the npm prefix
+# bin, the uv tool bin, the go bin, the cargo install root), and a fresh shell
+# reads env.sh only when a HOOKED COMMAND runs, which is after the shell already
+# searched PATH. So every CLI an operator installs after the setup
+# (`npm install -g`, `uv tool install`, `go install`, `cargo install`) is
+# invisible to a fresh shell: measured, both before and after the issue #138
+# fix, `command -v cowsay` in an `env -i` shell answered nothing while a
+# sourced shell found it, and the whole promise of the hook ("a fresh shell
+# needs to source nothing") was only true of the tools that shipped with the
+# install. The dispatcher now prepends each sandbox bin it finds, which is the
+# same list env.sh used, and it does so in ONE case statement so a new sandbox
+# is named once.
+#
+# THE ORDER IS ENV.SH'S ORDER, because the prepend must not reverse it: each
+# directory goes in front of the ones added so far, so the last prepended is
+# the first on PATH. uv-bin is prepended after npm-global/bin, and PATH then
+# reads views/... , uv-bin, npm-global/bin: exactly what env.sh produces. Adding
+# the same directory twice is guarded, so PATH never grows on a nested run.
 sh_global_write_dispatch() {
     sh_gwd_f=$1
     sh_gwd_tmp="$sh_gwd_f.tmp.$$"
@@ -851,6 +1127,54 @@ sh_global_write_dispatch() {
         printf '%s\n' '  . "$_sandhome_home/env.sh"'
         printf '%s\n' '  _sandhome_loaded=yes'
         printf '%s\n' 'fi'
+        printf '%s\n' '# The toolchain sandbox bins, so a CLI installed after the setup is'
+        printf '%s\n' '# reachable from a shell that sourced nothing. Same order as env.sh.'
+        printf '%s\n' 'if [ -n "${SANDHOME_EXEC:-}" ]; then'
+        # The list is written from sh_global_sandbox_dirs, REVERSED, because
+        # each directory is prepended in turn and the last one prepended is the
+        # first on PATH: the generated `for` walks the reversed list so PATH
+        # reads exactly the order env.sh produces. env.sh prepends uv-bin after
+        # npm-global/bin, so uv-bin must land last here.
+        # The list is written from sh_global_sandbox_dirs, REVERSED, because
+        # each directory is prepended in turn and the last one prepended is the
+        # first on PATH: the generated `for` walks the reversed list so PATH
+        # reads exactly the order env.sh produces. env.sh prepends uv-bin after
+        # npm-global/bin, so uv-bin must land last here. The words are built
+        # with the shell's own string work, because a `sed` in this generated
+        # path is a silent failure: one wrong pattern and the dispatcher it
+        # writes is `for x in \; do` - a file that fails to parse at every
+        # shell start, which is exactly what the fresh-shell probe then reports
+        # as a stale hook with no other clue.
+        sh_gwd_words=''
+        while IFS= read -r sh_gwd_line; do
+            [ -n "$sh_gwd_line" ] || continue
+            sh_gwd_words="$sh_gwd_line $sh_gwd_words"
+        done <<_sh_gwd_end
+$(sh_global_sandbox_dirs 2>/dev/null)
+_sh_gwd_end
+        # Each word is emitted as "$SANDHOME_EXEC/<rel>", the leading and the
+        # trailing space removed by the two expansions: the string is built as
+        # ' "$SANDHOME_EXEC/rel"' and the outer quotes are stripped once at each
+        # end, which is why the final expansion is quoted inside a printf.
+        sh_gwd_for=''
+        for sh_gwd_rel in $sh_gwd_words; do
+            if [ -z "$sh_gwd_for" ]; then
+                sh_gwd_for='"$SANDHOME_EXEC/'"$sh_gwd_rel"'"'
+            else
+                sh_gwd_for="$sh_gwd_for"' "$SANDHOME_EXEC/'"$sh_gwd_rel"'"'
+            fi
+        done
+        [ -n "$sh_gwd_for" ] || sh_gwd_for='"$SANDHOME_EXEC/.sandhome-none"'
+        printf '  for _sandhome_sb in %s; do\n' "$sh_gwd_for"
+        printf '%s\n' '    [ -d "$_sandhome_sb" ] || continue'
+        printf '%s\n' '    case ":$PATH:" in'
+        printf '%s\n' '      *":$_sandhome_sb:"*) continue ;;'
+        printf '%s\n' '    esac'
+        printf '%s\n' '    PATH="$_sandhome_sb:$PATH"'
+        printf '%s\n' '  done'
+        printf '%s\n' '  unset _sandhome_sb'
+        printf '%s\n' '  export PATH'
+        printf '%s\n' 'fi'
         printf '%s\n' 'if [ "$_sandhome_name" = .sandhome-dispatch ]; then'
         printf '%s\n' '  printf "sandhome-dispatch loaded=%s exec=%s\n" "$_sandhome_loaded" "${SANDHOME_EXEC:-unset}"'
         printf '%s\n' '  exit 0'
@@ -860,6 +1184,15 @@ sh_global_write_dispatch() {
         printf '%s\n' 'fi'
         printf '%s\n' 'if [ -n "$_sandhome_view" ] && [ -x "$_sandhome_view/$_sandhome_name" ]; then'
         printf '%s\n' '  exec "$_sandhome_view/$_sandhome_name" "$@"'
+        printf '%s\n' 'fi'
+        printf '%s\n' '# A tool the hook does not name, in a directory the hook just put on PATH.'
+        printf '%s\n' 'if [ -n "${SANDHOME_EXEC:-}" ]; then'
+        printf '%s\n' '  for _sandhome_sb in "$SANDHOME_EXEC/npm-global/bin" "$SANDHOME_EXEC/uv-bin" "$SANDHOME_EXEC/go-bin"; do'
+        printf '%s\n' '    if [ -x "$_sandhome_sb/$_sandhome_name" ]; then'
+        printf '%s\n' '      exec "$_sandhome_sb/$_sandhome_name" "$@"'
+        printf '%s\n' '    fi'
+        printf '%s\n' '  done'
+        printf '%s\n' '  unset _sandhome_sb'
         printf '%s\n' 'fi'
         printf '%s\n' 'printf "%s\n" "sandhome: $_sandhome_name is not installed; run: sandhome install $_sandhome_name" >&2'
         printf '%s\n' 'exit 127'
@@ -898,6 +1231,121 @@ sh_global_old_field() {
 # own symlink as the original state, or `--remove` would "restore" our link.
 sh_global_old_orig() {
     sh_global_old_field "$1" "$2" orig
+}
+
+# sh_global_relocate_record OLDBASE DIR -> undo a hook an EARLIER install
+# recorded inside a directory the sandbox list now refuses, and rescue what the
+# redirect stranded. It runs on the refresh path, once per refused recorded
+# entry, before the new plan is committed (issue #138).
+#
+# WHAT IT TOUCHES, PRECISELY. Only a directory that is (a) recorded, (b) now a
+# sandbox, and (c) OUR OWN hook: a symlink pointing at the directory this tree
+# writes its dispatcher into. A directory the host owns that happens to sit
+# under the exec root is left exactly as it was, and a recorded directory that
+# is no longer ours is reported and left alone rather than deleted.
+#
+# WHY THE RESCUE IS NEEDED. `npm install -g cowsay` writes
+#     bin/cowsay -> ../lib/node_modules/cowsay/cli.js
+# a RELATIVE link, which the kernel resolves against the link's REAL directory.
+# While `bin` was a symlink to $SH_EXEC/global, that resolved to
+# $SH_EXEC/lib/node_modules/... , which does not exist, so the CLI was dead
+# while npm reported success. Restoring the directory and moving the stranded
+# link back is the only thing that makes an install that already happened work;
+# refusing the directory for the future would strand every CLI already there.
+# The rescue is deliberately narrow: only a link that is currently DANGLING, in
+# the dispatcher directory, that is not one of ours, and that is RELATIVE. A
+# dangling hook link and a dangling host link are both left where they are,
+# because moving either is a change this function cannot justify.
+sh_global_relocate_record() {
+    sh_grr_old=$1
+    sh_grr_dir=$2
+    [ -n "$sh_grr_old" ] && [ -n "$sh_grr_dir" ] || return 0
+    [ -r "$sh_grr_old/dirs" ] || return 0
+    sh_grr_i=0
+    sh_grr_link=''
+    sh_grr_orig=''
+    sh_grr_target=''
+    while IFS= read -r sh_grr_d || [ -n "$sh_grr_d" ]; do
+        [ -n "$sh_grr_d" ] || continue
+        if [ "$sh_grr_d" = "$sh_grr_dir" ]; then
+            # NOT `A && read || C`: a read that succeeds with an empty value
+            # would fall through to C anyway, and a read that fails must not
+            # leave a stale variable from an earlier slot. Each field is read
+            # only when its file exists, and the variable is cleared first.
+            sh_grr_link=''; sh_grr_orig=''; sh_grr_target=''
+            if [ -r "$sh_grr_old/d/$sh_grr_i/link" ]; then
+                IFS= read -r sh_grr_link < "$sh_grr_old/d/$sh_grr_i/link" || sh_grr_link=''
+            fi
+            if [ -r "$sh_grr_old/d/$sh_grr_i/orig" ]; then
+                IFS= read -r sh_grr_orig < "$sh_grr_old/d/$sh_grr_i/orig" || sh_grr_orig=''
+            fi
+            if [ -r "$sh_grr_old/d/$sh_grr_i/target" ]; then
+                IFS= read -r sh_grr_target < "$sh_grr_old/d/$sh_grr_i/target" || sh_grr_target=''
+            fi
+            break
+        fi
+        sh_grr_i=$((sh_grr_i + 1))
+    done < "$sh_grr_old/dirs"
+    [ "$sh_grr_link" = yes ] || return 0
+    [ -n "${SH_EXEC:-}" ] || return 0
+    # Ours, or nothing: the link must be the one this tree writes.
+    [ -n "$sh_grr_target" ] && [ "$sh_grr_target" = "$SH_EXEC/global" ] || return 0
+    [ -L "$sh_grr_dir" ] || return 0
+    sh_grr_cur=$(readlink "$sh_grr_dir" 2>/dev/null) || sh_grr_cur=''
+    [ "$sh_grr_cur" = "$sh_grr_target" ] || return 0
+    [ -d "$sh_grr_target" ] || return 0
+    sh_grr_moved=0
+    rm -f "$sh_grr_dir" 2>/dev/null || true
+    # The directory comes back in the state the record says it had. A bin
+    # directory an installer writes into has to be a directory whatever the
+    # record says, because an absent entry was only absent because the hook
+    # took it and npm will write into it either way; a host symlink the record
+    # kept is put back as that symlink.
+    case "$sh_grr_orig" in
+        link:*)
+            if ! ln -s "${sh_grr_orig#link:}" "$sh_grr_dir" 2>/dev/null; then
+                mkdir -p "$sh_grr_dir" 2>/dev/null || true
+            fi ;;
+        *) mkdir -p "$sh_grr_dir" 2>/dev/null || true ;;
+    esac
+    [ -d "$sh_grr_dir" ] || return 0
+    # The rescue: our dispatcher's stranded links, and nothing else.
+    for sh_grr_f in "$sh_grr_target"/* "$sh_grr_target"/.[!.]*; do
+        [ -L "$sh_grr_f" ] || continue
+        case "${sh_grr_f##*/}" in sandhome|.sandhome-dispatch) continue ;; esac
+        sh_grr_t=$(readlink "$sh_grr_f" 2>/dev/null) || continue
+        [ "$sh_grr_t" = '.sandhome-dispatch' ] && continue
+        # Only a relative link, and only while it is dangling: an absolute one
+        # (uv tool install) resolves from anywhere and was never stranded.
+        case "$sh_grr_t" in /*) continue ;; esac
+        [ -e "$sh_grr_f" ] && continue
+        [ -e "$sh_grr_dir/${sh_grr_f##*/}" ] && continue
+        if mv "$sh_grr_f" "$sh_grr_dir/${sh_grr_f##*/}" 2>/dev/null; then
+            sh_grr_moved=$((sh_grr_moved + 1))
+        fi
+    done
+    sh_warn "$sh_grr_dir was a toolchain bin directory taken by an earlier global hook; the hook was moved out and the directory restored$([ "$sh_grr_moved" -gt 0 ] && printf ' (%s stranded CLI link(s) rescued)' "$sh_grr_moved") (issue #138)"
+    return 0
+}
+
+# sh_global_hook_names -> every name the hook exposes: the view's executables
+# PLUS every executable the sandbox bin directories hold (the CLIs an operator
+# installed after the setup), so `npm install -g cowsay` then `cowsay` works in
+# a shell that sourced nothing. Both lists are read from disk, never from a
+# record, because both change without this tree running (issue #138). A name in
+# the view and a name in a prefix that share a basename is one hook entry
+# either way, and the de-dupe keeps the count honest.
+sh_global_hook_names() {
+    sh_ghn_seen=' '
+    for sh_ghn_n in $(sh_global_view_names; sh_global_sandbox_names); do
+        [ -n "$sh_ghn_n" ] || continue
+        case "$sh_ghn_seen" in
+            *" $sh_ghn_n "*) continue ;;
+        esac
+        sh_ghn_seen="$sh_ghn_seen$sh_ghn_n "
+        printf '%s\n' "$sh_ghn_n"
+    done
+    return 0
 }
 
 # sh_global_install_one DIR IDX TMP OLDBASE -> install or refresh the hook at
@@ -1059,7 +1507,7 @@ sh_global_install_one() {
         fi
     done
 
-    sh_global_view_names | while IFS= read -r sh_gio_n || [ -n "$sh_gio_n" ]; do
+    sh_global_hook_names | while IFS= read -r sh_gio_n || [ -n "$sh_gio_n" ]; do
         [ -n "$sh_gio_n" ] || continue
         sh_gio_dst="$sh_gio_target/$sh_gio_n"
         if [ -e "$sh_gio_dst" ] || [ -L "$sh_gio_dst" ]; then
@@ -1117,6 +1565,19 @@ sh_global_install() {
     if [ -r "$sh_gi_old/dirs" ]; then
         while IFS= read -r sh_gi_pd || [ -n "$sh_gi_pd" ]; do
             [ -n "$sh_gi_pd" ] || continue
+            # # STOP: A DIRECTORY THE SANDBOX LIST NOW REFUSES IS REPAIRED ON THE
+            # WAY OUT, NOT RE-PLANNED (issue #138). An earlier install took the
+            # npm prefix bin as a hook directory, which made every `npm i -g`
+            # CLI a dangling relative link. Leaving the old record alone would
+            # keep the broken shape; re-planning it would fight the repair. It
+            # is handed to sh_global_relocate_record, which moves our own
+            # dispatcher out, restores the directory, and rescues the links the
+            # redirect stranded. Only OUR hook is touched: a directory the host
+            # owns that happens to sit under the exec root is left as it is.
+            if sh_global_skip_entry "$sh_gi_pd"; then
+                sh_global_relocate_record "$sh_gi_old" "$sh_gi_pd"
+                continue
+            fi
             sh_gi_dup=no
             while IFS= read -r sh_gi_pp || [ -n "$sh_gi_pp" ]; do
                 [ "$sh_gi_pp" = "$sh_gi_pd" ] && { sh_gi_dup=yes; break; }
@@ -1151,7 +1612,12 @@ sh_global_install() {
     fi
     # The record: names actually exposed now, clashes found on the way, and
     # mirrors of the first entry so single-directory readers keep one answer.
-    sh_global_view_names > "$sh_gi_tmp/names" 2>/dev/null || true
+    # The record is the union the hook actually installed, so `global --status`
+    # and the readiness message count every name a fresh shell can reach, not
+    # only the view's. Reading the view alone undercounted by exactly the CLIs
+    # an operator installs after the setup, which is the case the hook exists
+    # for (issue #138).
+    sh_global_hook_names > "$sh_gi_tmp/names" 2>/dev/null || true
     if [ -f "$sh_gi_tmp/d/0/dir" ]; then
         cp -f "$sh_gi_tmp/d/0/dir" "$sh_gi_tmp/dir" 2>/dev/null || true
         cp -f "$sh_gi_tmp/d/0/link" "$sh_gi_tmp/link" 2>/dev/null || true

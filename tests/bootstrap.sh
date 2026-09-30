@@ -937,4 +937,112 @@ t129_out=$(env -i PATH=/usr/bin:/bin HOME="$t129_rfak" \
 t_is "$?" 1 'install --only with an unknown name exits non-zero (#129)'
 t_contains "$t129_out" 'unknown toolchain nope' 'install --only names the unknown toolchain (#129)'
 
+# --- #134: the skills are the setup's to install and to report ---------------
+# ROUTE.md step 2 told a consumer to fetch three SKILL.md files the bootstrap
+# had already installed, and the `ls` that followed proved nothing (#134). The
+# command is the check now, and the clause runs the real one: three skills, each
+# reported as installed with its origin, and an exit status that says so.
+#
+# Its own roots, because the shared $home was removed earlier in this file (the
+# re-bootstrap-with-a-different-exec-root block) and a clause that ran against
+# it would be measuring a directory the file had already deleted.
+sk_home=$work/skhome
+sk_exec=$work/skexec
+mkdir -p "$sk_home" "$sk_exec" 2>/dev/null
+sk_none=$(env -i PATH=/usr/bin:/bin HOME="$sk_home" \
+    SANDHOME_HOME="$sk_home" SANDHOME_EXEC="$sk_exec" SANDHOME_REPO_DIR="$ROOT" \
+    sh "$ROOT/bin/sandhome" skills </dev/null 2>&1)
+sk_none_rc=$?
+t_is "$sk_none_rc" '1' 'sandhome skills exits non-zero when nothing is installed (#134)'
+t_contains "$sk_none" 're-run the setup without --no-skills' \
+     'sandhome skills names the fix when nothing is installed (#134)'
+env -i PATH=/usr/bin:/bin HOME="$sk_home" TMPDIR="${TMPDIR:-/tmp}" \
+    SANDHOME_HOME="$sk_home" SANDHOME_EXEC="$sk_exec" SANDHOME_REPO_DIR="$ROOT" \
+    sh "$ROOT/bootstrap.sh" --toolset none --only jq --no-profile --no-path-line \
+    </dev/null >/dev/null 2>&1
+sk_out=$(env -i PATH=/usr/bin:/bin HOME="$sk_home" \
+    SANDHOME_HOME="$sk_home" SANDHOME_EXEC="$sk_exec" SANDHOME_REPO_DIR="$ROOT" \
+    sh "$ROOT/bin/sandhome" skills </dev/null 2>&1)
+sk_out_rc=$?
+t_is "$sk_out_rc" '0' 'sandhome skills exits 0 when the setup installed them (#134)'
+for sk_name in sandhome errandsh sealed-sandbox; do
+    case "$sk_out" in
+        *"$sk_name"*) t_ok 0 "sandhome skills reports $sk_name (#134)" ;;
+        *) t_ok 1 "sandhome skills reports $sk_name (#134)" ;;
+    esac
+done
+t_contains "$sk_out" 'skills_installed=3' 'sandhome skills counts what the setup installed (#134)'
+t_contains "$sk_out" '.agents/skills' 'sandhome skills names the location a harness reads (#134)'
+# ROUTE.md must lead with the fact, not the three hand-written curl lines.
+t_contains "$(cat "$ROOT/ROUTE.md")" 'The setup already installed them' \
+     'ROUTE.md step 2 leads with the fact the setup installed the skills (#134)'
+t_contains "$(cat "$ROOT/ROUTE.md")" 'sandhome skills' \
+     'ROUTE.md step 2 points at the command that confirms it (#134)'
+
+# --- #137: `sandhome project` runs both halves through the written env --------
+# The command exists for a caller whose shell has nothing loaded, and it ran npm
+# against the caller's bare PATH: `sh_have node` was true, npm was unreachable,
+# and the failure was swallowed by 2>&1 while the command still printed "npm
+# install, npx, native CLIs all run there" (#137). The clause runs the real
+# command from a shell with no environment at all, and checks the two claims
+# separately: the file the node half promises exists, and the exit status lets a
+# script react to a half that failed.
+#
+# node is installed into a root of its own, the way ROUTE step 2 installs it (a
+# real bootstrap run), because the end-to-end install above is the minimal
+# toolset and there is no node in it.
+pj_home=$work/pjhome
+pj_exec=$work/pjexec
+mkdir -p "$pj_home" "$pj_exec" 2>/dev/null
+# The egress this machine has, passed the way a consumer sandbox has it: the
+# bare `env -i` above has no resolver, and a node install is a download, so the
+# clause names the proxy the session runs with rather than skipping the one
+# half of #137 that needs a runtime.
+env -i PATH=/usr/bin:/bin HOME="$pj_home" TMPDIR="${TMPDIR:-/tmp}" \
+    http_proxy="${http_proxy:-}" https_proxy="${https_proxy:-}" no_proxy="${no_proxy:-}" \
+    SANDHOME_HOME="$pj_home" SANDHOME_EXEC="$pj_exec" SANDHOME_REPO_DIR="$ROOT" \
+    sh "$ROOT/bootstrap.sh" --toolset none --with node --no-profile --no-path-line \
+    </dev/null >"$work/pj-install.log" 2>&1
+pj_dir=$pj_exec/projects
+pj_node_present=$([ -e "$pj_exec/views/node/bin/node" ] || [ -e "$pj_exec/bin/node" ] && echo yes || echo no)
+if [ "$pj_node_present" = yes ]; then
+pj_out=$(env -i PATH="$pj_exec/bin:/usr/bin:/bin" HOME="$pj_home" \
+    SANDHOME_HOME="$pj_home" SANDHOME_EXEC="$pj_exec" SANDHOME_REPO_DIR="$ROOT" \
+    sh -c 'cd "$1" && "$2" project e2e-node --node --no-link; printf "EXIT=%s\n" "$?"' \
+    sh "$work" "$pj_exec/bin/sandhome" </dev/null 2>&1)
+t_is "$(printf '%s' "$pj_out" | sed -n 's/^EXIT=//p')" '0' \
+     'sandhome project --node exits 0 when the node half worked (#137)'
+t_is "$([ -f "$pj_dir/e2e-node/package.json" ] && echo yes || echo no)" 'yes' \
+     'sandhome project --node really wrote package.json (#137)'
+# The reassuring line is gated on the file, so a run where npm failed cannot
+# print it: a host with no node at all must NOT get the "all run there" line.
+case "$pj_out" in
+    *'node half skipped'*'all run there'*) t_ok 1 'the "all run there" line is never printed next to a failed node half (#137)' ;;
+    *'all run there'*) t_ok 0 'the "all run there" line is printed only when package.json exists (#137)' ;;
+    *) t_ok 0 'the "all run there" line is printed only when package.json exists (#137)' ;;
+esac
+# A node half that is PRESENT and FAILS is named, is not announced as ready,
+# and is a non-zero exit so a script can react. The failure is made honestly:
+# a project directory the installer cannot write to, so npm init really fails.
+# (A bad NPM_CONFIG_PREFIX does not work: `npm init` writes to the cwd and
+# ignores the prefix, which is itself worth knowing.)
+pj_ro=$pj_exec/projects/e2e-ro
+mkdir -p "$pj_ro" 2>/dev/null
+chmod 0555 "$pj_ro" 2>/dev/null
+pj_bad=$(env -i PATH="$pj_exec/bin:/usr/bin:/bin" HOME="$pj_home" \
+    SANDHOME_HOME="$pj_home" SANDHOME_EXEC="$pj_exec" SANDHOME_REPO_DIR="$ROOT" \
+    sh -c '"$1" project e2e-ro --node --no-link; printf "EXIT=%s\n" "$?"' \
+    sh "$pj_exec/bin/sandhome" </dev/null 2>&1)
+chmod 0755 "$pj_ro" 2>/dev/null
+t_contains "$pj_bad" 'npm init failed' 'a node half that fails says which step failed (#137)'
+t_is "$(printf '%s' "$pj_bad" | sed -n 's/^EXIT=//p')" '1' \
+     'a node half that is present and fails exits non-zero (#137)'
+case "$pj_bad" in
+    *'all run there'*) t_ok 1 'a failed node half never prints the "all run there" line (#137)' ;;
+    *) t_ok 0 'a failed node half never prints the "all run there" line (#137)' ;;
+esac
+else
+    t_skip "node could not be installed here, so the #137 node half could not run ($(sed -n 's/^failures=//p' "$work/pj-install.log" | head -1) failures)"
+fi
+
 t_end

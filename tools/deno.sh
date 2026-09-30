@@ -8,17 +8,42 @@ TC_deno_EXEC_MB=150
 # (issue #125).
 TC_deno_DYNAMIC='remote imports and self-upgrade (deno upgrade) at run time'
 
-# tc_deno_exec_mb -> the fresh-install exec need in MB: 8 in launch mode (one
-# launcher copy for the single binary), 150 in copy mode (the full binary).
-# Read by the install gate below and the feasibility plan so the two never
-# disagree. Without it a launch-mode install was refused for 150MB of exec
-# space its 20KB view never needed (issue #92).
+# # STOP: THE RUNTIME IS A REAL COPY, NOT A LAUNCHER. deno run, deno test and
+# every worker deno spawns re-execute the runtime through its own path, and a
+# launcher makes that path `/memfd:sandhome (deleted)`; every spawn then dies
+# with ENOENT while `deno --version` still answers (issue #139). A launcher is
+# right for a compiler invoked once; it is wrong for an interpreter designed to
+# fork itself thousands of times.
+tc_deno_copy_bins() { printf 'deno'; }
+
+# tc_deno_exec_mb -> the fresh-install exec need in MB. deno is on the copy
+# list, so launch mode already pays for the real binary, and the price is the
+# declared one in both modes: the linux-x64 release is a 150MB binary and the
+# view cannot be smaller than the file it holds, so under-pricing it would
+# refuse nothing and then run out of room mid-copy. Read by the install gate
+# below and the feasibility plan so the two never disagree (issue #92).
 tc_deno_exec_mb() {
     if [ "${SH_VIEW_MODE:-copy}" = launch ]; then
-        printf '8'
+        printf '150'
     else
         printf '150'
     fi
+}
+
+# tc_deno_doctor -> the same self-exec check node gets, for the same reason: a
+# runtime that can answer --version and not spawn itself is the failure mode
+# issue #139 is about, and the readiness gate is where it has to be visible.
+tc_deno_doctor() {
+    sh_dd_bin=''
+    if [ -n "${SH_EXEC_VIEWS:-}" ] && [ -x "$SH_EXEC_VIEWS/deno/deno" ]; then
+        sh_dd_bin="$SH_EXEC_VIEWS/deno/deno"
+    elif [ -n "${SANDHOME_EXEC:-}" ] && [ -x "$SANDHOME_EXEC/views/deno/deno" ]; then
+        sh_dd_bin="$SANDHOME_EXEC/views/deno/deno"
+    elif sh_have deno; then
+        sh_dd_bin=deno
+    fi
+    [ -n "$sh_dd_bin" ] || return 1
+    "$sh_dd_bin" eval 'const r = new Deno.Command(Deno.execPath(), {args:["eval","0"]}); r.spawnSync();' >/dev/null 2>&1
 }
 
 tc_deno_probe() {

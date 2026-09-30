@@ -254,6 +254,86 @@ if command -v rustc >/dev/null 2>&1; then
 else
     t_skip 'rust behavioural probe: no rustc on this host'
 fi
+# --- #135: TC_rust_BINS must name every command a fresh shell resolves -------
+# rustc is the one command a Rust toolchain exists to provide, and the
+# description already named it while the bins did not, so the exec view
+# exposed cargo and rustup but not rustc: a fresh shell fell through to the
+# host's rustup shim, which answers "rustup could not choose a version of
+# rustc to run, because one wasn't specified explicitly, and no default is
+# configured", while `doctor` said toolchain_rust=yes (issue #135). The clause
+# reads the declared set, and each name is checked against the module's own
+# proxy writer: a name that is declared and never written is the defect.
+sh_toolchain_load rust >/dev/null 2>&1
+# The bins are paths (cargo/bin/rustc), and the exec bin exposes them by
+# basename, so the clause matches on the basename the PATH would resolve.
+rust_bins=$(eval "printf '%s' \"\${TC_rust_BINS:-}\"")
+rust_base=''
+for sh_rb_path in $rust_bins; do
+    rust_base="$rust_base ${sh_rb_path##*/}"
+done
+for sh_rb in rustc rustdoc cargo-clippy cargo-fmt; do
+    case " $rust_base " in
+        *" $sh_rb "*) t_ok 0 "TC_rust_BINS names $sh_rb (issue #135)" ;;
+        *) t_ok 1 "TC_rust_BINS names $sh_rb (issue #135)" ;;
+    esac
+done
+# The proxy writer must give each of them a link when a toolchain dir exists.
+# A stub toolchain tree is enough: the writer globs toolchains/*/bin/<name>.
+rust_fake=$work/rustproxy
+rm -rf "$rust_fake" 2>/dev/null
+mkdir -p "$rust_fake/rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin" 2>/dev/null
+for sh_rb in cargo rustc rustdoc cargo-clippy cargo-fmt; do
+    printf '#!/bin/sh\nexit 0\n' > "$rust_fake/rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/$sh_rb"
+    chmod 0755 "$rust_fake/rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/$sh_rb" 2>/dev/null
+done
+sh_toolchain_rust_proxies "$rust_fake/cargo" "$rust_fake/rustup" ''
+for sh_rb in cargo rustc rustdoc cargo-clippy cargo-fmt; do
+    t_is "$([ -x "$rust_fake/cargo/bin/$sh_rb" ] && echo yes || echo no)" 'yes' \
+         "the rust proxy writer links $sh_rb beside the toolchain's own binary (issue #135)"
+done
+# and the link points at THIS tree's toolchain, never at a host rustup
+t_contains "$(readlink "$rust_fake/cargo/bin/rustc" 2>/dev/null)" 'toolchains/stable' \
+           'the rustc proxy points at this tree toolchain, not a host rustup (issue #135)'
+# # STOP: A rustup PROXY IS REPLACED, NOT ACCEPTED, AND THAT IS THE RUST FIX A
+# FRESH SHELL NEEDS. rustup writes cargo/bin/cargo -> rustup and
+# cargo/bin/rustc -> rustup in its own tree; each proxy resolves the toolchain
+# under $RUSTUP_HOME, which on a split root is the mount that refuses execve,
+# so the exec-bin entry the global hook reaches answers
+#   error: command failed: 'cargo': Permission denied (os error 13)
+# while the SAME command works in any sourced shell, because env.sh prepends
+# toolchains/<triple>/bin (the real binaries) ahead of exec/bin. The old guard
+# was "cargo is not executable", which a rustup proxy satisfies, so the broken
+# link survived every repair. The writer now replaces a link that RESOLVES TO
+# rustup and leaves every other link alone, and it runs unconditionally.
+rust_fake2=$work/rustproxy2
+rm -rf "$rust_fake2" 2>/dev/null
+mkdir -p "$rust_fake2/rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin" 2>/dev/null
+mkdir -p "$rust_fake2/cargo/bin" 2>/dev/null
+# the shape rustup itself creates: a proxy to rustup, and an executable rustup
+for sh_rb in cargo rustc rustdoc cargo-clippy cargo-fmt; do
+    printf '#!/bin/sh\ncase "$0" in *rustup) echo "rustup 1.29.1" ;; *) echo "$0: Permission denied" ;; esac\n' \
+        > "$rust_fake2/rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/$sh_rb"
+    chmod 0755 "$rust_fake2/rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/$sh_rb" 2>/dev/null
+    ln -sfn rustup "$rust_fake2/cargo/bin/$sh_rb" 2>/dev/null
+done
+printf '#!/bin/sh\necho "rustup 1.29.1"\n' > "$rust_fake2/rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/rustup"
+chmod 0755 "$rust_fake2/rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/rustup" 2>/dev/null
+printf '#!/bin/sh\necho "rustup 1.29.1 (host)"\n' > "$rust_fake2/cargo/bin/rustup"
+chmod 0755 "$rust_fake2/cargo/bin/rustup" 2>/dev/null
+sh_toolchain_rust_proxies "$rust_fake2/cargo" "$rust_fake2/rustup" ''
+rust_bad=''
+for sh_rb in cargo rustc rustdoc cargo-clippy cargo-fmt; do
+    case "$(readlink "$rust_fake2/cargo/bin/$sh_rb" 2>/dev/null)" in
+        rustup|./rustup) rust_bad="$rust_bad $sh_rb" ;;
+    esac
+done
+t_is "$rust_bad" '' 'a rustup proxy is replaced by the real toolchain binary, not accepted (a fresh shell needs this)'
+# the control: a link that already points somewhere real is left exactly as it is
+ln -sfn "$rust_fake2/rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/cargo" "$rust_fake2/cargo/bin/cargo" 2>/dev/null
+sh_toolchain_rust_proxies "$rust_fake2/cargo" "$rust_fake2/rustup" ''
+t_contains "$(readlink "$rust_fake2/cargo/bin/cargo" 2>/dev/null)" 'toolchains/stable' \
+           'a link that is already a real binary is left alone (the fix is not a rewrite-everything)' 
+
 # install rust --target parses without downloading (unknown target refused by
 # rustup later, but the flag itself must be accepted and exported).
 inst_t=$(SANDHOME_HOME="$work/ih" SANDHOME_EXEC="$work/ie" SANDHOME_REPO_DIR="$ROOT" \
@@ -1272,16 +1352,68 @@ case "$(cat "$ROOT/NOTICE")" in
     *) t_ok 1 'shellcheck is recorded in NOTICE' ;;
 esac
 
-# Single-binary toolchains price their launch-mode view, not their payload:
-# a deno install was refused for 150MB its 20KB view never needed (issue #92).
+# # STOP: THE VIEW PRICE FOLLOWS THE COPY LIST, AND THE CLAUSE CHECKS THE
+# LIST RATHER THAN A MAGIC NUMBER. The old clause read "a single-binary
+# toolchain must price its launch-mode view under 32MB", which was true when a
+# launcher copy was 20KB and became FALSE the moment a module put its runtime
+# on the copy list: a launcher is right for a compiler you invoke once and
+# wrong for an interpreter that forks itself thousands of times, so node, deno
+# and bun are real copies now and their launch price is the real binary
+# (issue #139). A magic number cannot tell those two cases apart; the copy list
+# can, and this is the clause that would have caught the memfd default.
+#
+# The invariant: a toolchain with an empty copy list prices its launch view
+# like a launcher (small); a toolchain WITH a copy list prices it like a copy
+# (its declared TC_<name>_EXEC_MB). Both are checked by running the module's
+# own tc_<name>_exec_mb under each mode, so the figure the install gate reads
+# is the figure under test rather than a number typed twice.
 for sh_tmm in deno bun mold; do
     sh_toolchain_load "$sh_tmm" >/dev/null 2>&1
-    sh_tmm_mb=$(SH_VIEW_MODE=launch "tc_${sh_tmm}_exec_mb" 2>/dev/null) || sh_tmm_mb=''
-    case "$sh_tmm_mb" in
-        ''|*[!0-9]*) t_ok 1 "$sh_tmm prices its launch-mode view" ;;
-        *) if [ "$sh_tmm_mb" -lt 32 ]; then t_ok 0 "$sh_tmm prices its launch-mode view (${sh_tmm_mb}MB)";
-           else t_ok 1 "$sh_tmm prices its launch-mode view (got ${sh_tmm_mb}MB)"; fi ;;
+    sh_tmm_copy=$(SH_VIEW_MODE=launch "tc_${sh_tmm}_copy_bins" 2>/dev/null) || sh_tmm_copy=''
+    sh_tmm_declared=$(sed -n 's/^TC_[A-Za-z0-9_]*_EXEC_MB=\([0-9][0-9]*\)/\1/p' "$ROOT/tools/$sh_tmm.sh" 2>/dev/null | head -1)
+    sh_tmm_launch=$(SH_VIEW_MODE=launch "tc_${sh_tmm}_exec_mb" 2>/dev/null) || sh_tmm_launch=''
+    sh_tmm_full=$(SH_VIEW_MODE=copy "tc_${sh_tmm}_exec_mb" 2>/dev/null) || sh_tmm_full=''
+    case "$sh_tmm_copy" in
+        '')
+            # No copy list: a launcher view, so the price must be well under
+            # the copy price (issue #92 priced 20KB against a 60MB binary).
+            if [ -n "$sh_tmm_launch" ] && [ -n "$sh_tmm_declared" ] && [ "$sh_tmm_launch" -lt "$sh_tmm_declared" ]; then
+                t_ok 0 "$sh_tmm prices a launcher view below the copy price (${sh_tmm_launch}MB < ${sh_tmm_declared}MB, issue #92)"
+            else
+                t_ok 1 "$sh_tmm prices a launcher view below the copy price (launch=${sh_tmm_launch:-none} copy=${sh_tmm_declared:-none})"
+            fi ;;
+        *)
+            # A copy list: the launch view IS a copy, so it may not be
+            # cheaper than the copy price by a wide margin. The floor is the
+            # declared copy figure less a quarter: a launch price below that
+            # would refuse an install whose view cannot fit.
+            if [ -n "$sh_tmm_launch" ] && [ -n "$sh_tmm_declared" ] && \
+               [ "$sh_tmm_launch" -ge $((sh_tmm_declared - sh_tmm_declared / 4)) ]; then
+                t_ok 0 "$sh_tmm prices a real copy even in launch mode (${sh_tmm_launch}MB, issue #139)"
+            else
+                t_ok 1 "$sh_tmm prices a real copy even in launch mode (launch=${sh_tmm_launch:-none} copy=${sh_tmm_declared:-none})"
+            fi ;;
     esac
+    case "$sh_tmm_full" in
+        ''|*[!0-9]*) t_ok 1 "$sh_tmm prices its copy-mode view" ;;
+        *) t_ok 0 "$sh_tmm prices its copy-mode view (${sh_tmm_full}MB)" ;;
+    esac
+done
+# A LANGUAGE RUNTIME THAT SPAWNS ITSELF IS A REAL COPY, AND THE CLAUSE NAMES
+# THE BINARY RATHER THAN THE MODULE. `node -e spawnSync(process.execPath)` is
+# the exact call Playwright, Puppeteer and webpack make, and it dies with ENOENT
+# naming /memfd:sandhome (deleted) when the view is a launcher while
+# `node --version` still answers (issue #139). A copy list is the lever, so the
+# lever is what the clause reads.
+for sh_trt in node deno bun; do
+    sh_toolchain_load "$sh_trt" >/dev/null 2>&1
+    sh_trt_copy=$(SH_VIEW_MODE=launch "tc_${sh_trt}_copy_bins" 2>/dev/null) || sh_trt_copy=''
+    t_contains "$sh_trt_copy" "$sh_trt" "$sh_trt is a real copy in launch mode, so process.execPath is a path (issue #139)"
+    if command -v "tc_${sh_trt}_doctor" >/dev/null 2>&1; then
+        t_ok 0 "$sh_trt declares a spawn health check for the readiness gate (issue #139)"
+    else
+        t_ok 1 "$sh_trt declares a spawn health check for the readiness gate (issue #139)"
+    fi
 done
 # zig locates its install dir exe-relative through /proc/self/exe, which a
 # memfd image hides: it must land as a real copy even in launch mode, or
