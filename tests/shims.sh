@@ -363,28 +363,24 @@ if command -v cc >/dev/null 2>&1 && [ ! -e "$nocc_bin/cc" ] && [ ! -e "$nocc_bin
         --no-profile --no-path-line --no-shell 2>"$tmp/nocc-err.txt")
     nocc_rc=$?
     # What THIS machine needs, read from the SAME seven-fact answer the child
-    # computes, not from two of them. The old predictor asked only sh_detect_pty
-    # and sh_detect_passwd; the child's bootstrap also weighs /dev/dri,
-    # /dev/input, DISPLAY and WAYLAND_DISPLAY, so a runner that has a pty and a
-    # passwd database but no display took the "needs no shim" branch while the
-    # child correctly named fakexenv/fakedisplay missing, and four clauses
-    # cascaded red (issue #121). The parent now re-reads the real machine and
-    # asks the product's own need rule, so the branch and the child answer the
-    # same question. The forced SH_* values above are cleared first so they
-    # cannot leak into this prediction.
+    # computes, in the child's own environment, not the parent's. The old
+    # predictor asked only sh_detect_pty and sh_detect_passwd; the next one
+    # re-read the real machine in the parent and asked the product's need rule.
+    # That still disagreed on the runner: the parent named antiptrace while the
+    # child named only fakexenv fakedisplay, because detectors can answer
+    # differently under a restricted PATH (no cc for the fallback, no sleep for
+    # the bound, different probe-file dirs). The expectation is now computed by
+    # a probe subprocess with the identical PATH, HOME, EXEC and repo the child
+    # ran with, so the two answer the same question by construction. The forced
+    # SH_* values above never leak in: the probe is a fresh shell.
     #
     # The prediction is the NEED set, not sh_shim_needed_missing: the child runs
     # with a fresh SANDHOME_HOME, so every shim it needs is missing there. Asking
     # the presence-filtered reader would subtract the parent's already-built .so
     # files and predict "nothing missing" while the child names them all.
-    SH_PTY=$(sh_detect_pty); SH_PASSWD=$(sh_detect_passwd); SH_PTRACE=$(sh_detect_ptrace)
-    SH_DRM=$(sh_detect_dri); SH_INPUT=$(sh_detect_input)
-    SH_XENV=$(sh_detect_xenv); SH_DISPLAY=$(sh_detect_display)
-    nocc_want=''
-    for nocc_s in $(sh_shim_names); do
-        [ "$(sh_shim_need "$nocc_s")" = yes ] && nocc_want="$nocc_want $nocc_s"
-    done
-    nocc_want="${nocc_want# }"
+    nocc_want=$(PATH="$nocc_bin" SANDHOME_HOME="$nocc_home" SANDHOME_EXEC="$tmp/nocc-exec" \
+        SANDHOME_REPO_DIR="$ROOT" SH_HOME="$nocc_home" ROOT="$ROOT" \
+        sh -c '. "$ROOT/lib/common.sh"; . "$ROOT/lib/detect.sh"; . "$ROOT/lib/shim.sh"; sh_detect_all >/dev/null 2>&1; w=""; for s in $(sh_shim_names); do [ "$(sh_shim_need "$s")" = yes ] && w="$w $s"; done; printf "%s" "${w# }"' 2>/dev/null)
     nocc_needs_shims=no
     [ -n "$nocc_want" ] && nocc_needs_shims=yes
     if [ "$nocc_needs_shims" = yes ]; then
