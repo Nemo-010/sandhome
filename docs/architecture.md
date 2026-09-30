@@ -314,7 +314,8 @@ is correct and hostile: every command carries the incantation, and one command
 that forgets it looks like a failed setup.
 
 `sh_global_install` in `lib/env.sh` removes the incantation by putting the
-environment into a directory the shell already searches. Two cases, in order:
+environment into **every** qualifying directory the shell already searches.
+Each `PATH` entry is classified in two cases, tried in order:
 
 1. **A `PATH` entry that already runs binaries and is writable.** One dispatcher
    is written there, keyed on `$0`: `${0##*/}` names the tool, the dispatcher
@@ -327,19 +328,42 @@ environment into a directory the shell already searches. Two cases, in order:
    first and the exec policy applies to the resolved root, so the dispatcher
    runs. This is the userspace route through a `noexec` home.
 
-The candidate scan is two passes so case 1 wins: a directory that runs binaries
-is never replaced by a symlink. `sh_global_remove` deletes only what the install
-recorded writing, and never a file it did not create. `bootstrap.sh` installs
+Case 1 is tried first per entry so a working directory is never replaced by a
+symlink. Every qualifying entry gets the hook, capped at `SH_GI_MAX_DIRS` (6),
+because different shells inherit different `PATH`s: a hook in one directory
+only is invisible to a shell that does not carry it. The plan is the current
+candidates plus every recorded directory, so a refresh repairs an entry that
+dropped off this shell's `PATH` instead of forgetting it, and a recorded
+directory is looked up by its path, never by its slot (the record order follows
+`PATH` order, which moves).
+
+The install verifies rather than asserts: after the commit, every recorded
+directory is run under `env -i` with a bounded timeout, and the dispatcher has
+to print `sandhome-dispatch loaded=yes exec=<root>` back. `sh_global_report`
+reads that probe, so `sandhome report` prints `global=stale:<dir>` when a
+recorded hook no longer answers a fresh shell, and `sandhome doctor` fails on
+it and names `sandhome global` as the repair. `global=none` still passes: a
+host's layout is not an install error, and a wedge is bounded rather than a
+hang. `sh_global_remove` restores what install found, per directory: an empty
+directory comes back as a directory, a dangling symlink comes back as that
+symlink, an absent entry stays absent, and only symlinks still pointing into
+`$SH_EXEC` are removed. A host file that already answers a view name is never
+shadowed; it is counted as a clash and named by `global --status`.
+
+`bootstrap.sh` installs
 the hook after the environment is written; `SANDHOME_GLOBAL=0` (or `--no-global`)
 keeps it out of a directory the caller does not own, which is what the test
 suite does. The switch lives in `sh_global_install` itself, not only in the
 bootstrap, because `sandhome install` and `sandhome repair` call it directly:
 until it did, a suite that exported the switch still had the hook written into
-the machine's real `PATH` by those two commands (issue #127). `sandhome report`
-prints `global=<state>`, and `sandhome global --status` reads the record back.
+the machine's real `PATH` by those two commands (issue #127).
 
 Measured on the sandbox this was built in, where `$HOME` is `/state/home` and
 refuses `execve`: with the hook installed, a fresh `env -i` shell whose `PATH`
 holds only the hook ran a toolchain **and** `sandhome` by name with nothing
 sourced, and the tool's own output proved `env.sh` had been read on the way.
-The case is exercised by `tests/global.sh`.
+A consumer-shaped run (noexec home, two hook directories) then wiped the exec
+root: a fresh shell kept finding `sandhome` through the surviving directory,
+`doctor` failed with the toolchains named, and `sandhome resume` rebuilt the
+views and re-verified the hooks, `doctor_failures=0`. The case is exercised by
+`tests/global.sh`.

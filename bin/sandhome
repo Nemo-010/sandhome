@@ -223,15 +223,19 @@ usage: sandhome COMMAND [args]
   resume                 rebuild the views after a tmpfs restart, then doctor
   env                    print the environment, for `eval "$(sandhome env)"`
   path                   print the exec-view bin directory
-  global [--status|--remove]   install the global hook: a directory already on
-                         PATH that loads the environment for a fresh shell, so
-                         setup is once and no command needs `. env.sh`. --status
-                         names it, --remove takes it away.
+  global [--status|--remove]   install the global hook: every usable
+                         directory on PATH loads the environment for a fresh
+                         shell, so setup is once and no command needs
+                         `. env.sh`. --status reports each entry and a
+                         fresh-shell probe, --remove restores them.
   space [--probe]        where the two roots are, and every candidate tried
   space --largest [N]    the N biggest entries on the exec root (default 10)
   space --reclaim        reclaimable cache bytes without removing anything
   toolchains             name, one-line description, PATH binaries, versions
   install NAME...        adopt or install each toolchain, then write the env
+  install --only NAMES   install exactly these and replace the recorded request
+  install --with NAMES   add to the request and install it (comma list)
+  install --without NAMES  drop from the request; alone, it records only
   install --force NAME   install NAME even when a working copy is on PATH
   install rust --target T   add rust cross targets (comma list, repeatable)
   install qemuuser --extra A  also install guest emulators (comma list)
@@ -347,14 +351,22 @@ HELP
         install|ensure)
             cat <<'HELP'
 usage: sandhome install [--force] [--target T] [--extra LIST] NAME...
+usage: sandhome install --only NAME[,NAME...] [--without NAME...]
 Adopt each toolchain already on PATH, or install it into the home root when
 absent, then rebuild its exec view and write the env. --force installs even
 when a working copy is on PATH. --target T (rust only, repeatable,
 comma-separated) adds cross targets. --extra LIST (qemuuser only,
 comma-separated or repeatable) also installs the named guest emulators, so
 `install qemuuser --extra aarch64` makes `qemu-aarch64` exist; the same
-lever is SANDHOME_QEMUUSER_EXTRA. --dry-run is a bootstrap.sh flag and is
-refused here: an unknown flag aborts before anything is installed.
+lever is SANDHOME_QEMUUSER_EXTRA.
+
+The request flags take the same shape as bootstrap's (issue #129): --only
+NAME[,NAME...] installs exactly those names and REPLACES the recorded
+SANDHOME_WANTED_TOOLCHAINS, --with NAME adds a name to both the request and
+this run, --without NAME takes a name out of both (alone, it changes only
+the recorded request and installs nothing). Together they decide what
+doctor gates on. --dry-run is a bootstrap.sh flag and is refused here: an
+unknown flag aborts before anything is installed.
 HELP
             return 0 ;;
         repair)
@@ -450,12 +462,17 @@ HELP
         global)
             cat <<'HELP'
 usage: sandhome global [--status|--remove]
-Install or refresh the global hook: a directory already on this shell's PATH
-whose contents load the environment, so a fresh shell (login, interactive or
-the non-login shell a tool harness spawns per call) needs to source nothing.
-The bootstrap installs it by default; this command reinstalls it after a view
-moved, prints where it is with --status, and removes it with --remove. When no
-writable PATH entry can host it, entry.sh and `sandhome exec` remain.
+Install or refresh the global hook in EVERY usable directory on this shell's
+PATH: a directory that runs binaries gets the dispatcher written in place, and
+an entry on a root that refuses execve becomes a symlink to a directory under
+the exec root that runs. Different shells inherit different PATHs, so a fresh
+shell (login, interactive, or the non-login shell a tool harness spawns per
+call) finds the hook whichever entry it carries and needs to source nothing.
+Each installed directory is probed from a fresh `env -i` shell before it is
+reported; --status prints every entry with its probe result, its recorded
+original state and any name a host file shadows. --remove restores every entry
+to the state install found. When no writable PATH entry can host it, entry.sh
+and `sandhome exec` remain.
 HELP
             return 0 ;;
         env|path|project|shims|shell|pty|test|selftest|version)
@@ -484,22 +501,7 @@ cmd_global() {
     done
     sh_env_load
     case "$sh_cg_mode" in
-        status)
-            sh_cg_dir=$(sh_global_dir)
-            if [ -z "$sh_cg_dir" ]; then
-                printf 'global=none\n'
-                return 0
-            fi
-            sh_cg_list=''
-            for sh_cg_n in $(sh_global_names); do
-                sh_cg_list="$sh_cg_list $sh_cg_n"
-            done
-            printf 'global=%s\n' "$(sh_global_report)"
-            printf 'global_dir=%s\n' "$sh_cg_dir"
-            printf 'global_link=%s\n' "$(sh_global_read link)"
-            printf 'global_command=%s\n' "$(sh_global_read command)"
-            printf 'global_tools=%s\n' "${sh_cg_list# }"
-            return 0 ;;
+        status) sh_global_status ;;
         remove) sh_global_remove ;;
         *)      sh_global_install ;;
     esac
@@ -642,6 +644,14 @@ cmd_install() {
     # tools/zig.sh). The flag only applies to rust; other toolchains ignore it.
     SH_RUST_TARGETS=''
     sh_c_args=''
+    # The --only/--with/--without shape of bootstrap's request flags (issue
+    # #129): --only replaces the recorded request with exactly its names,
+    # --with adds a name to both the request and this run, --without takes a
+    # name out of both.
+    sh_c_only=''
+    sh_c_only_given=0
+    sh_c_with=''
+    sh_c_without=''
     # `install --force NAME` skips the adopt probe and installs NAME into the
     # toolchain root. It exists because the tool PRINTS it: the promote step
     # warns "run 'sandhome install --force <name>' to place it properly" for a
@@ -699,6 +709,38 @@ cmd_install() {
                     SH_RUST_TARGETS=$sh_c_v
                 fi
                 shift ;;
+            # --only consumes words up to the next flag, the same way the
+            # bootstrap's --only does, so `--only jq ripgrep` and
+            # `--only jq,ripgrep` are one request.
+            --only)
+                sh_c_only_given=1
+                [ "$#" -ge 2 ] || sh_die 'install --only needs at least one toolchain name'
+                shift
+                while [ "$#" -gt 0 ]; do
+                    case "$1" in --*) break ;; esac
+                    sh_c_only="$sh_c_only,$1"
+                    shift
+                done
+                [ -n "$(sh_trim "$sh_c_only")" ] || sh_die 'install --only needs at least one toolchain name'
+                ;;
+            --with)
+                [ "$#" -ge 2 ] || sh_die 'install --with needs a toolchain name'
+                sh_c_with="$sh_c_with,$2"
+                shift 2 ;;
+            --with=*)
+                sh_c_wv=${1#--with=}
+                [ -n "$sh_c_wv" ] || sh_die 'install --with needs a toolchain name'
+                sh_c_with="$sh_c_with,$sh_c_wv"
+                shift ;;
+            --without)
+                [ "$#" -ge 2 ] || sh_die 'install --without needs a toolchain name'
+                sh_c_without="$sh_c_without,$2"
+                shift 2 ;;
+            --without=*)
+                sh_c_wv=${1#--without=}
+                [ -n "$sh_c_wv" ] || sh_die 'install --without needs a toolchain name'
+                sh_c_without="$sh_c_without,$sh_c_wv"
+                shift ;;
             -h|--help) cmd_help install; return 0 ;;
             -*)
                 sh_die "install does not take '$1'; run 'sandhome help install' for the flags it takes"
@@ -718,15 +760,46 @@ cmd_install() {
         esac
         export SH_FORCE_LIST
     fi
-    if [ -z "$(sh_trim "$sh_c_args")" ]; then
-        sh_die 'install needs at least one toolchain name'
+    if [ "$sh_c_only_given" = 1 ] && [ -n "$(sh_trim "$sh_c_args")" ]; then
+        sh_die 'install --only selects the toolchains itself; give the names to --only, not beside it'
+    fi
+    # The install set for this run: --only's names, plus --with, plus any
+    # positional names, minus --without, each once and in the order asked.
+    sh_c_pool="$(sh_split_on ',' "$sh_c_only") $(sh_split_on ',' "$sh_c_with") $sh_c_args"
+    sh_c_drop=$(sh_split_on ',' "$sh_c_without")
+    sh_c_final=''
+    for sh_c_n in $sh_c_pool; do
+        [ -n "$sh_c_n" ] || continue
+        sh_c_in=no
+        for sh_c_d in $sh_c_drop; do
+            [ "$sh_c_d" = "$sh_c_n" ] && { sh_c_in=yes; break; }
+        done
+        [ "$sh_c_in" = yes ] && continue
+        sh_c_in=no
+        for sh_c_f in $sh_c_final; do
+            [ "$sh_c_f" = "$sh_c_n" ] && { sh_c_in=yes; break; }
+        done
+        [ "$sh_c_in" = yes ] && continue
+        sh_c_final="$sh_c_final $sh_c_n"
+    done
+    if [ -z "$(sh_trim "$sh_c_final")" ]; then
+        # `--without` alone is a request UPDATE: it records the drop and
+        # installs nothing, which is the point of taking a name back out of
+        # the gate. Without a --only or a --without, nothing was asked for at
+        # all and that stays an error.
+        if [ "$sh_c_only_given" = 1 ]; then
+            sh_die 'install --only resolved to no toolchain; name at least one'
+        fi
+        if [ -z "$(sh_trim "$sh_c_drop")" ]; then
+            sh_die 'install needs at least one toolchain name'
+        fi
     fi
     # # STOP: A NAME IS CHECKED BEFORE ANY DOWNLOAD, AND A FAILED ENSURE IS COUNTED.
     # `|| true` made `sandhome install nonsense` print "unknown toolchain" and
     # exit 0, so a script could not tell a typo from a success. sh_fail already
     # increments the counter, so an unknown name and a failed install both end
     # the command non-zero through the check at the bottom of this file.
-    for sh_c_n in $sh_c_args; do
+    for sh_c_n in $sh_c_final; do
         if ! sh_toolchain_known "$sh_c_n"; then
             sh_fail "unknown toolchain $sh_c_n; run 'sandhome toolchains' for the list"
         fi
@@ -736,7 +809,7 @@ cmd_install() {
     # recovered by repair): rebuild the decision before any promote, so a
     # missing helper reads as copy mode rather than as a broken view.
     sh_memexec_ensure
-    for sh_c_n in $sh_c_args; do
+    for sh_c_n in $sh_c_final; do
         sh_toolchain_ensure "$sh_c_n" || true
     done
     # # STOP: AN EXPLICIT VIEW MODE REBUILDS THE NAMED VIEWS. `ensure` sees an
@@ -748,7 +821,7 @@ cmd_install() {
     case "${SANDHOME_VIEW_MODE:-}" in
         ''|auto) ;;
         *)
-            for sh_c_n in $sh_c_args; do
+            for sh_c_n in $sh_c_final; do
                 [ -d "$(sh_toolchain_root "$sh_c_n")" ] || continue
                 sh_toolchain_load "$sh_c_n" >/dev/null 2>&1 || continue
                 sh_ci_bins=''
@@ -763,9 +836,22 @@ cmd_install() {
     esac
     # Record what was asked for even when an ensure failed, so doctor can name
     # the unfulfilled request later (issue #57). sh_env_write merges with the
-    # list already in the file when this process holds none.
-    # shellcheck disable=SC2086
-    sh_wanted_merge $sh_c_args
+    # list already in the file when this process holds none; `--only` instead
+    # REPLACES it (the caller restated the request in full), and `--without`
+    # drops names through sh_wanted_drop, which also writes by replacement so
+    # a drop to the empty list is not re-read back out of the file.
+    if [ "$sh_c_only_given" = 1 ]; then
+        SH_WANTED_TOOLCHAINS=$(sh_trim "$sh_c_final")
+        SH_WANTED_REPLACE=1
+        export SH_WANTED_TOOLCHAINS SH_WANTED_REPLACE
+    else
+        # shellcheck disable=SC2086
+        sh_wanted_merge $sh_c_args $(sh_split_on ',' "$sh_c_with")
+        if [ -n "$(sh_trim "$sh_c_drop")" ]; then
+            # shellcheck disable=SC2086
+            sh_wanted_drop $(sh_split_on ',' "$sh_c_without")
+        fi
+    fi
     sh_env_write
     SH_INSTALLED=$INSTALLED
     SH_ADOPTED=$ADOPTED

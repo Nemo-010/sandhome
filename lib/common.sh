@@ -163,6 +163,30 @@ sh_path_where() {
                 "$SH_EXEC_BIN") continue ;;
             esac
         fi
+        # STOP: SANDhome'S OWN HOOK ENTRIES ARE PLUMBING, NEVER A WORKING
+        # COPY. A hook entry for a tool is a symlink to .sandhome-dispatch,
+        # and after a wiped exec root that entry still answers -x, because
+        # the dispatcher file itself survives in a case-1 directory while
+        # its view is gone. So `sh_path_where jq` kept finding the stale
+        # hook, the adopt step took it as the working copy,
+        # sh_adopt_view_skip then dropped the link it was about to write
+        # ("a wrapper already on PATH resolves it"), and resume finished
+        # green with jq absent from the exec view and from every hook: the
+        # fresh-shell witness `jq -n '$ENV.SANDHOME_EXEC'` printed null and
+        # fell through to /usr/bin. The check is per ENTRY and by inode
+        # (-ef), not per directory: a hooked directory may hold real tools
+        # beside its dispatchers, and hiding the whole directory made the
+        # wrapper filter below see "not on PATH" and expose a wrapper the
+        # hook must never expose (a wrapper re-resolving its own name execs
+        # itself forever). Skipping only the entry that IS the dispatcher
+        # lets the lookup fall through to the real binary. Measured on this
+        # tree: post-wipe resume, bin/jq missing before this rule, present
+        # after it, and tests/global.sh's wrapper clause stays green.
+        if [ -e "$sh_pw_dir/.sandhome-dispatch" ] && \
+           [ -e "$sh_pw_dir/$sh_pw_name" ] && \
+           [ "$sh_pw_dir/$sh_pw_name" -ef "$sh_pw_dir/.sandhome-dispatch" ]; then
+            continue
+        fi
         if [ -x "$sh_pw_dir/$sh_pw_name" ] && [ ! -d "$sh_pw_dir/$sh_pw_name" ]; then
             printf '%s' "$sh_pw_dir/$sh_pw_name"
             return 0

@@ -140,8 +140,10 @@ sh bootstrap.sh [options]
 
 | option | meaning |
 | --- | --- |
-| `--toolset NAME` | `minimal`, `cli`, `developer`, `project`, `languages`, `agent`. What each carries is in the table below |
+| `--toolset NAME` | `minimal`, `cli`, `developer`, `project`, `languages`, `agent`, or `none` (no preset at all; pair with `--with`). What each carries is in the table below |
 | `--with LIST` / `--without LIST` | add or drop toolchains by name |
+| `--only LIST` | exactly these toolchains and nothing else: no preset, no auto-detection. Synonym for `--toolset none --with LIST`; space or comma separated |
+| `--detect` | add the project markers even into an explicit request, which otherwise never auto-detects |
 | `--list-toolchains` | print the known names |
 | `--home DIR` / `--exec DIR` | override the roots. An option beats the environment variable of the same name. |
 | `--no-shims` / `--require-shims` | do not build, or refuse without, the shims |
@@ -204,18 +206,29 @@ library. That copy is a **copy, not a symlink**, because the checkout is
 frequently on a root that refuses `execve`: a symlink into it answers
 `command -v sandhome` and then fails with `Permission denied`.
 
-**The global hook is why the file is not sourced by hand.** The bootstrap picks
-a directory that is already on `PATH` and puts one dispatcher in it, keyed on
+**The global hook is why the file is not sourced by hand.** The bootstrap puts
+a dispatcher in **every** `PATH` directory that is writable and runs binaries
+(six at most, and any one of them is enough), keyed on
 `$0`, that sources `env.sh` and `exec`s the real binary from the exec root. A
 new shell, including a non-login shell a harness spawns per tool call, finds
 `sandhome` and every toolchain with nothing in front of the command. When the
 only candidate is on a root that refuses `execve`, the directory is replaced by
 a **symlink into the exec root**: the kernel resolves the link and permits
 `execve` on the resolved root, which is the userspace route through the noexec
-mount. `sandhome report` prints `global=on:<dir>` when it is installed, and
+mount. Installation records each directory, how the dispatcher got there, and
+what was there before, then verifies the result: every recorded directory is
+run through a fresh `env -i` shell that has to print its marker back.
+`sandhome report` prints `global=on:<dir>` when a recorded directory answers
+that shell, `global=stale:<dir>` when one was recorded and no longer does
+(`doctor` fails on it and names the repair), and
 `global=none` when the host had no writable candidate; `sandhome global
---status` names it and `sandhome global --remove` takes it away. Installation is
-once; the hook serves every future shell.
+--status` names every directory and its state,
+`sandhome global` installs or repairs them, and `sandhome global --remove`
+puts each entry back the way install found it: an empty directory comes back
+as a directory, a dangling link as that link, an absent entry stays absent. A
+refresh keeps a recorded directory even when the shell doing the refresh no
+longer carries it on `PATH`. Installation is once; the hook serves every
+future shell.
 
 ```sh
 sandhome global                    # where the hook is, and whether it is stale

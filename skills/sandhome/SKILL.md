@@ -46,7 +46,8 @@ sandhome toolchains                        # what is here, and how it reaches PA
 `sandhome status` is the same readiness on one line (roots, view, toolchains,
 next command), for a harness that wants to check before it works.
 
-The bootstrap installs a **global hook** into a directory already on `PATH`, so
+The bootstrap installs a **global hook** into every `PATH` directory that is
+writable and runs binaries, so
 the next `sandhome doctor` is a fresh shell that needs nothing sourced and no
 `env.sh` in front of it. That is the whole fix for the per-command incantation:
 setup is once, and a command is a command. A tool the hook does not name -- a
@@ -67,7 +68,9 @@ and exits with doctor's code.
 Toolsets: `minimal` (jq), `cli` (+ ripgrep, fd), `developer` (+ python, node;
 the default), `languages` and `agent` (both + rust, go). Add one with
 `--with rust`, drop one with `--without node`; both flags repeat and both take a
-comma list.
+comma list. `--only rust` (space or comma separated) asks for exactly that list
+with no preset and no auto-detection; it is `--toolset none --with rust`, and an
+explicit request never auto-detects unless `--detect` says so.
 
 Exit codes: `0` done, `1` something could not be done, `2` could not run. Use
 `--dry-run` first when unsure: it is a `bootstrap.sh` flag. `sandhome install`
@@ -110,7 +113,7 @@ installed without an error and does not answer is reported as a failure.
 | `collect2: posix_spawnp: Permission denied` linking rust | the sysroot linker is on the noexec home and cannot be exec'd; no `-fuse-ld` value fixes it. `sandhome install --force rust` puts the toolchain on the exec root || `fork/exec ...: permission denied` after a successful `go build` | the build cache was on a noexec root; `sandhome install go` puts `GOCACHE` and `GOBIN` on the exec root, for an adopted go too |
 | `npm i -g` CLI missing or `bad interpreter` | prefix was on the noexec home; `sandhome install node` moves it to the exec root |
 | ANSI codes inside `jq` or `git` output | `fakepty` is on; `SANDHOME_SHIMS=0` |
-| a tool is absent from a fresh shell | the global hook was not installed (`global=none`) and `env.sh` was not read; install it, or source the entry point |
+| a tool is absent from a fresh shell | the global hook was not installed (`global=none`), or a recorded directory no longer answers (`sandhome global --status` shows `state=stale`); run `sandhome global` to install or repair it, or source the entry point |
 | a tool is absent even after `env.sh` was read | it was adopted and could not be linked into the exec view; `sandhome repair <name>` retries the link, and `sandhome install --force <name>` places a copy in the view when the adopted binary cannot be linked at all |
 | `doctor` says `FAIL exec_space=low` or `=critical` | the exec root is draining and a build will fail with `no space left on device`. `sandhome space` names the state, `sandhome space --probe` lists roomier candidates, `sandhome gc` reclaims sandhome's own caches, and re-running setup with `--exec DIR` moves everything to a roomy path |
 

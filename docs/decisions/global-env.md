@@ -36,10 +36,10 @@ find the environment with nothing in front of the command.
 
 ## The decision
 
-Install a **global hook**: a directory already on `PATH` that the shell
-searches for every command, whose contents read the environment and start the
-real tool. `sh_global_install` in `lib/env.sh` picks the directory in two
-passes:
+Install a **global hook**: every directory already on `PATH` that is writable
+and runs binaries, holding one dispatcher that reads the environment and starts
+the real tool. `sh_global_install` in `lib/env.sh` classifies each `PATH`
+entry in two passes:
 
 1. A `PATH` entry that is writable **and** runs binaries. The dispatcher is
    written there in place, so nothing about the host's layout changes.
@@ -48,6 +48,17 @@ passes:
    `$SANDHOME_EXEC/global`.
 
 Case 1 is tried first so a working directory is never replaced by a symlink.
+
+Every qualifying entry is taken, not only the first, up to `SH_GI_MAX_DIRS`
+(6). Different shells inherit different `PATH`s: a harness that rebuilds
+`PATH`, an `env -i` shell with a subset, and a login shell with a wider one do
+not agree on entry zero, so a hook that lives in one directory only is a hook
+some of those shells cannot see. Any one of them being correct is enough, which
+is the redundancy the design is buying. The install plan is the current
+candidates plus every recorded directory: a refresh repairs an entry that
+dropped off this shell's `PATH` instead of forgetting it, and an entry is
+looked up by its path in the record, never by its position, because `PATH`
+order moves between runs.
 
 The dispatcher is one file keyed on `$0`:
 
@@ -67,7 +78,7 @@ does allow `execve`. The noexec home is therefore not a wall; it is a path that
 has to be redirected. This is the same asymmetry exploited by
 [`exec-split.md`](exec-split.md), used in the other direction.
 
-## Failure is not fatal
+## Failure is not fatal, staleness is not
 
 A host may have no writable, exec-capable `PATH` directory. Then the hook is
 not installed, the report prints `global=none`, and the stable fallback is
@@ -76,18 +87,41 @@ succeeds: `sh_global_install` returns 0 when it has nowhere to write, and
 `doctor` does not fail on `global=none`. A host's layout is not an install
 error, and a test suite that runs on such a host must not go red over it.
 
+A recorded directory that stops answering is a different thing, and it is the
+#127 failure returning. The install therefore verifies its own result: after
+the commit, every recorded directory is run under a fresh `env -i` shell with
+a bounded timeout (`SH_PROBE_TIMEOUT_SECS`, so a wedged dispatcher reads as
+not-answering rather than hanging a doctor run), and the dispatcher has to
+print `sandhome-dispatch loaded=yes exec=<root>` back. `sh_global_report` and
+`doctor` read that probe rather than the install's own claim, so:
+
+- `global=on:<dir>`: a recorded directory answered a fresh shell.
+- `global=stale:<dir>`: recorded, and no longer answering. `doctor` fails and
+  its `wanted` text names `sandhome global` as the repair. A partially
+  degraded record (one entry stale, another serving) still reads `on:` from
+  the first directory that answers, because the gate is "can a fresh shell
+  work"; `global --status` names the stale entry and its state per directory.
+- `global=none`: nothing was recorded. It passes.
+
 ## Safety
 
-- `sh_global_remove` deletes only the names and the dispatcher recorded at
-  install time, and only when they are still the files it created. A directory
-  it shares with the host is left otherwise untouched.
-- Case 2 replaces an entry only when it is absent, empty, or already a symlink.
-  A non-empty directory that is not the hook is not overwritten; the scan moves
-  to the next candidate.
-- Installation records the directory, whether it is a symlink, whether the
-  `sandhome` command was copied (it is not copied over a foreign file), and the
-  names. `sandhome global --status` reads the record; `sandhome report` prints
-  the one line.
+- `sh_global_remove` restores what the install recorded finding, per
+  directory: an empty directory comes back as a directory, a dangling symlink
+  comes back as that symlink, an absent entry stays absent. It deletes only
+  names and dispatchers the install created, and only when they are still
+  what it created; a directory it shares with the host is left otherwise
+  untouched. Install may take an entry the host was not using, but it has to
+  put the entry back the way it was.
+- Case 2 replaces an entry only when it is absent, empty, already a symlink,
+  or a dangling link. A non-empty directory that is not the hook is not
+  overwritten; a host file that already answers a view name is never
+  shadowed, it is counted as a clash and named by `global --status`, and the
+  scan keeps the entry it was given.
+- Installation records the directory, whether it is a symlink, what was
+  there before (the original state, so remove can restore it), whether the
+  `sandhome` command was copied (it is not copied over a foreign file), and
+  the names. `sandhome global --status` reads the record back, one `hook=`
+  line per directory with its state; `sandhome report` prints the one line.
 - The hook is skipped entirely by `--no-global` or `SANDHOME_GLOBAL=0`, which
   is what the test suite uses so it never writes into a PATH directory the
   machine owns. The switch is honored in `sh_global_install` itself, not only
@@ -111,3 +145,16 @@ output contained a variable that exists only in `env.sh`, which proves the
 dispatcher read it rather than merely being found. `tests/global.sh` reproduces
 both cases, including the noexec symlink, and asserts the fallback, the
 not-installed `127`, and that a foreign file survives a remove.
+
+A consumer-shaped run of the same thing (two qualifying directories: a
+writable exec-capable one, and an absent entry under the noexec home, so one
+dispatcher is written in place and one is a symlink into the exec root)
+measured, on 20 runs of one command each on this host: hook 49 ms, bare PATH
+58 ms, per-command `. env.sh` 154 ms, so the hook is inside the noise of
+running the tool at all and about three times cheaper than the incantation it
+replaces. Every recorded directory then served a fresh shell on its own, a
+shell with no `PATH` entry in common with the record still found `sandhome`
+through the surviving directory, and after the exec root was deleted,
+`doctor` failed with the three wanted toolchains named, `sandhome resume`
+rebuilt the views, re-verified the hook, and exited `doctor_failures=0`.
+The run is `consumer-proof/run-proof.sh` and its log is kept beside it.

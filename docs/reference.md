@@ -15,15 +15,19 @@ usage: sandhome COMMAND [args]
   resume                 rebuild the views after a tmpfs restart, then doctor
   env                    print the environment, for `eval "$(sandhome env)"`
   path                   print the exec-view bin directory
-  global [--status|--remove]   install the global hook: a directory already on
-                         PATH that loads the environment for a fresh shell, so
-                         setup is once and no command needs `. env.sh`. --status
-                         names it, --remove takes it away.
+  global [--status|--remove]   install the global hook: every usable
+                         directory on PATH loads the environment for a fresh
+                         shell, so setup is once and no command needs
+                         `. env.sh`. --status reports each entry and a
+                         fresh-shell probe, --remove restores them.
   space [--probe]        where the two roots are, and every candidate tried
   space --largest [N]    the N biggest entries on the exec root (default 10)
   space --reclaim        reclaimable cache bytes without removing anything
   toolchains             name, one-line description, PATH binaries, versions
   install NAME...        adopt or install each toolchain, then write the env
+  install --only NAMES   install exactly these and replace the recorded request
+  install --with NAMES   add to the request and install it (comma list)
+  install --without NAMES  drop from the request; alone, it records only
   install --force NAME   install NAME even when a working copy is on PATH
   install rust --target T   add rust cross targets (comma list, repeatable)
   install qemuuser --extra A  also install guest emulators (comma list)
@@ -109,14 +113,21 @@ Environment:
 ```
 usage: sh bootstrap.sh [options]
 
-  --toolset NAME      minimal | cli | developer | project | languages | agent.
-                      Default developer.
+  --toolset NAME      minimal | cli | developer | project | languages | agent,
+                      or none for an empty base. Default developer.
+  --only NAME[,NAME]  exactly these toolchains and nothing else: an empty
+                      base plus the names, no auto-detect, no preset. Takes
+                      several words too (--only jq ripgrep). Same as
+                      --toolset none --with NAME...
   --with NAME         add a toolchain. Repeatable, and also takes a
                       comma-separated list.
   --without NAME      leave a toolchain out. Repeatable, and also takes a
                       comma-separated list.
   --no-detect         do not add toolchains implied by project markers in the
                       working directory (Cargo.toml, go.mod, package.json, ...)
+  --detect            add the implied project markers even into an explicit
+                      --only/--toolset none request, which otherwise never
+                      auto-detects. With a preset toolset this is the default.
   --list-toolchains   print the known names and exit
   --home DIR          persistent data root. Default $XDG_DATA_HOME/sandhome
   --exec DIR          exec-capable root. Default: detected (see sandhome space)
@@ -206,7 +217,7 @@ usage: sh bootstrap.sh [options]
 | `SANDHOME_CRIT_MB` | space.sh sandhome | `unset, and the feature is off until it is set` |
 | `SANDHOME_DOH_CANARY` | fetch.sh | `https://github.com` |
 | `SANDHOME_DOH_URL` | fetch.sh bootstrap.sh sandhome | `unset, and the feature is off until it is set` |
-| `SANDHOME_EXEC` | env.sh report.sh space.sh bootstrap.sh sandhome cmake.sh fd.sh go.sh jq.sh meson.sh node.sh python.sh ripgrep.sh rust.sh zig.sh | `*)` |
+| `SANDHOME_EXEC` | common.sh env.sh report.sh space.sh bootstrap.sh sandhome cmake.sh fd.sh go.sh jq.sh meson.sh node.sh python.sh ripgrep.sh rust.sh zig.sh | `*)` |
 | `SANDHOME_FAKEPTY` | env.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_FAKEPTY_ID` | env.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_FETCH_CHUNK_MB` | fetch.sh | `256` |
@@ -268,7 +279,7 @@ usage: sh bootstrap.sh [options]
 | `SANDHOME_SHFMT_VERSION` | shfmt.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_SHIMS` | env.sh shim.sh sandhome | `unset, and the feature is off until it is set` |
 | `SANDHOME_VIEW_MODE` | env.sh memexec.sh report.sh space.sh bootstrap.sh sandhome | `unset, and the feature is off until it is set` |
-| `SANDHOME_WANTED_TOOLCHAINS` | env.sh report.sh | `*)` |
+| `SANDHOME_WANTED_TOOLCHAINS` | env.sh report.sh sandhome | `*)` |
 | `SANDHOME_WORKSPACE` | space.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_ZIG_INDEX_URL` | sandhome zig.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_ZIG_VERSION` | sandhome zig.sh | `unset, and the feature is off until it is set` |

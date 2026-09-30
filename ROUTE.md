@@ -109,9 +109,9 @@ From nothing but a network (unpinned default):
 curl -fsSL https://raw.githubusercontent.com/talaria0101/sandhome/main/bootstrap.sh | sh -s -- --toolset developer
 ```
 
-That is the whole setup. The bootstrap installs a **global hook**: a directory
-that is already on this shell's `PATH` and whose contents load the environment.
-The next command starts a fresh shell and `sandhome` is simply there. You do not
+That is the whole setup. The bootstrap installs a **global hook** into every
+`PATH` directory that is writable and runs binaries, so the next command starts
+a fresh shell and `sandhome` is simply there. You do not
 source `env.sh`, and you do not put anything in front of each command.
 
 ```sh
@@ -169,7 +169,11 @@ space.
 Toolsets: `minimal` (jq), `cli` (plus ripgrep and fd), `developer` (plus
 python and node, the default), `languages` and `agent` (both plus rust and
 go). Add one with `--with rust`, drop one with `--without node`. Both flags
-repeat and both take a comma list. Exit `0` done, `1` something asked for
+repeat and both take a comma list. Ask for exactly a list, with no preset and
+no auto-detection, with `--only rust` (space or comma separated: `--only jq
+ripgrep`); it is the same request as `--toolset none --with rust`. An explicit
+request never auto-detects project markers; `--detect` opts back in. Exit
+`0` done, `1` something asked for
 could not be done, `2` could not run at all. Every flag, variable and
 command is specified in `docs/reference.md`, which is generated from the
 code, so it overrules any other page that disagrees with it.
@@ -221,6 +225,7 @@ More than one row can apply and then both are read.
 | `doctor` reports `FAIL exec_space=low` or `=critical` | the exec root is draining and the next build will fail with `no space left on device`. `sandhome space` names the state and the numbers, `sandhome space --probe` lists roomier candidates, `sandhome gc` reclaims sandhome's own caches, and re-running the first command with `--exec DIR` moves everything |
 | `doctor` reports `FAIL exec_link_<tool>=broken` | a link in the exec view is not executable, or points at itself; `sandhome repair <tool>` rebuilds it and downloads nothing. A tool that was adopted rather than installed is the usual cause, and `install` is the command that adopts, so it is not the one to reach for first |
 | a tool is on PATH but a shell that inherited nothing cannot find it | it was adopted and could not be linked into the exec view; `sandhome repair <tool>` retries the link and `sandhome install --force <tool>` puts a copy there |
+| `sandhome global --status` shows `state=stale`, or a fresh shell does not find `sandhome` | a recorded hook directory no longer answers a fresh shell; `sandhome global` repairs every recorded directory. When the report says `global=none` the host had no usable directory, and the entry point beside the home is the way in: `. "${XDG_DATA_HOME:-$HOME/.local/share}/sandhome/entry.sh"` |
 | `doctor` reports a `FAIL <VAR>=unset` for `GOBIN`, `GOCACHE`, `CARGO_INSTALL_ROOT` or `NPM_CONFIG_PREFIX` | that toolchain was adopted, so its fragment did not carry the exec-root paths; `sandhome install --force <tool>` writes a fragment that does |
 | the exec root was cleared by a restart (tmpfs) and `sandhome` is gone | run `sandhome resume`: it re-plans the roots, rebuilds every recorded view without fetching, then runs `doctor` and exits with its code. Only when `env.sh` itself is gone, re-run step 2 instead |
 | the detected exec root is too small to hold the toolset, or the setup names `--exec` with no roomier candidate to point at | `sandhome space --probe` lists every candidate with free space; `sandhome space` names the ceiling (`max_exec_free_mb`, `exec_ceiling`). The plan picks the roomiest working candidate, and the choice is then stable; `--exec DIR` moves it deliberately. A small ceiling restricts the *view*, not the toolchain: payloads live on the home, so installs that fit proceed and ones that cannot name their measured need against the measured free space. `gc` reclaims caches only, not views (`docs/guide.md` sections 1 and 7) |
@@ -254,12 +259,16 @@ there; for anything else build under `$SANDHOME_EXEC` or copy the artifact
 there before running it. No wrapper or launcher lives in the work tree.
 
 The environment file is the single source of truth, and the bootstrap installs
-a **global hook** so no shell has to read it by hand: a directory already on
-this shell's `PATH` whose entries load `env.sh` and exec the real tool. On a
-host whose home refuses `execve` the hook directory is a symlink into the exec
-root, which runs, so the noexec mount is not a wall. `sandhome report` prints
-`global=on:<dir>` when it is installed and `global=none` when the host had no
-writable candidate; `sandhome global --status` names it.
+a **global hook** so no shell has to read it by hand: every directory already
+on this shell's `PATH` that is writable and runs binaries gets a dispatcher
+which loads `env.sh` and execs the real tool, so any one of them is enough.
+On a host whose home refuses `execve` the hook directory is a symlink into the
+exec root, which runs, so the noexec mount is not a wall. `sandhome report`
+prints `global=on:<dir>` when a recorded directory answers a fresh `env -i`
+shell, `global=stale:<dir>` when one was recorded and no longer does, and
+`global=none` when the host had no writable candidate; `sandhome global
+--status` names every directory and its state, and `sandhome global` repairs
+them. `sandhome global --remove` puts each entry back the way install found it.
 
 Sourcing is therefore the **fallback**, not the setup step. The two forms below
 are for a host that printed `global=none`, and for a shell that wants the

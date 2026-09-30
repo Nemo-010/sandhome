@@ -793,4 +793,148 @@ else
     t_skip 'no installed home to check flag refusal against'
 fi
 
+# ------------------------------------------- explicit-only requests (#129) --
+# `--toolset none` and `--only NAME` ask for exactly what was typed, and an
+# explicit request is never extended by project markers (auto-detect stays
+# opt-in through `--detect`).
+#
+# The failing-before controls, captured on the pre-#129 tree in this checkout:
+#   sh bootstrap.sh --toolset none --dry-run
+#     -> bootstrap: [-] unknown toolset none   (rc=2)
+#   sh bootstrap.sh --only rust --dry-run
+#     -> usage: sh bootstrap.sh [options] ...  (rc=2)
+# Both refusals must be gone. The unknown-toolset refusal for a name that is
+# not a toolset stays, and so do the guardrails around a malformed --only.
+t129_proj=$work/t129-proj
+mkdir -p "$t129_proj" 2>/dev/null
+printf '[package]\nname = "x"\n' > "$t129_proj/Cargo.toml"
+printf '{"name":"x"}\n' > "$t129_proj/package.json"
+t129_home=$work/t129-home
+t129_exec=$work/t129-exec
+
+# An empty base: rc 0, `requested=` with nothing in it, and no marker folded
+# in even though the directory carries Cargo.toml and package.json.
+t129_out=$(cd "$t129_proj" && SANDHOME_HOME="$t129_home" SANDHOME_EXEC="$t129_exec" \
+    sh "$ROOT/bootstrap.sh" --toolset none --no-profile --no-path-line --no-shell --no-skills --dry-run 2>&1)
+t_is "$?" 0 '--toolset none exits 0 (#129)'
+case "$t129_out" in
+    *'unknown toolset'*) t_ok 1 '--toolset none is a real toolset, not an error (#129)' ;;
+    *)                   t_ok 0 '--toolset none is a real toolset, not an error (#129)' ;;
+esac
+t_is "$(printf '%s\n' "$t129_out" | sed -n 's/^requested=//p')" '' \
+     '--toolset none requests nothing, markers included (#129)'
+case "$t129_out" in
+    *'detected a project marker'*) t_ok 1 '--toolset none does not auto-detect (#129)' ;;
+    *)                            t_ok 0 '--toolset none does not auto-detect (#129)' ;;
+esac
+
+# --only names exactly the request: requested is the names and nothing else.
+t129_out=$(cd "$t129_proj" && SANDHOME_HOME="$t129_home" SANDHOME_EXEC="$t129_exec" \
+    sh "$ROOT/bootstrap.sh" --only rust --no-profile --no-path-line --no-shell --no-skills --dry-run 2>&1)
+t_is "$?" 0 '--only rust exits 0 (#129)'
+t_is "$(printf '%s\n' "$t129_out" | sed -n 's/^requested=//p')" 'rust' \
+     '--only rust requests exactly rust, in a tree with markers (#129)'
+case "$t129_out" in
+    *'detected a project marker'*) t_ok 1 '--only rust is not extended by auto-detect (#129)' ;;
+    *)                            t_ok 0 '--only rust is not extended by auto-detect (#129)' ;;
+esac
+
+# The documented synonym: --toolset none --with NAME is the same request.
+t129_out=$(cd "$t129_proj" && SANDHOME_HOME="$t129_home" SANDHOME_EXEC="$t129_exec" \
+    sh "$ROOT/bootstrap.sh" --toolset none --with rust --no-profile --no-path-line --no-shell --no-skills --dry-run 2>&1)
+t_is "$?" 0 '--toolset none --with rust exits 0 (#129)'
+t_is "$(printf '%s\n' "$t129_out" | sed -n 's/^requested=//p')" 'rust' \
+     '--toolset none --with rust requests exactly rust (#129)'
+
+# --detect is the opt-in half: markers fold back into an explicit request.
+t129_out=$(cd "$t129_proj" && SANDHOME_HOME="$t129_home" SANDHOME_EXEC="$t129_exec" \
+    sh "$ROOT/bootstrap.sh" --only rust --detect --no-profile --no-path-line --no-shell --no-skills --dry-run 2>&1)
+t_is "$?" 0 '--only rust --detect exits 0 (#129)'
+t_contains "$t129_out" 'detected a project marker for node' '--detect folds a marker into an explicit request (#129)'
+t_contains "$t129_out" 'requested=rust node' '--detect adds the marker beside the names given (#129)'
+
+# Both spellings of the name list: comma and space separated.
+t129_out=$(SANDHOME_HOME="$t129_home" SANDHOME_EXEC="$t129_exec" \
+    sh "$ROOT/bootstrap.sh" --toolset none --only jq,ripgrep --no-profile --no-path-line --no-shell --no-skills --dry-run 2>&1)
+t_is "$(printf '%s\n' "$t129_out" | sed -n 's/^requested=//p')" 'jq ripgrep' \
+     '--only takes a comma list (#129)'
+t129_out=$(SANDHOME_HOME="$t129_home" SANDHOME_EXEC="$t129_exec" \
+    sh "$ROOT/bootstrap.sh" --toolset none --only jq ripgrep --no-profile --no-path-line --no-shell --no-skills --dry-run 2>&1)
+t_is "$(printf '%s\n' "$t129_out" | sed -n 's/^requested=//p')" 'jq ripgrep' \
+     '--only takes several words up to the next flag (#129)'
+
+# The guardrails: an unknown name, a conflicting --toolset, an empty --only,
+# and an unknown toolset all refuse with rc=2 before anything is written.
+t129_out=$(SANDHOME_HOME="$t129_home" SANDHOME_EXEC="$t129_exec" \
+    sh "$ROOT/bootstrap.sh" --only nope --dry-run </dev/null 2>&1)
+t_is "$?" 2 'an unknown --only name is refused with rc=2 (#129)'
+t_contains "$t129_out" 'unknown toolchain nope in --only' 'the unknown --only name is named (#129)'
+t129_out=$(SANDHOME_HOME="$t129_home" SANDHOME_EXEC="$t129_exec" \
+    sh "$ROOT/bootstrap.sh" --toolset cli --only jq --dry-run </dev/null 2>&1)
+t_is "$?" 2 '--only beside a non-none --toolset is refused with rc=2 (#129)'
+t_contains "$t129_out" 'cannot be combined with --toolset cli' 'the conflicting flags are named (#129)'
+t129_out=$(SANDHOME_HOME="$t129_home" SANDHOME_EXEC="$t129_exec" \
+    sh "$ROOT/bootstrap.sh" --only --dry-run </dev/null 2>&1)
+t_is "$?" 2 '--only with no names is refused with rc=2 (#129)'
+t129_out=$(SANDHOME_HOME="$t129_home" SANDHOME_EXEC="$t129_exec" \
+    sh "$ROOT/bootstrap.sh" --toolset nosuchset --dry-run </dev/null 2>&1)
+t_is "$?" 2 'an unknown toolset is still refused with rc=2 (#129)'
+
+# A REAL run (jq is on this host's PATH, so it adopts: no download) records
+# exactly the request, and doctor checks exactly it. Both roots are handed
+# over explicitly and the PATH is the plain system one, so the record cannot
+# pick up a toolchain from this machine by accident.
+t129_rfak=$work/t129-rhome
+t129_rhome=$t129_rfak/.local/share/sandhome
+t129_rexec=$work/t129-rexec
+mkdir -p "$t129_rfak" 2>/dev/null
+t129_out=$(env -i PATH=/usr/bin:/bin HOME="$t129_rfak" \
+    SANDHOME_HOME="$t129_rhome" SANDHOME_EXEC="$t129_rexec" \
+    sh "$ROOT/bootstrap.sh" --only jq --no-profile --no-path-line --no-shell --no-shims --no-skills </dev/null 2>&1)
+t_is "$?" 0 'a real --only jq run exits 0 (#129)'
+t_is "$(grep -c '^SANDHOME_WANTED_TOOLCHAINS=' "$t129_rhome/env.sh" 2>/dev/null)" '1' \
+     'the run records exactly one wanted list (#129)'
+t129_wanted=$(sed -n 's/^SANDHOME_WANTED_TOOLCHAINS=//p' "$t129_rhome/env.sh" | tr -d "\"'")
+t_is "$t129_wanted" 'jq' 'the recorded request is exactly jq (#129)'
+t129_doc=$(env -i PATH=/usr/bin:/bin HOME="$t129_rfak" \
+    SANDHOME_HOME="$t129_rhome" SANDHOME_EXEC="$t129_rexec" \
+    sh "$ROOT/bin/sandhome" doctor </dev/null 2>&1)
+case "$t129_doc" in
+    *'toolchain_jq'*) t_ok 0 'doctor checks the toolchain the request named (#129)' ;;
+    *)                t_ok 1 'doctor checks the toolchain the request named (#129)' ;;
+esac
+case "$t129_doc" in
+    *'toolchain_rust'*|*'toolchain_node'*|*'toolchain_go'*|*'toolchain_python'*)
+        t_ok 1 'doctor checks nothing the request did not name (#129)' ;;
+    *)
+        t_ok 0 'doctor checks nothing the request did not name (#129)' ;;
+esac
+
+# install takes the same shape: --without takes a name back OUT of the gate
+# (and can empty it, which the merge path could not do), --with merges one in,
+# and --only beside a positional name is an ambiguous request refused before
+# anything downloads.
+t129_out=$(env -i PATH=/usr/bin:/bin HOME="$t129_rfak" \
+    SANDHOME_HOME="$t129_rhome" SANDHOME_EXEC="$t129_rexec" \
+    sh "$ROOT/bin/sandhome" install --without jq </dev/null 2>&1)
+t_is "$?" 0 'install --without exits 0 (#129)'
+t_is "$(grep -c '^SANDHOME_WANTED_TOOLCHAINS=' "$t129_rhome/env.sh" 2>/dev/null)" '0' \
+     'a drop to empty erases the recorded list (#129)'
+t129_out=$(env -i PATH=/usr/bin:/bin HOME="$t129_rfak" \
+    SANDHOME_HOME="$t129_rhome" SANDHOME_EXEC="$t129_rexec" \
+    sh "$ROOT/bin/sandhome" install --with jq </dev/null 2>&1)
+t_is "$?" 0 'install --with exits 0 (#129)'
+t129_wanted=$(sed -n 's/^SANDHOME_WANTED_TOOLCHAINS=//p' "$t129_rhome/env.sh" | tr -d "\"'")
+t_is "$t129_wanted" 'jq' 'install --with merges the name into the request (#129)'
+t129_out=$(env -i PATH=/usr/bin:/bin HOME="$t129_rfak" \
+    SANDHOME_HOME="$t129_rhome" SANDHOME_EXEC="$t129_rexec" \
+    sh "$ROOT/bin/sandhome" install jq --only fd </dev/null 2>&1)
+t_is "$?" 2 '--only beside a positional name is refused before any download (#129)'
+t_contains "$t129_out" 'give the names to --only' 'the --only/positional clash is named (#129)'
+t129_out=$(env -i PATH=/usr/bin:/bin HOME="$t129_rfak" \
+    SANDHOME_HOME="$t129_rhome" SANDHOME_EXEC="$t129_rexec" \
+    sh "$ROOT/bin/sandhome" install --only nope </dev/null 2>&1)
+t_is "$?" 1 'install --only with an unknown name exits non-zero (#129)'
+t_contains "$t129_out" 'unknown toolchain nope' 'install --only names the unknown toolchain (#129)'
+
 t_end

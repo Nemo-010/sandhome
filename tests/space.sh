@@ -144,7 +144,16 @@ fi
 small_dir=$tmp/too-small-cand
 mkdir -p "$small_dir" 2>/dev/null
 if sh_dir_writable "$small_dir" && sh_exec_probe "$small_dir" 2>/dev/null; then
-    small_report=$(SANDHOME_MIN_EXEC_MB=999999999 sh_space_probe_report 2>/dev/null)
+    # THE FIXTURE MUST BE A CANDIDATE, NOT MERELY A WORKING DIRECTORY. The
+    # verdict exists only for a row the probe reports, and on a host where
+    # every ambient candidate is absent or refuses execve (noexec /tmp and
+    # /dev/shm, this tree's own subject) the clause had no row to mark
+    # too-small and failed on both main and any branch: measured here, 139
+    # run / 1 failed on a virgin tree, green only after an earlier test's
+    # create-plan happened to leave /workspace/.sandhome/exec behind.
+    # Naming the fixture SANDHOME_EXEC puts a known-working row on the list,
+    # so the clause measures the verdict and not the host's mount layout.
+    small_report=$(SANDHOME_EXEC="$small_dir" SANDHOME_MIN_EXEC_MB=999999999 sh_space_probe_report 2>/dev/null)
     case "$small_report" in
         *'verdict=too-small'*) t_ok 0 'a working candidate under the floor is too-small' ;;
         *) t_ok 1 "a working candidate under the floor is too-small (got: $small_report)" ;;

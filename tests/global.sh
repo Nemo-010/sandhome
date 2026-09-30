@@ -155,7 +155,9 @@ if [ -n "$gh_noexec" ]; then
                 sh -c 'cargo sym' </dev/null 2>&1)
     t_is "$gh_nl_out" 'loaded|sym' 'a fresh shell runs a tool through the noexec-home symlink'
     ( gh_env; sh_global_remove >/dev/null 2>&1 )
-    t_is "$([ -e "$gh_link" ] && printf yes || printf no)" 'no' 'remove takes the symlink away'
+    t_is "$([ -L "$gh_link" ] && printf yes || printf no)" 'no' 'remove takes the symlink away'
+    t_is "$([ -d "$gh_link" ] && printf yes || printf no)" 'yes' \
+         'remove restores the empty directory the install replaced'
     t_is "$([ -d "$gh_exec/global" ] && printf yes || printf no)" 'no' 'remove takes the exec-root target away'
     rmdir "$gh_link_parent" 2>/dev/null || true
 else
@@ -213,5 +215,152 @@ case "$gh_dry" in
     *'would install the global hook'*) t_ok 1 'SANDHOME_GLOBAL=0 keeps the bootstrap from installing the hook' ;;
     *) t_ok 0 'SANDHOME_GLOBAL=0 keeps the bootstrap from installing the hook' ;;
 esac
+
+# ------------------------------------------------------- every PATH entry --
+# The hook goes into EVERY qualifying entry, not only the first. Different
+# shells inherit different PATHs (a harness that rebuilds PATH, `env -i` with a
+# subset), and a hook only in the first-choice directory is invisible to a
+# shell that does not carry it. Entry one runs binaries (written in place),
+# entry two is absent with a writable parent (a symlink into the exec root).
+gh_md1=$work/md-bin
+gh_md2=$work/md-parent/md
+mkdir -p "$gh_md1" "$work/md-parent" 2>/dev/null
+( gh_env
+  PATH="$gh_bin:$gh_md1:$gh_md2:/usr/bin:/bin"; export PATH
+  sh_global_install >/dev/null 2>&1 )
+gh_md_dirs=$(gh_env; sh_global_dirs)
+t_is "$(printf '%s\n' "$gh_md_dirs" | grep -c .)" '2' \
+     'the hook is installed into every qualifying PATH entry, not only the first'
+t_is "$(env -i HOME="$work/fake" PATH="$gh_md1:/usr/bin:/bin" \
+       sh -c 'cargo one' </dev/null 2>&1)" 'loaded|one' \
+     'a fresh shell through the in-place entry runs with the environment'
+t_is "$(env -i HOME="$work/fake" PATH="$gh_md2:/usr/bin:/bin" \
+       sh -c 'cargo two' </dev/null 2>&1)" 'loaded|two' \
+     'a fresh shell through the symlinked entry runs with the environment'
+gh_md_status=$(gh_env; sh_global_status)
+t_contains "$gh_md_status" 'global_dirs=2' 'the status counts both entries'
+t_contains "$gh_md_status" 'global_ok=2' 'both entries answer the fresh-shell probe'
+t_is "$(printf '%s\n' "$gh_md_status" | grep -c '^hook=')" '2' \
+     'the status reports one line per hooked directory'
+
+# A refresh never drops a recorded directory just because THIS shell's PATH
+# did not carry it: recorded entries are re-planned and repaired in place, so
+# a shell with a narrower PATH cannot take the hook away from the others.
+( gh_env
+  PATH="$gh_bin:$gh_md2:/usr/bin:/bin"; export PATH
+  sh_global_install >/dev/null 2>&1 )
+gh_md_dirs=$(gh_env; sh_global_dirs)
+case "$gh_md_dirs" in
+    *"$gh_md1"*) t_ok 0 'a refresh keeps a recorded directory that dropped off PATH' ;;
+    *)           t_ok 1 'a refresh keeps a recorded directory that dropped off PATH' ;;
+esac
+t_is "$(gh_env; sh_global_status | sed -n 's/^global_dirs=//p')" '2' \
+     'a refresh leaves both directories recorded'
+t_is "$(env -i HOME="$work/fake" PATH="$gh_md1:/usr/bin:/bin" \
+       sh -c 'cargo kept' </dev/null 2>&1)" 'loaded|kept' \
+     'the kept directory still serves a fresh shell'
+# The refresh replans in PATH order, so the FIRST recorded directory is read
+# from the record rather than assumed to be the first one installed.
+gh_first=$(gh_env; sh_global_dir)
+
+# ------------------------------------------------- the report probes -------
+# The report and the gate do not repeat what the install claimed: they run the
+# dispatcher from a fresh `env -i` shell and read back its marker. Take the
+# environment file away and every recorded entry stops answering, so the
+# report reads `stale:` and doctor FAILS on it; put the file back and both
+# turn on again. (Before this gate, doctor had no global check at all: a
+# recorded hook that no longer answered a fresh shell stayed green.)
+mv "$gh_home/env.sh" "$gh_home/env.sh.bak" 2>/dev/null
+t_is "$(gh_env; sh_global_report)" "stale:$gh_first" \
+     'a recorded hook that no longer answers reads stale, not on'
+gh_doc=$(SANDHOME_HOME="$gh_home" SANDHOME_EXEC="$gh_exec" \
+         PATH="$gh_bin:/usr/bin:/bin" sh "$ROOT/bin/sandhome" doctor </dev/null 2>&1)
+t_contains "$gh_doc" 'FAIL global_hook=' 'doctor fails on a recorded hook that no longer answers a fresh shell'
+mv "$gh_home/env.sh.bak" "$gh_home/env.sh" 2>/dev/null
+t_is "$(gh_env; sh_global_report)" "on:$gh_first" \
+     'the report turns on again once the environment answers'
+gh_doc=$(SANDHOME_HOME="$gh_home" SANDHOME_EXEC="$gh_exec" \
+         PATH="$gh_bin:/usr/bin:/bin" sh "$ROOT/bin/sandhome" doctor </dev/null 2>&1)
+t_contains "$gh_doc" 'global_hook=on:' 'doctor reads the restored hook as on'
+
+# A wedged dispatcher cannot hang a report or a doctor run: the probe is
+# bounded (SH_PROBE_TIMEOUT_SECS) and a probe that does not answer counts as
+# not answering, not as a stuck suite.
+cp -f "$gh_exec/global/.sandhome-dispatch" "$gh_exec/global/.sandhome-dispatch.bak" 2>/dev/null
+cp -f "$gh_md1/.sandhome-dispatch" "$gh_md1/.sandhome-dispatch.bak" 2>/dev/null
+printf '#!/bin/sh\nwhile :; do :; done\n' > "$gh_exec/global/.sandhome-dispatch"
+printf '#!/bin/sh\nwhile :; do :; done\n' > "$gh_md1/.sandhome-dispatch"
+chmod 0755 "$gh_exec/global/.sandhome-dispatch" "$gh_md1/.sandhome-dispatch" 2>/dev/null
+gh_t0=$(date +%s)
+gh_wedge=$(gh_env; SH_PROBE_TIMEOUT_SECS=1; export SH_PROBE_TIMEOUT_SECS; sh_global_report)
+gh_t1=$(date +%s)
+mv -f "$gh_exec/global/.sandhome-dispatch.bak" "$gh_exec/global/.sandhome-dispatch" 2>/dev/null
+mv -f "$gh_md1/.sandhome-dispatch.bak" "$gh_md1/.sandhome-dispatch" 2>/dev/null
+case "$gh_wedge" in
+    stale:*) t_ok 0 'a dispatcher that never answers counts as not answering' ;;
+    *)       t_ok 1 "a dispatcher that never answers counts as not answering (got $gh_wedge)" ;;
+esac
+if [ $((gh_t1 - gh_t0)) -le 4 ]; then
+    t_ok 0 'the probe is bounded, so a wedged hook cannot hang the report'
+else
+    t_ok 1 "the probe is bounded (took $((gh_t1 - gh_t0))s)"
+fi
+
+# remove clears a multi-directory record and every entry it touched.
+( gh_env; sh_global_remove >/dev/null 2>&1 )
+t_is "$(gh_env; sh_global_report)" 'none' 'remove clears a multi-directory record'
+t_is "$([ -e "$gh_md1/.sandhome-dispatch" ] && printf yes || printf no)" 'no' \
+     'remove takes the dispatcher out of the in-place entry'
+t_is "$([ -e "$gh_md2" ] && printf yes || printf no)" 'no' \
+     'remove restores an absent symlinked entry to absent'
+
+# ----------------------------------------------- the original state -------
+# Remove restores what install found, including a dangling link that was
+# there before: install may take an entry the host is not using, but it must
+# put the entry back the way it was.
+gh_dl_parent=$work/dl-parent
+gh_dl=$gh_dl_parent/bin
+mkdir -p "$gh_dl_parent" 2>/dev/null
+ln -sfn "$gh_dl_parent/nowhere" "$gh_dl" 2>/dev/null
+( gh_env
+  PATH="$gh_bin:$gh_dl:/usr/bin:/bin"; export PATH
+  sh_global_install >/dev/null 2>&1 )
+t_is "$([ -L "$gh_dl" ] && readlink "$gh_dl")" "$gh_exec/global" \
+     'a dangling PATH entry is replaced by the hook link'
+( gh_env; sh_global_remove >/dev/null 2>&1 )
+t_is "$([ -L "$gh_dl" ] && readlink "$gh_dl")" "$gh_dl_parent/nowhere" \
+     'remove restores the dangling link that was there'
+
+# ------------------------------------------------------------ the clash ---
+# A host file that already answers a view name is left in place and NAMED:
+# the hook never shadows it, and the status says why fresh shells see the
+# host copy instead of the tool.
+printf '#!/bin/sh\nprintf "host-cargo|%%s\\n" "$1"\n' > "$gh_direct/cargo"
+chmod 0755 "$gh_direct/cargo" 2>/dev/null
+( gh_env
+  PATH="$gh_bin:$gh_direct:/usr/bin:/bin"; export PATH
+  sh_global_install >/dev/null 2>&1 )
+t_is "$(env -i HOME="$work/fake" PATH="$gh_direct:/usr/bin:/bin" \
+       sh -c 'cargo shadow' </dev/null 2>&1)" 'host-cargo|shadow' \
+     'a host file keeps answering the name in a shared directory'
+t_is "$(gh_env; sh_global_clashes)" 'cargo' 'the shadowed name is recorded as a clash'
+t_contains "$(gh_env; sh_global_status)" 'global_clashes=cargo' \
+           'the status names the clash'
+rm -f "$gh_direct/cargo" 2>/dev/null
+( gh_env; sh_global_remove >/dev/null 2>&1 )
+
+# --------------------------------------------- install honours the switch ---
+# `sandhome install` calls sh_global_install directly, so the switch has to
+# hold on that path too (the v1 defect the direct clause above guards for the
+# library; this one runs the real command). jq adopts from PATH, nothing
+# downloads, and no record may appear.
+gh_ihome=$work/ihome
+gh_iexec=$work/iexec
+mkdir -p "$gh_ihome" 2>/dev/null
+env -i PATH=/usr/bin:/bin HOME="$work/fake" \
+    SANDHOME_HOME="$gh_ihome" SANDHOME_EXEC="$gh_iexec" SANDHOME_GLOBAL=0 \
+    sh "$ROOT/bin/sandhome" install --only jq </dev/null >/dev/null 2>&1
+t_is "$([ -d "$gh_ihome/global" ] && printf yes || printf no)" 'no' \
+     'SANDHOME_GLOBAL=0 keeps `install` from writing the hook'
 
 t_end

@@ -35,7 +35,12 @@ tc_clang_probe() {
 }
 
 tc_clang_adopted() {
-    sh_ca_which=$(command -v clang 2>/dev/null)
+    # sh_path_where, not command -v: the exec view and the hook dispatchers
+    # are on PATH by the time an install runs, so command -v answers with
+    # sandhome's own plumbing and the promote step links that onto itself
+    # (issue #43; the stale-hook variant is why sh_path_where also skips a
+    # hook entry that IS the dispatcher).
+    sh_ca_which=$(sh_path_where clang)
     [ -n "$sh_ca_which" ] || return 0
     sh_ca_dir=${sh_ca_which%/*}
     [ -n "$sh_ca_dir" ] || sh_ca_dir=.

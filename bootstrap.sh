@@ -187,14 +187,21 @@ usage() {
     cat <<'USAGE'
 usage: sh bootstrap.sh [options]
 
-  --toolset NAME      minimal | cli | developer | project | languages | agent.
-                      Default developer.
+  --toolset NAME      minimal | cli | developer | project | languages | agent,
+                      or none for an empty base. Default developer.
+  --only NAME[,NAME]  exactly these toolchains and nothing else: an empty
+                      base plus the names, no auto-detect, no preset. Takes
+                      several words too (--only jq ripgrep). Same as
+                      --toolset none --with NAME...
   --with NAME         add a toolchain. Repeatable, and also takes a
                       comma-separated list.
   --without NAME      leave a toolchain out. Repeatable, and also takes a
                       comma-separated list.
   --no-detect         do not add toolchains implied by project markers in the
                       working directory (Cargo.toml, go.mod, package.json, ...)
+  --detect            add the implied project markers even into an explicit
+                      --only/--toolset none request, which otherwise never
+                      auto-detects. With a preset toolset this is the default.
   --list-toolchains   print the known names and exit
   --home DIR          persistent data root. Default $XDG_DATA_HOME/sandhome
   --exec DIR          exec-capable root. Default: detected (see sandhome space)
@@ -282,6 +289,9 @@ sh_load_library() {
 
 # ------------------------------------------------------------------ arguments --
 SH_TOOLSET=developer
+SH_TOOLSET_GIVEN=0
+SH_ONLY=''
+SH_ONLY_GIVEN=0
 SH_WITH=''
 SH_WITHOUT=''
 SH_DETECT=auto
@@ -312,6 +322,11 @@ sh_need_value() {
 
 sh_toolset_names() {
     case "$1" in
+        # The empty base (issue #129): `--toolset none` names no toolchains
+        # and prints none, so `--with`/`--only` are exactly what the caller
+        # typed. It is a real toolset, not an error, and unlike a preset it
+        # implies no auto-detect (an explicit request is never extended).
+        none)      : ;;
         minimal)   printf 'jq\n' ;;
         cli)       printf 'jq ripgrep fd\n' ;;
         developer) printf 'jq ripgrep fd python node\n' ;;
@@ -427,10 +442,28 @@ sh_bootstrap_detect() {
 sh_bootstrap_args() {
     while [ "$#" -gt 0 ]; do
         case "$1" in
-            --toolset)         sh_need_value "$@"; SH_TOOLSET=$2; shift 2 ;;
+            --toolset)         sh_need_value "$@"; SH_TOOLSET=$2; SH_TOOLSET_GIVEN=1; shift 2 ;;
+            # --only NAME[,NAME...] is an explicit-only selection and is
+            # DEFINED as the synonym `--toolset none --with NAME...` (issue
+            # #129): it consumes every word up to the next flag, so both
+            # `--only jq,ripgrep` and `--only jq ripgrep` are one request,
+            # and it then goes through the same validation as the rest of the
+            # arguments. The set of names it produced is checked below, so a
+            # typo refuses the run before anything is downloaded.
+            --only)
+                sh_need_value "$@"
+                SH_ONLY_GIVEN=1
+                shift
+                while [ "$#" -gt 0 ]; do
+                    case "$1" in --*) break ;; esac
+                    SH_ONLY="$SH_ONLY,$1"
+                    shift
+                done
+                ;;
             --with)            sh_need_value "$@"; SH_WITH="$SH_WITH,$2"; shift 2 ;;
             --without)         sh_need_value "$@"; SH_WITHOUT="$SH_WITHOUT,$2"; shift 2 ;;
             --no-detect)       SH_DETECT=none; shift ;;
+            --detect)          SH_DETECT=force; shift ;;
             --list-toolchains) for sh_ba_t in $(sh_toolchain_available); do
                                    printf '%s\n' "$sh_ba_t"
                                done
@@ -461,6 +494,29 @@ sh_bootstrap_args() {
     if ! sh_toolset_names "$SH_TOOLSET" >/dev/null; then
         printf 'bootstrap: [-] unknown toolset %s\n' "$SH_TOOLSET" >&2
         exit 2
+    fi
+    # --only expands to `--toolset none --with NAME...` (issue #129) after
+    # every argument is seen: an explicit non-none --toolset alongside it is
+    # an ambiguous request and is refused rather than silently resolved by
+    # argument order, while `--toolset none --only ...` is the same intent
+    # spelled twice and passes.
+    if [ "$SH_ONLY_GIVEN" = 1 ]; then
+        if [ -z "$(sh_trim "$SH_ONLY")" ]; then
+            printf 'bootstrap: [-] --only needs at least one toolchain name\n' >&2
+            exit 2
+        fi
+        if [ "$SH_TOOLSET_GIVEN" = 1 ] && [ "$SH_TOOLSET" != none ]; then
+            printf 'bootstrap: [-] --only selects exactly the names given and cannot be combined with --toolset %s (use --toolset none, or drop --only)\n' "$SH_TOOLSET" >&2
+            exit 2
+        fi
+        for sh_bo_only_n in $(sh_split_on ',' "$SH_ONLY"); do
+            if ! sh_toolchain_known "$sh_bo_only_n"; then
+                printf 'bootstrap: [-] unknown toolchain %s in --only; run "sh bootstrap.sh --list-toolchains" for the list\n' "$sh_bo_only_n" >&2
+                exit 2
+            fi
+        done
+        SH_TOOLSET=none
+        SH_WITH="$SH_WITH,$SH_ONLY"
     fi
 }
 
@@ -757,7 +813,22 @@ sandhome_bootstrap_main() {
     # names come after the toolset so a later --without still removes them, and
     # each one is said out loud: an install a caller did not name must be a
     # sentence they can see, not a surprise download.
-    if [ "${SH_DETECT:-auto}" != none ]; then
+    #
+    # AN EXPLICIT-ONLY REQUEST IS NEVER EXTENDED (issue #129). With
+    # `--toolset none` or `--only`, the request is exactly what was typed:
+    # project markers are not folded in, so `--only rust` still reads
+    # `requested=rust` in a tree whose Cargo.toml and package.json would have
+    # added node. Detection stays available as an OPT-IN (`--detect`), which
+    # is the other half of the same clause: the caller who wants both says so.
+    # A preset toolset keeps the #116 behaviour unchanged, because there the
+    # markers are a convenience on top of a broad ask.
+    sh_mb_detect=${SH_DETECT:-auto}
+    if [ "$sh_mb_detect" != none ] && [ "$sh_mb_detect" != force ]; then
+        if [ "$SH_TOOLSET" = none ]; then
+            sh_mb_detect=none
+        fi
+    fi
+    if [ "$sh_mb_detect" != none ]; then
         SH_DETECTED_TOOLCHAINS=''
         for sh_mb_name in $(sh_bootstrap_detect); do
             if sh_in_list "$sh_mb_name" "$(sh_split_on ',' "$SH_WITHOUT")"; then
@@ -846,8 +917,16 @@ sandhome_bootstrap_main() {
     # failed to install is exactly the one the readiness gate has to see, and
     # the failure is already counted in SH_FAILURES, so the bootstrap exits
     # non-zero on its own (#38).
+    #
+    # The bootstrap is the AUTHORITATIVE statement of the request, so it
+    # REPLACES the stored list rather than merging into it: a re-run with
+    # `--toolset none` or `--only` has to disarm the names an earlier run
+    # recorded, or doctor would keep gating on a request the caller just took
+    # back. The merge rule (issue #57) still governs `sandhome install`, which
+    # adds to an existing request instead of restating it.
     SH_WANTED_TOOLCHAINS=$sh_mb_wanted
-    export SH_WANTED_TOOLCHAINS
+    SH_WANTED_REPLACE=1
+    export SH_WANTED_TOOLCHAINS SH_WANTED_REPLACE
 
     if [ "$SH_SHIMS" != none ]; then
         sh_shim_build_all "$SH_REPO_DIR/shims"

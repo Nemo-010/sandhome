@@ -308,6 +308,38 @@ sh_doctor() {
     sh_doctor_check exec_runs "$(sh_exec_probe "$SH_EXEC" && printf yes || printf no)" yes
     sh_doctor_check exec_on_path "$(case ":$PATH:" in *":$SH_EXEC_BIN:"*) printf yes ;; *) printf no ;; esac)" yes
     sh_doctor_check env_file "$([ -r "$SH_HOME/env.sh" ] && printf yes || printf no)" yes
+    # The recorded root must be the root being judged. The plan re-ranks when
+    # the recorded root is gone (a wiped tmpfs, a moved tree), which is right
+    # for an install and wrong for a gate: doctor then answered about whatever
+    # root it had re-picked while env.sh still named the missing one. Measured
+    # on this tree, with the recorded root deleted after a bootstrap: doctor
+    # silently judged a stale sibling root from an earlier run and printed
+    # doctor_failures=0 about it, and nothing said the recorded root was gone.
+    sh_doc_recorded=$(sh_space_recorded_exec 2>/dev/null)
+    case "$sh_doc_recorded" in
+        '') sh_doctor_check exec_root ok ok ;;
+        *)
+            if [ ! -d "$sh_doc_recorded" ]; then
+                sh_doctor_check exec_root "recorded:$sh_doc_recorded is gone" 'present; run sandhome resume'
+            elif [ "$sh_doc_recorded" != "$SH_EXEC" ]; then
+                sh_doctor_check exec_root "recorded:$sh_doc_recorded judging:$SH_EXEC" 'present; run sandhome resume'
+            else
+                sh_doctor_check exec_root ok ok
+            fi
+            ;;
+    esac
+    # The global hook is gated WHEN A RECORD EXISTS (issue #127). `sh_global_report`
+    # does not repeat what an install once claimed: it runs each recorded
+    # directory through a fresh `env -i` shell and reads back the dispatcher's
+    # marker, so `stale:` means a hook that was installed and no longer answers
+    # a fresh shell, which is exactly the #127 failure returning. `none` is a
+    # host layout (nothing was recorded) and passes; the failure line names the
+    # repair command through its `wanted` text.
+    sh_doc_global=$(sh_global_report 2>/dev/null)
+    case "$sh_doc_global" in
+        stale:*) sh_doctor_check global_hook "$sh_doc_global" 'on:<dir> or none (repair: sandhome global)' ;;
+        *)       sh_doctor_check global_hook "$sh_doc_global" "$sh_doc_global" ;;
+    esac
     # The working tree may itself be noexec (issue #24): build output there
     # fails at run time with Permission denied, which reads as an install bug.
     # This is informational, never a failure: the fix is to build under
@@ -456,6 +488,13 @@ sh_doctor() {
             sh_doctor_check "toolchain_$sh_doc_t" \
                 "$([ -n "$sh_doc_version" ] && printf yes || printf no)" yes
         done
+    else
+        # A root without its views is a wiped or half-built root. The loop
+        # above would skip every toolchain and the gate would read green over
+        # nothing, which is exactly what a fresh shell then hits: the tools
+        # are gone and doctor had said ready. Failing here makes that state
+        # impossible to mistake for health.
+        sh_doctor_check exec_views missing 'present; run sandhome resume'
     fi
     # # STOP: EVERY BINARY THE REPORT ADVERTISES MUST BE THERE AND MUST RUN.
     # `doctor` is the readiness gate ROUTE.md step 2 tells a session to trust
@@ -490,6 +529,11 @@ sh_doctor() {
                 sh_doc_fail=$((sh_doc_fail + 1))
             fi
         done
+    else
+        # Same state one level down: a root with no bin directory has no
+        # `sandhome` in its view and no tool links, whatever the root checks
+        # say about the directory itself.
+        sh_doctor_check exec_bin missing 'present; run sandhome resume'
     fi
     for sh_doc_var in GOBIN GOCACHE CARGO_INSTALL_ROOT NPM_CONFIG_PREFIX; do
         sh_doc_want_exec=''

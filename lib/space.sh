@@ -487,6 +487,24 @@ sh_space_plan() {
         else
             sh_die "SANDHOME_EXEC=$SANDHOME_EXEC is not writable or does not allow exec"
         fi
+    elif [ "$sh_sp_create" = 0 ] && [ -n "$sh_sp_recorded" ] && [ ! -d "$sh_sp_recorded" ]; then
+        # # STOP: A READ-ONLY PLAN NAMES THE RECORDED ROOT EVEN WHEN IT IS GONE.
+        # It used to fall through to the ranking, so a wiped exec root (the
+        # exact case `resume` exists for) made every read-only command --
+        # status, report, doctor, and the startup plan that feeds resume --
+        # answer about some OTHER writable root left on the box while env.sh
+        # still named the missing one. Measured on this tree, after
+        # `rm -rf $exec_root` with env.sh recording it: status printed
+        # exec=/workspace/.sandhome/exec (a stale sibling from an earlier run)
+        # with ready=yes; doctor judged that sibling; and `resume` baked the
+        # sibling into SANDHOME_EXEC, rebuilt every view THERE, and sh_env_write
+        # then overwrote env.sh with the sibling, losing the recorded root for
+        # good. Naming the recorded root as unusable is the machine as
+        # configured: the caller decides what to do. sh_cmd_needs_roots
+        # re-plans with a create plan, which mkdirs the recorded root back,
+        # and doctor fails by name with the resume hint.
+        SH_EXEC=$sh_sp_recorded
+        SH_EXEC_UNUSABLE=1
     elif [ "$sh_sp_create" = 0 ] && [ -n "$sh_sp_sticky" ]; then
         # STOP: A READ-ONLY PLAN REPORTS THE RECORDED ROOT BEFORE RE-DECIDING.
         # The create plan collapses the roots when the home runs binaries, but
