@@ -515,6 +515,22 @@ sh_env_load() {
     return 0
 }
 
+# sh_env_apply -> the environment for a child command, the SAME one a shell gets
+# from reading env.sh. sh_env_load sets PATH but not the scratch roots; the
+# global hook runs the copied `sandhome` directly rather than through the
+# dispatcher, so without this `sandhome exec python3 script.py` would leave
+# TMPDIR on a noexec /tmp and the child could not run a file it writes. Source
+# the generated file when the home has one, and fall back to the in-process load
+# for a home that was never written.
+sh_env_apply() {
+    if [ -n "${SH_HOME:-}" ] && [ -r "$SH_HOME/env.sh" ]; then
+        # shellcheck disable=SC1090
+        . "$SH_HOME/env.sh"
+        return 0
+    fi
+    sh_env_load
+}
+
 # ------------------------------------------------------- the global hook --
 # # STOP: A FRESH SHELL MUST NOT BE ASKED TO SOURCE ANYTHING. The environment was
 # one file, `env.sh`, and every caller had to read it in every new shell: a tool

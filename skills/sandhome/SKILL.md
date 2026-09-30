@@ -49,7 +49,10 @@ next command), for a harness that wants to check before it works.
 The bootstrap installs a **global hook** into a directory already on `PATH`, so
 the next `sandhome doctor` is a fresh shell that needs nothing sourced and no
 `env.sh` in front of it. That is the whole fix for the per-command incantation:
-setup is once, and a command is a command. If the host has no writable,
+setup is once, and a command is a command. A tool the hook does not name -- a
+host `python3`, say -- is run with `sandhome exec python3 script.py`, which
+applies the same environment a sourced shell gets, `TMPDIR` included, so no
+`export TMPDIR=` is needed either. If the host has no writable,
 exec-capable `PATH` directory the report says `global=none`; then source the
 entry point once per shell:
 `. "${XDG_DATA_HOME:-$HOME/.local/share}/sandhome/entry.sh"`.

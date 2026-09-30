@@ -402,6 +402,12 @@ if [ -r "$doc_home/env.sh" ]; then
     esac
     env -i "$doc_exec/bin/sandhome" exec jq --version >/dev/null 2>&1
     t_is "$?" 0 'env -i <exec-bin>/sandhome exec runs a tool with the right environment'
+    # And the environment it hands over is the written one, scratch roots
+    # included. sh_env_load alone leaves TMPDIR where it was, which on a noexec
+    # /tmp is a temp file that cannot run, the exact friction #127 is about.
+    doc_exec_tmp=$(env -i "$doc_exec/bin/sandhome" exec sh -c 'printf %s "${TMPDIR:-}"' 2>/dev/null)
+    t_contains "$doc_exec_tmp" "$doc_exec/tmp" \
+        'sandhome exec applies the written scratch roots (TMPDIR)'
     # RESUME REHYDRATES WITHOUT FETCHING (issue #88). Wipe the exec copy and
     # the views the way a tmpfs restart does, then resume must rebuild and
     # gate green with no network beyond what repair needs (nothing here).

@@ -898,7 +898,7 @@ cmd_exec() {
         if [ "$#" -eq 0 ]; then
             sh_die "exec --shell needs a string; use: sandhome exec --shell 'make -j4'"
         fi
-        sh_env_load
+        sh_env_apply
         exec sh -c "$*"
     fi
     case "${1:-}" in
@@ -920,12 +920,12 @@ cmd_exec() {
             */*) : ;;
             *)
                 if ! command -v "$1" >/dev/null 2>&1; then
-                    sh_env_load
+                    sh_env_apply
                     exec sh -c "$1"
                 fi ;;
         esac
     fi
-    sh_env_load
+    sh_env_apply
     exec "$@"
 }
 cmd_report() {

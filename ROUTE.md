@@ -304,7 +304,10 @@ sandhome exec --shell 'make -j4 && ./run'
 
 takes argv by default and a shell string when asked: one argument that is not
 a program already runs through the shell, and `--shell` names that form
-explicitly. A path with a slash is always argv.
+explicitly. A path with a slash is always argv. It applies the same
+environment a sourced shell gets, `TMPDIR` and `XDG_RUNTIME_DIR` included, so
+`sandhome exec python3 script.py` needs no `export TMPDIR=$SANDHOME_EXEC/tmp`
+in front of it.
 
 A toolchain that installed without an error and still does not answer is
 reported as a failure. Run the `install` subcommand for that name again:
