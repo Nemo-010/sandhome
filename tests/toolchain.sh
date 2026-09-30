@@ -14,7 +14,7 @@ ROOT=$(CDPATH='' cd -- "$HERE/.." && pwd)
 
 t_begin toolchain
 
-work=$(mktemp -d "${TMPDIR:-/tmp}/sandhome-tc.XXXXXX")
+work=$(t_exec_tmpdir sandhome-tc)
 trap 'rm -rf "$work"' EXIT
 mkdir -p "$work/repo/lib" "$work/repo/tools" "$work/tc" "$work/exec" "$work/home"
 

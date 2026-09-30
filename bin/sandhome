@@ -366,9 +366,12 @@ HELP
 usage: sandhome space [--probe] [--largest [N]] [--reclaim]
 Print the chosen roots with free and total megabytes, the exec-space state,
 and the ceiling across exec-capable candidates (max_exec_free_mb and
-exec_ceiling). --probe lists every candidate with writable/exec/free.
---largest [N] lists the N biggest top-level entries on the exec root, which
-is what to remove first when the root fills with build output. --reclaim
+exec_ceiling). --probe lists every candidate with writable/exec/free/total
+and a verdict (chosen, usable, noexec, not-writable, too-small) so the list
+is a decision, not a table of numbers. --largest [N] lists the N biggest
+top-level entries on the exec root with an owner tag (sandhome = a cache
+gc/prune can reclaim; yours = build output you remove), which is what to
+remove first when the root fills with build output. --reclaim
 prints the cache bytes `gc --now` would reclaim, removing nothing.
 HELP
             return 0 ;;
@@ -425,9 +428,22 @@ HELP
             cat <<'HELP'
 usage: sandhome toolchains [--json]
 Name, status, version, description and PATH reach for every known toolchain.
+A dynamic line names runtimes that fetch at run time (registry installs,
+remote imports, self-upgrade), so running with the network down is answered
+before it fails. --json carries the same plus origin, view and dynamic.
 HELP
             return 0 ;;
-        env|path|project|exec|shims|shell|pty|test|selftest|version)
+        exec)
+            cat <<'HELP'
+usage: sandhome exec CMD [ARGS...]
+usage: sandhome exec --shell 'string'
+Run CMD with the environment loaded. With exactly one argument that is not
+a program, the string runs through the shell (so `sandhome exec 'echo hi'`
+works); two or more arguments stay exec-argv. --shell names the string form
+explicitly. A path with a slash is always argv, never a shell string.
+HELP
+            return 0 ;;
+        env|path|project|shims|shell|pty|test|selftest|version)
             usage; return 0 ;;
         *)
             sh_die "no help for '$1'; run 'sandhome help' for the command list"
@@ -819,6 +835,22 @@ cmd_exec() {
     if [ "$#" -eq 0 ]; then
         sh_die 'exec needs a command'
     fi
+    # An explicit shell-string form, so the intent is named rather than guessed:
+    # `sandhome exec --shell 'make -j4 && ./run'` runs the line through the
+    # shell with the environment loaded. `--shell` with no string fails loudly
+    # rather than running an empty line.
+    if [ "${1:-}" = --shell ]; then
+        shift
+        if [ "$#" -eq 0 ]; then
+            sh_die "exec --shell needs a string; use: sandhome exec --shell 'make -j4'"
+        fi
+        sh_env_load
+        exec sh -c "$*"
+    fi
+    case "${1:-}" in
+        -h|--help) cmd_help exec; return 0 ;;
+        -*) sh_die "exec does not take '$1'; use: sandhome exec CMD [ARGS...] or sandhome exec --shell 'string'" ;;
+    esac
     # # STOP: A SINGLE NON-EXECUTABLE ARGUMENT IS A SHELL STRING, NOT A PROGRAM.
     # `exec "$@"` with one argument that is not on PATH died with the
     # interpreter's own error and the installed copy's line number:
@@ -1211,15 +1243,27 @@ cmd_resume() {
     sh_exec_install_launchers
     # Refresh the stable entry point after a tmpfs restart moved the exec root:
     # the snippet bakes the exec-bin path, and the restart is exactly when a cold
-    # non-login shell needs it (issue #122).
+    # non-login shell needs it (issue #122). Three roots, not one baked path:
+    # the baked bin, then the recorded SANDHOME_EXEC, then PATH, so a snippet
+    # read before this rewrite still finds the moved view.
     if [ -d "$SH_HOME" ] && [ -n "$SH_EXEC_BIN" ]; then
+        sh_rs_qhome=$(sh_sq_quote "$SH_HOME")
+        sh_rs_qexec=$(sh_sq_quote "$SH_EXEC")
+        sh_rs_qbin=$(sh_sq_quote "$SH_EXEC_BIN/sandhome")
         {
             printf '%s\n' '# sandhome entry point. Generated; sourced, not executed.'
             printf '%s\n' "# Written because a non-login shell has no PATH (issue #122)."
-            printf '%s\n' "SANDHOME_HOME=\${SANDHOME_HOME:-'$SH_HOME'}"
-            printf '%s\n' "SANDHOME_EXEC=\${SANDHOME_EXEC:-'$SH_EXEC'}"
+            printf '%s\n' "SANDHOME_HOME=\${SANDHOME_HOME:-$sh_rs_qhome}"
+            printf '%s\n' "SANDHOME_EXEC=\${SANDHOME_EXEC:-$sh_rs_qexec}"
             printf '%s\n' 'export SANDHOME_HOME SANDHOME_EXEC'
-            printf 'sandhome() { "%s/sandhome" "$@"; }\n' "$SH_EXEC_BIN"
+            printf '%s\n' "_sandhome_baked=$sh_rs_qbin"
+            printf '%s\n' 'sandhome() {'
+            printf '%s\n' '  if [ -x "$_sandhome_baked" ]; then "$_sandhome_baked" "$@"; return $?; fi'
+            printf '%s\n' '  if [ -n "${SANDHOME_EXEC:-}" ] && [ -x "$SANDHOME_EXEC/bin/sandhome" ]; then "$SANDHOME_EXEC/bin/sandhome" "$@"; return $?; fi'
+            printf '%s\n' '  if [ -n "${SANDHOME_HOME:-}" ] && [ -x "$SANDHOME_HOME/repo/bin/sandhome" ]; then "$SANDHOME_HOME/repo/bin/sandhome" "$@"; return $?; fi'
+            printf '%s\n' '  if command -v sandhome >/dev/null 2>&1; then command sandhome "$@"; return $?; fi'
+            printf '%s\n' '  printf "%s\n" "sandhome: no working copy (baked $_sandhome_baked missing, SANDHOME_EXEC/bin/sandhome missing, repo/bin/sandhome missing, nothing on PATH; re-run the setup)" >&2; return 127'
+            printf '%s\n' '}'
             printf '%s\n' "[ -r \"\$SANDHOME_HOME/env.sh\" ] && . \"\$SANDHOME_HOME/env.sh\""
         } > "$SH_HOME/entry.sh" 2>/dev/null
     fi

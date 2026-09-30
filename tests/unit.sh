@@ -110,7 +110,7 @@ t_is "$(sh_free_mb /nonexistent-sandhome-path)" '' 'free_mb of a missing path is
 
 # is_exec_file: a shared object must NOT be copied onto the exec root. This is
 # the measurement the whole split rests on, so it is asserted directly.
-tmp=$(mktemp -d "${TMPDIR:-/tmp}/sandhome-unit.XXXXXX")
+tmp=$(t_exec_tmpdir sandhome-unit)
 : > "$tmp/data.txt"
 printf '#!/bin/sh\nexit 0\n' > "$tmp/run.sh"; chmod 0755 "$tmp/run.sh"
 : > "$tmp/libfoo.so"; chmod 0755 "$tmp/libfoo.so"
@@ -535,7 +535,7 @@ t_is "$(SANDHOME_SHA256_JQ_LINUX_ARM64=arm64d sh_pin_for 'https://x/jq-linux-arm
 # version with them reads the wrong variable for a differently-named asset.
 t_is "$(SANDHOME_SHA256_JQ_LINUX_AMD64=amd64d sh_pin_for 'https://x/jq-linux-i386' jq)" '' \
     'an amd64 asset pin does not answer for the i386 download' 
-t_is "$(sh_pin_names | tr -s ' \n' ' ')" ' fd go jq node python ripgrep rust zig mold clang deno bun qemuuser shellcheck shfmt yq ninja gh cmake meson ' \
+t_is "$(sh_pin_names | tr -s ' \n' ' ')" ' fd go jq node python ripgrep rust zig mold clang deno bun qemuuser shellcheck shfmt yq ninja gh cmake meson pkgconf perl ' \
     'the pin-name list is the shape the clause above assumes'
 t_is "$(SANDHOME_SHA256_MOLD=moldd sh_pin_for 'https://x/mold-2.4-x86_64-linux.tar.gz' mold)" 'moldd' \
     'a mold pin answers for the mold tarball'
@@ -1367,7 +1367,7 @@ fi
 
 # CLASS D: sh_repo_persist copies a scratch tree under the home and repoints
 # SH_REPO_DIR there; a clone is left alone (#20).
-rp_tmp=$(mktemp -d "${TMPDIR:-/tmp}/sandhome-persist.XXXXXX")
+rp_tmp=$(t_exec_tmpdir sandhome-persist)
 rp_fake="$rp_tmp/sandhome-bootstrap.999/lib"
 mkdir -p "$rp_fake" "$rp_tmp/home" 2>/dev/null
 printf '# stub\n' > "$rp_fake/common.sh" 2>/dev/null
@@ -1421,6 +1421,39 @@ t_is "$(grep -c 'Added by' "$sa_b")" 1 'the three-argument form keeps one block 
 t_contains "$(cat "$sa_b")" '/two/bin' 'the three-argument form replaces the line under its prefix'
 t_ok "$(grep -q '/one/bin' "$sa_b" && echo 1 || echo 0)" 'the superseded line is gone'
 rm -f "$sa_a" "$sa_b" 2>/dev/null
+
+# A cmake tree is recognised by any share/cmake-* directory, not by a literal
+# version: the first version tested for share/cmake-4.4, so the next Kitware
+# minor made every adopt fail and the setup downloaded 60MB beside a working
+# system cmake. A lone binary with no share tree is not a full install.
+for m in cmake meson pkgconf perl; do
+    [ -r "$ROOT/tools/$m.sh" ] || continue
+    . "$ROOT/tools/$m.sh"
+done
+cm_fake=$tmp/cmake-adopt
+rm -rf "$cm_fake"
+mkdir -p "$cm_fake/root/bin" "$cm_fake/root/share/cmake-9.9/Modules"
+printf '#!/bin/sh\nexit 0\n' > "$cm_fake/root/bin/cmake"
+chmod 0755 "$cm_fake/root/bin/cmake" 2>/dev/null || true
+old_path=$PATH
+PATH="$cm_fake/root/bin:$PATH"; export PATH
+cm_got=$(tc_cmake_adopted 2>/dev/null)
+PATH=$old_path; export PATH
+t_contains "$cm_got" "$cm_fake/root" 'a cmake tree with share/cmake-9.9 adopts (version-agnostic)'
+rm -rf "$cm_fake" 2>/dev/null
+# The project toolset names the whole from-source chain in one command, and
+# languages/agent carry it too so a compiler install never leaves `cmake:
+# command not found` behind it. The function is extracted and run, not grepped:
+# a grep locates, it does not conclude, so the clause executes the real code.
+sh_ts_fn=$(sed -n '/^sh_toolset_names()/,/^}/p' "$ROOT/bootstrap.sh" 2>/dev/null)
+proj_line=$(sh -c "$sh_ts_fn; sh_toolset_names project" 2>/dev/null)
+t_contains "$proj_line" 'cmake' 'the project toolset names cmake'
+t_contains "$proj_line" 'meson' 'the project toolset names meson'
+t_contains "$proj_line" 'pkgconf' 'the project toolset names pkgconf'
+t_contains "$proj_line" 'perl' 'the project toolset names perl'
+lang_line=$(sh -c "$sh_ts_fn; sh_toolset_names languages" 2>/dev/null)
+t_contains "$lang_line" 'cmake' 'languages carries cmake, not just compilers'
+t_contains "$lang_line" 'pkgconf' 'languages carries pkgconf'
 
 rm -rf "$tmp"
 t_end

@@ -27,7 +27,11 @@ fi
 t_begin shims
 sh_detect_all
 
-tmp=$(mktemp -d "${TMPDIR:-/tmp}/sandhome-shims.XXXXXX")
+# An exec-capable temp dir, because /tmp refuses execve on some sandboxes while
+# /workspace runs it (and the reverse elsewhere). Building probes into a noexec
+# tmp fails every run clause with Permission denied, which reads as a shim
+# defect when it is a temp-dir defect.
+tmp=$(t_exec_tmpdir sandhome-shims)
 trap 'rm -rf "$tmp"' EXIT
 
 SH_HOME="$tmp"; SH_HOME_TMP="$tmp/tmp"; export SH_HOME SH_HOME_TMP

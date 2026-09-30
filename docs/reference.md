@@ -183,9 +183,9 @@ usage: sh bootstrap.sh [options]
 | `minimal` | jq |
 | `cli` | jq ripgrep fd |
 | `developer` | jq ripgrep fd python node |
-| `languages` | jq ripgrep fd python node rust go zig deno bun mold |
-| `agent` | jq ripgrep fd python node rust go zig deno bun mold |
-| `project` | jq ripgrep fd python node go rust clang cmake meson ninja mold |
+| `languages` | jq ripgrep fd python node rust go zig deno bun mold clang cmake meson ninja pkgconf perl |
+| `agent` | jq ripgrep fd python node rust go zig deno bun mold clang cmake meson ninja pkgconf perl |
+| `project` | jq ripgrep fd python node go rust clang cmake meson ninja mold pkgconf perl |
 
 ## Environment variables
 
@@ -196,7 +196,7 @@ usage: sh bootstrap.sh [options]
 | `SANDHOME_CRIT_MB` | space.sh sandhome | `unset, and the feature is off until it is set` |
 | `SANDHOME_DOH_CANARY` | fetch.sh | `https://github.com` |
 | `SANDHOME_DOH_URL` | fetch.sh bootstrap.sh sandhome | `unset, and the feature is off until it is set` |
-| `SANDHOME_EXEC` | env.sh report.sh space.sh bootstrap.sh sandhome fd.sh go.sh jq.sh meson.sh node.sh python.sh ripgrep.sh rust.sh zig.sh | `*)` |
+| `SANDHOME_EXEC` | env.sh report.sh space.sh bootstrap.sh sandhome cmake.sh fd.sh go.sh jq.sh meson.sh node.sh python.sh ripgrep.sh rust.sh zig.sh | `*)` |
 | `SANDHOME_FAKEPTY` | env.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_FAKEPTY_ID` | env.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_FETCH_CHUNK_MB` | fetch.sh | `256` |
@@ -222,6 +222,7 @@ usage: sh bootstrap.sh [options]
 | `SANDHOME_PASSWD` | env.sh shim.sh sandhome | `unset, and the feature is off until it is set` |
 | `SANDHOME_PASSWD_USERS` | shim.sh sandhome | `unset, and the feature is off until it is set` |
 | `SANDHOME_PCT_MEANINGFUL_MB` | space.sh sandhome | `unset, and the feature is off until it is set` |
+| `SANDHOME_PKGCONF_VERSION` | pkgconf.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_PROFILE` | profile.sh | `1` |
 | `SANDHOME_QEMUUSER_EXTRA` | sandhome qemuuser.sh | `$SANDHOME_QEMUUSER_EXTRA $sh_c_x` |
 | `SANDHOME_REF` | bootstrap.sh sandhome | `unset, and the feature is off until it is set` |
@@ -244,6 +245,8 @@ usage: sh bootstrap.sh [options]
 | `SANDHOME_SHA256_MESON` | fetch.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_SHA256_MOLD` | fetch.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_SHA256_NODE` | fetch.sh | `unset, and the feature is off until it is set` |
+| `SANDHOME_SHA256_PERL` | fetch.sh | `unset, and the feature is off until it is set` |
+| `SANDHOME_SHA256_PKGCONF` | fetch.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_SHA256_PYTHON` | fetch.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_SHA256_QEMUUSER` | fetch.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_SHA256_RIPGREP` | fetch.sh bootstrap.sh | `unset, and the feature is off until it is set` |
@@ -255,6 +258,7 @@ usage: sh bootstrap.sh [options]
 | `SANDHOME_SHIMS` | env.sh shim.sh sandhome | `unset, and the feature is off until it is set` |
 | `SANDHOME_VIEW_MODE` | env.sh memexec.sh report.sh space.sh bootstrap.sh sandhome | `unset, and the feature is off until it is set` |
 | `SANDHOME_WANTED_TOOLCHAINS` | env.sh report.sh | `*)` |
+| `SANDHOME_WORKSPACE` | space.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_ZIG_INDEX_URL` | sandhome zig.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_ZIG_VERSION` | sandhome zig.sh | `unset, and the feature is off until it is set` |
 
@@ -293,6 +297,8 @@ usage: sh bootstrap.sh [options]
 | `mold` | `bin/mold bin/ld.mold` | mold, a fast ELF linker (gcc/clang/rust via -fuse-ld=mold) |
 | `ninja` | `ninja` | ninja, a small build system (single static binary) |
 | `node` | `bin/node bin/npm bin/npx` | Node.js with the bundled npm, from the official nodejs.org tarball |
+| `perl` | `perl` | perl, the interpreter autoconf and ./configure need (adopted) |
+| `pkgconf` | `bin/pkgconf bin/pkg-config` | pkgconf, the pkg-config implementation for ./configure builds |
 | `python` | `(via its own PATH fragment)` | CPython, installed by uv (uv is always left on PATH) |
 | `qemuuser` | `bin/qemu-x86_64` | qemu-user, the static user-mode emulators (run a guest ELF, trace its syscalls without ptrace) |
 | `ripgrep` | `bin/rg` | ripgrep (rg), the fast recursive search tool |

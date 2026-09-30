@@ -60,9 +60,13 @@ tc_cmake_install() {
     fi
     rm -rf "$sh_cm_root" 2>/dev/null
     mkdir -p "$sh_cm_root" "$sh_cm_stage" 2>/dev/null || return 1
-    if ! sh_fetch_verified "$sh_cm_url" "$sh_cm_stage/.cmake.$$.tar.gz" "$(sh_pin_for "$sh_cm_url" cmake)"; then
-        return 1
+    if sh_fetch_verified "$sh_cm_url" "$sh_cm_stage/.cmake.$$.tar.gz" "$(sh_pin_for "$sh_cm_url" cmake)"; then
+        sh_cm_have_tarball=yes
+    else
+        sh_cm_have_tarball=no
+        sh_warn "the Kitware tarball did not fetch; trying pip as a fallback"
     fi
+    if [ "$sh_cm_have_tarball" = yes ]; then
     # Every spelling goes through sh_tar, which drops archive ownership first:
     # a uid-0 sandbox without CAP_CHOWN refuses tar's chown and exits 2.
     if sh_tar -xzf "$sh_cm_stage/.cmake.$$.tar.gz" -C "$sh_cm_stage" 2>/dev/null; then
@@ -99,6 +103,50 @@ tc_cmake_install() {
         return 1
     fi
     return 0
+    fi
+    # FALLBACK: A PIP WHEEL WHEN THE TARBALL WILL NOT FETCH. The Kitware asset
+    # is 60MB and the fastest path, but a blocked github.com origin or a
+    # missing tar+gzip leaves the setup with nothing. The cmake PyPI wheel
+    # ships the same binaries and installs through the python toolchain the
+    # setup already owns, onto the exec root so the launcher runs. Three uv
+    # locations are tried because a hand-run `install cmake` may reach here
+    # with no PATH and no UV_TOOL_BIN_DIR yet.
+    sh_cm_uv=''
+    if sh_have uv; then
+        sh_cm_uv=uv
+    elif [ -n "${UV_TOOL_BIN_DIR:-}" ] && [ -x "$UV_TOOL_BIN_DIR/uv" ]; then
+        sh_cm_uv="$UV_TOOL_BIN_DIR/uv"
+    elif [ -n "${SANDHOME_EXEC:-}" ] && [ -x "$SANDHOME_EXEC/views/python/bin/uv" ]; then
+        sh_cm_uv="$SANDHOME_EXEC/views/python/bin/uv"
+    fi
+    if [ -z "$sh_cm_uv" ]; then
+        sh_warn 'neither the Kitware tarball nor a pip fallback is reachable (no uv for the pip leg)'
+        return 1
+    fi
+    mkdir -p "$sh_cm_root/bin" 2>/dev/null || return 1
+    sh_cm_out=$("$sh_cm_uv" tool install --force cmake 2>&1)
+    case "$sh_cm_out" in
+        *cmake*) : ;;
+        *) sh_warn "uv could not install cmake: $(printf '%s' "$sh_cm_out" | sh_first_line)"; return 1 ;;
+    esac
+    sh_cm_src=''
+    if [ -n "${UV_TOOL_BIN_DIR:-}" ] && [ -e "$UV_TOOL_BIN_DIR/cmake" ]; then
+        sh_cm_src=$UV_TOOL_BIN_DIR/cmake
+    elif sh_have cmake; then
+        sh_cm_src=$(sh_path_where cmake)
+    fi
+    [ -n "$sh_cm_src" ] || { sh_warn 'uv installed cmake but no cmake launcher was found'; return 1; }
+    cp -f "$sh_cm_src" "$sh_cm_root/bin/cmake" 2>/dev/null || return 1
+    chmod 0755 "$sh_cm_root/bin/cmake" 2>/dev/null || true
+    # ctest and cpack ride with the wheel when it carries them; missing ones
+    # are not fatal because the probe only needs cmake itself.
+    for sh_cm_extra in ctest cpack; do
+        if [ -n "${UV_TOOL_BIN_DIR:-}" ] && [ -e "$UV_TOOL_BIN_DIR/$sh_cm_extra" ]; then
+            cp -f "$UV_TOOL_BIN_DIR/$sh_cm_extra" "$sh_cm_root/bin/$sh_cm_extra" 2>/dev/null || true
+        fi
+    done
+    [ -x "$sh_cm_root/bin/cmake" ] || { sh_warn 'the pip fallback did not land cmake'; return 1; }
+    return 0
 }
 
 tc_cmake_env() {
@@ -114,10 +162,25 @@ tc_cmake_version() {
 # toolchain is ADOPTED rather than installed. sh_path_where, not command -v:
 # the exec view is on PATH by the time an install runs, so command -v answers
 # with the view this tool is being linked INTO (issue #43).
+# REDUNDANCY: VERSION-AGNOSTIC, BECAUSE A LITERAL ROTS. The first version tested
+# for share/cmake-4.4, so the next Kitware minor made every adopt fail and the
+# setup downloaded a 60MB tarball beside a working system cmake. Any share/cmake-*
+# directory proves the tree is a full CMake install and not a lone binary.
 tc_cmake_adopted() {
     sh_cm_which=$(sh_path_where cmake)
     [ -n "$sh_cm_which" ] || return 0
     sh_cm_dir=${sh_cm_which%/*}
-    [ -d "$sh_cm_dir/../share/cmake-4.4" ] || [ -d "$sh_cm_dir/../share" ] || return 0
+    sh_cm_found=no
+    for sh_cm_try in "$sh_cm_dir"/../share/cmake-* "$sh_cm_dir"/../share/cmake "$sh_cm_dir"/../share; do
+        # The glob must expand: a quoted glob runs once and matches nothing.
+        # shellcheck disable=SC2086
+        for sh_cm_hit in $sh_cm_try; do
+            [ -d "$sh_cm_hit" ] || [ -e "$sh_cm_hit" ] || continue
+            sh_cm_found=yes
+            break
+        done
+        [ "$sh_cm_found" = yes ] && break
+    done
+    [ "$sh_cm_found" = yes ] || return 0
     printf '%s' "${sh_cm_dir%/*}"
 }

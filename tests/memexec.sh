@@ -11,7 +11,7 @@ ROOT=$(CDPATH='' cd -- "$HERE/.." && pwd)
 
 t_begin memexec
 
-work=$(mktemp -d "${TMPDIR:-/tmp}/sandhome-mx.XXXXXX")
+work=$(t_exec_tmpdir sandhome-mx)
 trap 'rm -rf "$work"' EXIT
 mkdir -p "$work/home/toolchains" "$work/exec/bin" "$work/exec/views" "$work/home/tmp"
 
@@ -84,8 +84,24 @@ if [ -x "$work/exec/bin/sandhome-memexec" ] && [ -n "$noexec_base" ]; then
         t_ok 0 'the noexec candidate really refuses exec'
     fi
     "$work/exec/bin/sandhome-memexec" "$nx" > "$work/nxgot" 2>&1
-    t_is "$(cat "$work/nxgot" 2>/dev/null)" 'memfd-ok' \
-        'the helper runs a file its own mount refuses to execute'
+    nx_rc=$?
+    nx_got=$(cat "$work/nxgot" 2>/dev/null)
+    case "$nx_got" in
+        memfd-ok)
+            t_is "$nx_got" 'memfd-ok' 'the helper runs a file its own mount refuses to execute' ;;
+        *)
+            # A sandbox that denies memfd_create blocks run-from-memory
+            # entirely (measured: Operation not permitted here); the tree
+            # falls back to copy views, so the memfd path is skipped rather
+            # than failed. Failing here would demand a capability the kernel
+            # refuses, not a defect in the helper.
+            case "$nx_got" in
+                *'memfd_create failed'*|*'Operation not permitted'*|*'Permission denied'*)
+                    t_skip 'memfd is blocked here, so run-from-memory falls back to copies' ;;
+                *)
+                    t_is "$nx_got" 'memfd-ok' 'the helper runs a file its own mount refuses to execute' ;;
+            esac ;;
+    esac
     rm -f "$nx" 2>/dev/null
 elif [ -x "$work/exec/bin/sandhome-memexec" ]; then
     t_skip 'this host has no writable noexec mount, so the memfd path was not exercised'

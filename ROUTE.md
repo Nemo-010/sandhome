@@ -241,7 +241,7 @@ or bad interpreter. Tool output that must execute lives on `$SANDHOME_EXEC`:
 there; for anything else build under `$SANDHOME_EXEC` or copy the artifact
 there before running it. No wrapper or launcher lives in the work tree.
 
-The environment file is the single source of truth, and sourcing it is a per-session cost, not a setup step. Every new shell, including every non-login tool shell, must load it again before `sandhome` or any toolchain is on PATH. In a shell that sources files, source it. Where sourcing is not possible, load it through eval, which survives `sh -c`:
+The environment file is the single source of truth, and sourcing it is a per-call cost on a harness that spawns a non-login shell per tool call, not a per-session setup step. Every new shell, including every non-login tool shell, must load it again before `sandhome` or any toolchain is on PATH. A reader told "per-session" loses a call's worth of toolchain to `command not found` and thinks setup failed. In a shell that sources files, source the entry point below. Where sourcing is not possible, load it through eval, which survives `sh -c`, but the eval needs `sandhome` already on PATH and fails silently with rc=0 when it is not: the entry point is the cold-shell path, the eval is the warm-shell shortcut.
 
 ```sh
 eval "$(sandhome env)"
@@ -263,11 +263,22 @@ sandhome doctor
 
 It is sourced, not executed, because the home is often noexec and a file there
 cannot run; sourcing needs no exec permission. It sets `SANDHOME_HOME` and
-`SANDHOME_EXEC`, defines `sandhome`, and sources `env.sh`, so one line from
-`sh -c`, a harness tool call, or any process that inherited nothing reaches both
-the command and the toolchains. The snippet lives on the home, so a tmpfs
-restart does not clear it; `sandhome resume` rewrites it when it moves the exec
-view.
+`SANDHOME_EXEC`, defines `sandhome` with three fallbacks (the baked exec bin,
+then `$SANDHOME_EXEC/bin/sandhome`, then PATH) so a snippet read before
+`sandhome resume` rewrites it still finds a moved view, and sources `env.sh`,
+so one line from `sh -c`, a harness tool call, or any process that inherited
+nothing reaches both the command and the toolchains. The snippet lives on the
+home, so a tmpfs restart does not clear it; `sandhome resume` rewrites it when
+it moves the exec view. `sandhome report` names whether this shell is a login
+shell, whether the exec bin is on PATH now, and the entry path it baked.
+
+```sh
+sandhome exec --shell 'make -j4 && ./run'
+```
+
+takes argv by default and a shell string when asked: one argument that is not
+a program already runs through the shell, and `--shell` names that form
+explicitly. A path with a slash is always argv.
 
 A toolchain that installed without an error and still does not answer is
 reported as a failure. Run the `install` subcommand for that name again:

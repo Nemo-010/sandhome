@@ -166,29 +166,43 @@ sh_resolver_failed_twice() {
     return 0
 }
 
-# sh_mirror_url URL -> the mirror URL for URL, or nothing. A GitHub API
-# path goes through the AUTHENTICATED API mirror (it serves api.github.com JSON
-# at 5000/hour where a caller's own IP would get 60/hour); anything else through
-# the general passthrough with the original URL appended. Empty when the matching
-# base is emptied (opt-out) or the URL is not http(s). Pure string work, so it is
-# unit-tested without a network (issue #104).
-sh_mirror_url() {
+# sh_mirror_urls URL -> every mirror URL for URL, one per line, best first.
+# Pure string work, so it is unit-tested without a network. An api.github.com
+# path lists the authenticated API mirror first and the general passthrough
+# second, because the passthrough was measured to carry api.github.com JSON
+# too: an API read has two routes, not one. Anything else lists the passthrough
+# first and the API mirror second; the second answers 420 there (measured) and
+# is skipped on that code, but listing it keeps the order explicit and gives a
+# future base that starts carrying downloads a place to win without new code.
+# An emptied base opts out of its own position rather than resurrecting.
+sh_mirror_urls() {
     case "${1:-}" in
         https://api.github.com/*)
-            # `${VAR-default}` and not `:-`: an explicitly emptied base opts
-            # out, while an unset one takes the default. `:-` cannot tell
-            # the two apart and would resurrect an opted-out mirror.
-            sh_mu_base=${SANDHOME_MIRROR_GH_URL-https://api.gh.pkgforge.dev/}
-            [ -n "$sh_mu_base" ] || return 1
-            printf '%s%s' "$sh_mu_base" "${1#https://api.github.com/}"
+            sh_mus_gh=${SANDHOME_MIRROR_GH_URL-https://api.gh.pkgforge.dev/}
+            sh_mus_rv=${SANDHOME_MIRROR_URL-https://api.rv.pkgforge.dev/}
+            [ -n "$sh_mus_gh" ] && printf '%s%s\n' "$sh_mus_gh" "${1#https://api.github.com/}"
+            [ -n "$sh_mus_rv" ] && printf '%s%s\n' "$sh_mus_rv" "$1"
+            [ -n "$sh_mus_gh" ] || [ -n "$sh_mus_rv" ] || return 1
             return 0 ;;
         https://*|http://*)
-            sh_mu_base=${SANDHOME_MIRROR_URL-https://api.rv.pkgforge.dev/}
-            [ -n "$sh_mu_base" ] || return 1
-            printf '%s%s' "$sh_mu_base" "$1"
+            sh_mus_rv=${SANDHOME_MIRROR_URL-https://api.rv.pkgforge.dev/}
+            sh_mus_gh=${SANDHOME_MIRROR_GH_URL-https://api.gh.pkgforge.dev/}
+            [ -n "$sh_mus_rv" ] && printf '%s%s\n' "$sh_mus_rv" "$1"
+            # A download through the API mirror is a path-shape 420 (measured),
+            # so it is listed only as the last resort and the fetcher treats a
+            # 420 as "try the next base", never as the fetch failure.
+            case "$1" in
+                https://github.com/*|https://raw.githubusercontent.com/*|https://codeload.github.com/*) : ;;
+                *) [ -n "$sh_mus_gh" ] && printf '%s%s\n' "$sh_mus_gh" "$1" ;;
+            esac
+            [ -n "$sh_mus_rv" ] || return 1
             return 0 ;;
     esac
     return 1
+}
+
+sh_mirror_url() {
+    sh_mirror_urls "$1" | { read -r sh_mu_first || exit 1; printf '%s' "$sh_mu_first"; }
 }
 
 # sh_fetch_via_mirror URL DEST -> 0 when the mirror leg fetched the URL. Runs
@@ -215,15 +229,31 @@ sh_mirror_url() {
 # this leg is curl-only and says so when curl is absent rather than reporting a
 # UA refusal as a fetch failure.
 sh_fetch_via_mirror() {
-    sh_fm_mirror=$(sh_mirror_url "$1") || return 1
     if ! sh_have curl; then
-        sh_warn "the mirror leg needs curl (both mirror bases answer wget with 420) and none is here; skipping $sh_fm_mirror"
+        sh_warn "the mirror leg needs curl (both mirror bases answer wget with 420) and none is here; skipping the mirror"
         return 1
     fi
-    if curl -fSL --retry 2 --retry-delay 2 -A 'curl/sandhome' -o "$2" "$sh_fm_mirror" 2>/dev/null && [ -s "$2" ]; then
-        sh_step "Downloaded from: $sh_fm_mirror with curl (mirror)"
-        return 0
-    fi
+    sh_fm_list=$(sh_mirror_urls "$1") || return 1
+    sh_fm_tried=''
+    while IFS= read -r sh_fm_mirror || [ -n "$sh_fm_mirror" ]; do
+        [ -n "$sh_fm_mirror" ] || continue
+        sh_fm_tried="$sh_fm_tried $sh_fm_mirror"
+        sh_fm_code=''
+        # The HTTP code is read so a 420 (path shape the base does not serve)
+        # falls through to the next base instead of failing the fetch. curl -f
+        # hides the code, so a second headed probe names it; both use the same
+        # curl-like agent the bases require.
+        if curl -fSL --retry 2 --retry-delay 2 -A 'curl/sandhome' -o "$2" "$sh_fm_mirror" 2>/dev/null && [ -s "$2" ]; then
+            sh_step "Downloaded from: $sh_fm_mirror with curl (mirror)"
+            return 0
+        fi
+        sh_fm_code=$(curl -s -o /dev/null -w '%{http_code}' -A 'curl/sandhome' "$sh_fm_mirror" 2>/dev/null)
+        case "$sh_fm_code" in
+            420) sh_warn "the mirror answered 420 for a path shape it does not serve ($sh_fm_mirror); trying the next base"; rm -f "$2" 2>/dev/null; continue ;;
+        esac
+    done <<EOF
+$sh_fm_list
+EOF
     return 1
 }
 # (return 1, no network beyond two confirmatory probes) unless ALL hold:
@@ -552,6 +582,8 @@ sh_pin_for() {
             # NAME to be here, and that is the point of the list -- a module
             # cannot be added without somewhere for its digest to live.
             qemuuser) [ -n "${SANDHOME_SHA256_QEMUUSER:-}" ] && { printf '%s' "$SANDHOME_SHA256_QEMUUSER"; return 0; } ;;
+            pkgconf) [ -n "${SANDHOME_SHA256_PKGCONF:-}" ] && { printf '%s' "$SANDHOME_SHA256_PKGCONF"; return 0; } ;;
+            perl) [ -n "${SANDHOME_SHA256_PERL:-}" ] && { printf '%s' "$SANDHOME_SHA256_PERL"; return 0; } ;;
             shellcheck) [ -n "${SANDHOME_SHA256_SHELLCHECK:-}" ] && { printf '%s' "$SANDHOME_SHA256_SHELLCHECK"; return 0; } ;;
         esac
     fi
@@ -644,7 +676,7 @@ sh_pin_for() {
 # sh_pin_names -> every toolchain name a `SANDHOME_SHA256_<NAME>` pin answers to.
 # Printed so tests/unit.sh can require one entry per module in tools/, which is
 # what keeps the closed `case` above from going stale when a module is added.
-sh_pin_names() { printf ' fd go jq node python ripgrep rust zig mold clang deno bun qemuuser shellcheck shfmt yq ninja gh cmake meson\n'; }
+sh_pin_names() { printf ' fd go jq node python ripgrep rust zig mold clang deno bun qemuuser shellcheck shfmt yq ninja gh cmake meson pkgconf perl\n'; }
 
 # sh_pin_from URL [NAME] [PUBLISHED] -> the NAME of the pin that answered for
 # this URL, or nothing. The provenance line in the report names it, because a

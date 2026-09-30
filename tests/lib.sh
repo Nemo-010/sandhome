@@ -111,6 +111,42 @@ t_end() {
     exit "$t_end_rc"
 }
 
+# t_exec_tmpdir PREFIX -> a temp dir that actually runs binaries, printed on
+# stdout. /tmp and /dev/shm refuse execve on some sandboxes while /workspace
+# runs them (measured: this machine runs /workspace and refuses /tmp and
+# /dev/shm), and the reverse holds on others, so a test that builds a probe
+# into ${TMPDIR:-/tmp} fails with Permission denied on exactly the machine the
+# tree exists for. The order is larger exec-capable volumes first, then the
+# standard tmp roots, and every entry is probed with a real file before it can
+# win; a dir that does not exist is made, a dir that refuses exec loses. Falls
+# back to ${TMPDIR:-/tmp} even when nothing runs, so callers always get a dir
+# and the exec failure is measured at run time rather than at mktemp time.
+t_exec_tmpdir() {
+    t_et_prefix=${1:-sandhome-test}
+    t_et_probe() {
+        [ -d "$1" ] || return 1
+        t_et_f="$1/.sandhome.exec.$$"
+        if ! printf '#!/bin/sh\nexit 0\n' > "$t_et_f" 2>/dev/null; then rm -f "$t_et_f" 2>/dev/null; return 1; fi
+        chmod 0700 "$t_et_f" 2>/dev/null || true
+        if "$t_et_f" >/dev/null 2>&1; then rm -f "$t_et_f" 2>/dev/null; return 0; fi
+        rm -f "$t_et_f" 2>/dev/null; return 1
+    }
+    for t_et_base in "/workspace" "$PWD" "${TMPDIR:-}" /tmp /dev/shm "${HOME:-}/.cache"; do
+        [ -n "$t_et_base" ] || continue
+        [ -d "$t_et_base" ] || continue
+        t_et_try="$t_et_base/.sandhome-test-$$"
+        mkdir -p "$t_et_try" 2>/dev/null || continue
+        if t_et_probe "$t_et_try"; then
+            t_et_dir=$(mktemp -d "$t_et_try/$t_et_prefix.XXXXXX" 2>/dev/null) || t_et_dir="$t_et_try/$t_et_prefix.$$"
+            mkdir -p "$t_et_dir" 2>/dev/null || continue
+            printf '%s' "$t_et_dir"
+            return 0
+        fi
+        rmdir "$t_et_try" 2>/dev/null || true
+    done
+    mktemp -d "${TMPDIR:-/tmp}/$t_et_prefix.XXXXXX" 2>/dev/null || printf '%s' "${TMPDIR:-/tmp}/$t_et_prefix.$$"
+}
+
 # tests_repo_dir -> the checkout root, from this file's location.
 tests_repo_dir() {
     CDPATH='' cd -- "$(dirname -- "$0")/.." 2>/dev/null && pwd

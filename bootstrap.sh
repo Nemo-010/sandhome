@@ -301,13 +301,19 @@ sh_toolset_names() {
         minimal)   printf 'jq\n' ;;
         cli)       printf 'jq ripgrep fd\n' ;;
         developer) printf 'jq ripgrep fd python node\n' ;;
-        languages) printf 'jq ripgrep fd python node rust go zig deno bun mold\n' ;;
-        agent)     printf 'jq ripgrep fd python node rust go zig deno bun mold\n' ;;
+        # REDUNDANCY: THE COMPILER SETS SHIP THE BUILD CHAIN, NOT JUST THE
+        # COMPILER. A rust/go checkout that then configures a CMake subproject
+        # failed with `cmake: command not found` after a languages install,
+        # because languages named compilers but not the build systems that
+        # drive them. The build tools are small beside the compilers, so they
+        # ride with both compiler toolsets as well as with project.
+        languages) printf 'jq ripgrep fd python node rust go zig deno bun mold clang cmake meson ninja pkgconf perl\n' ;;
+        agent)     printf 'jq ripgrep fd python node rust go zig deno bun mold clang cmake meson ninja pkgconf perl\n' ;;
         # The union a from-source C/C++ build needs, in one command, so an agent
         # that pasted a CMake or meson project does not hand-assemble the list
         # before the first configure (issue #123). meson pulls python through its
         # own REQUIRES, so naming it here is the whole closure.
-        project)   printf 'jq ripgrep fd python node go rust clang cmake meson ninja mold\n' ;;
+        project)   printf 'jq ripgrep fd python node go rust clang cmake meson ninja mold pkgconf perl\n' ;;
         *)         return 1 ;;
     esac
 }
@@ -349,11 +355,14 @@ sh_bootstrap_detect() {
             sh_bdet_add clang
             sh_bdet_add mold
             sh_bdet_add ninja
+            sh_bdet_add pkgconf
+            sh_bdet_add perl
             # The build system itself, not only its compiler and linker: a
             # CMakeLists.txt project configured with `cmake -S . -B build`
             # failed with `command not found` before the catalog shipped cmake
             # (issue #123). meson.build names meson; configure.ac is autotools
-            # and is already on the base image, so it adds nothing here.
+            # and needs pkgconf plus perl even when the base image carries them,
+            # so both are folded here by name rather than relied on by accident.
             [ -e "$sh_bdet_d/CMakeLists.txt" ] || [ -e "$sh_bdet_d/CMakePresets.json" ] && sh_bdet_add cmake
             [ -e "$sh_bdet_d/meson.build" ] && sh_bdet_add meson
         fi
@@ -541,15 +550,32 @@ sh_bootstrap_install_command() {
     # path gets the command and the environment in one line. The exec bin path is
     # baked in, and `sandhome resume` rewrites the snippet after a tmpfs restart
     # moves the view.
+    # REDUNDANCY: THREE ROOTS, NOT ONE BAKED PATH, BECAUSE THE BAKED PATH GOES
+    # STALE. A tmpfs restart moves the exec view before `resume` rewrites this
+    # file, so a snippet that names only the baked bin answers `not found` in
+    # exactly the cold shell it exists for. The function tries the baked bin,
+    # then the recorded SANDHOME_EXEC, then the repo copy beside the bootstrap,
+    # then PATH, and fails loudly naming the home it read. Paths are quoted
+    # with sh_sq_quote so a home with a space or quote survives sourcing.
     if [ -d "$SH_HOME" ] && [ -n "$SH_EXEC_BIN" ]; then
         sh_bic_entry="$SH_HOME/entry.sh"
+        sh_bic_qhome=$(sh_sq_quote "$SH_HOME")
+        sh_bic_qexec=$(sh_sq_quote "$SH_EXEC")
+        sh_bic_qbin=$(sh_sq_quote "$SH_EXEC_BIN/sandhome")
         {
             printf '%s\n' '# sandhome entry point. Generated; sourced, not executed.'
             printf '%s\n' "# Written because a non-login shell has no PATH (issue #122)."
-            printf '%s\n' "SANDHOME_HOME=\${SANDHOME_HOME:-'$SH_HOME'}"
-            printf '%s\n' "SANDHOME_EXEC=\${SANDHOME_EXEC:-'$SH_EXEC'}"
+            printf '%s\n' "SANDHOME_HOME=\${SANDHOME_HOME:-$sh_bic_qhome}"
+            printf '%s\n' "SANDHOME_EXEC=\${SANDHOME_EXEC:-$sh_bic_qexec}"
             printf '%s\n' 'export SANDHOME_HOME SANDHOME_EXEC'
-            printf 'sandhome() { "%s/sandhome" "$@"; }\n' "$SH_EXEC_BIN"
+            printf '%s\n' "_sandhome_baked=$sh_bic_qbin"
+            printf '%s\n' 'sandhome() {'
+            printf '%s\n' '  if [ -x "$_sandhome_baked" ]; then "$_sandhome_baked" "$@"; return $?; fi'
+            printf '%s\n' '  if [ -n "${SANDHOME_EXEC:-}" ] && [ -x "$SANDHOME_EXEC/bin/sandhome" ]; then "$SANDHOME_EXEC/bin/sandhome" "$@"; return $?; fi'
+            printf '%s\n' '  if [ -n "${SANDHOME_HOME:-}" ] && [ -x "$SANDHOME_HOME/repo/bin/sandhome" ]; then "$SANDHOME_HOME/repo/bin/sandhome" "$@"; return $?; fi'
+            printf '%s\n' '  if command -v sandhome >/dev/null 2>&1; then command sandhome "$@"; return $?; fi'
+            printf '%s\n' '  printf "%s\n" "sandhome: no working copy (baked $_sandhome_baked missing, SANDHOME_EXEC/bin/sandhome missing, repo/bin/sandhome missing, nothing on PATH; re-run the setup)" >&2; return 127'
+            printf '%s\n' '}'
             printf '%s\n' "[ -r \"\$SANDHOME_HOME/env.sh\" ] && . \"\$SANDHOME_HOME/env.sh\""
         } > "$sh_bic_entry" 2>/dev/null && \
             sh_step "wrote $sh_bic_entry (source it from a shell with no PATH)"

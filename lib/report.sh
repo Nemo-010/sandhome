@@ -127,6 +127,24 @@ sh_report_text() {
     printf 'exec_space=%s\n' "$(sh_space_status "${SH_EXEC:-/tmp}" 2>/dev/null)"
     printf 'max_exec_free_mb=%s\n' "$(sh_space_max_exec_free 2>/dev/null)"
     printf 'exec_ceiling=%s\n' "$(sh_space_ceiling 2>/dev/null)"
+    # The invoking shell, measured so a harness that spawns a non-login shell
+    # per tool call sees what it needs: whether this shell is a login shell,
+    # whether env.sh is already on this shell's PATH, and the exact one-liner
+    # to load it. The operator otherwise discovers the asymmetry themselves
+    # (issue #122). `login_shell` reads `shopt -q login_shell` under bash and
+    # falls back to "unknown" elsewhere, because POSIX sh has no portable
+    # login test and guessing would be the wrong answer.
+    sh_rt_login=unknown
+    if [ -n "${BASH_VERSION:-}" ]; then
+        if shopt -q login_shell 2>/dev/null; then sh_rt_login=yes; else sh_rt_login=no; fi
+    elif [ -n "${ZSH_VERSION:-}" ]; then
+        case "${options[login]:-}" in on) sh_rt_login=yes ;; off) sh_rt_login=no ;; esac
+    fi
+    sh_rt_onpath=no
+    case ":${PATH:-}:" in *":${SH_EXEC_BIN:-}:") sh_rt_onpath=yes ;; esac
+    printf 'login_shell=%s\n' "$sh_rt_login"
+    printf 'env_on_path=%s\n' "$sh_rt_onpath"
+    printf 'entry=%s\n' "${SH_HOME:-unknown}/entry.sh"
     printf 'installed=%s\n'   "$(sh_lead "${SH_INSTALLED:-}")"
     printf 'adopted=%s\n'     "$(sh_lead "${SH_ADOPTED:-}")"
     # # STOP: THIS LINE PROBES THE DISK. It printed $SH_SHIMS_BUILT, which is
@@ -194,6 +212,15 @@ sh_report_json() {
         "$(sh_json_escape "$(sh_lead "${SH_INSTALLED:-}")")" \
         "$(sh_json_escape "$(sh_lead "${SH_ADOPTED:-}")")" \
         "$(sh_json_escape "$(sh_lead "$(sh_shim_present 2>/dev/null)")")"
+    sh_rj_login=unknown
+    if [ -n "${BASH_VERSION:-}" ]; then
+        if shopt -q login_shell 2>/dev/null; then sh_rj_login=yes; else sh_rj_login=no; fi
+    fi
+    sh_rj_onpath=no
+    case ":${PATH:-}:" in *":${SH_EXEC_BIN:-}:") sh_rj_onpath=yes ;; esac
+    printf ',"login_shell":"%s","env_on_path":"%s","entry":"%s"' \
+        "$(sh_json_escape "$sh_rj_login")" "$(sh_json_escape "$sh_rj_onpath")" \
+        "$(sh_json_escape "${SH_HOME:-unknown}/entry.sh")"
     printf ',"shims_missing":"%s","view":"%s","memexec":"%s"' \
         "$(sh_json_escape "$(sh_lead "$(sh_shim_needed_missing 2>/dev/null)")")" \
         "$(sh_json_escape "$(sh_report_view 2>/dev/null)")" \
@@ -310,6 +337,39 @@ sh_doctor() {
     # broke 8 views in 8 rounds (#49, #43).
     if [ "${SH_DOCTOR_JSON:-0}" != 1 ] && [ ! -x "$SH_EXEC_BIN/sandhome" ] && [ -r "$SH_HOME/repo/bin/sandhome" ]; then
         printf 'note   exec root was cleared (tmpfs restart); re-run the setup, then run sandhome repair only if doctor still fails\n'
+    fi
+    # The work tree names its own missing build tool, with the exact next
+    # command, so a `cmake: command not found` after a green doctor never needs
+    # knowing that `sandhome add --url` exists (issue #123). These are notes,
+    # never failures: doctor gates what the setup asked for, and the work tree
+    # is what the caller pasted after it. Each marker is checked against the
+    # probe, not against the wanted list, because a `--toolset developer` run
+    # in a CMake checkout wants cmake even though it never named it.
+    if [ "${SH_DOCTOR_JSON:-0}" != 1 ]; then
+        sh_doc_wd=${PWD:-.}
+        if [ -e "$sh_doc_wd/CMakeLists.txt" ] || [ -e "$sh_doc_wd/CMakePresets.json" ]; then
+            if ! sh_have cmake; then
+                printf 'note   CMakeLists.txt here but cmake is not on PATH; run: sandhome install cmake\n'
+            fi
+        fi
+        if [ -e "$sh_doc_wd/meson.build" ]; then
+            if ! sh_have meson; then
+                printf 'note   meson.build here but meson is not on PATH; run: sandhome install meson\n'
+            fi
+        fi
+        if [ -e "$sh_doc_wd/configure.ac" ]; then
+            if ! sh_have pkgconf && ! sh_have pkg-config; then
+                printf 'note   configure.ac here but neither pkgconf nor pkg-config is on PATH; run: sandhome install pkgconf\n'
+            fi
+            if ! sh_have perl; then
+                printf 'note   configure.ac here but perl is not on PATH; run: sandhome install perl\n'
+            fi
+        fi
+        if [ -e "$sh_doc_wd/Makefile" ] || [ -e "$sh_doc_wd/makefile" ] || [ -e "$sh_doc_wd/GNUmakefile" ]; then
+            if ! sh_have cmake && ([ -e "$sh_doc_wd/CMakeLists.txt" ] || [ -e "$sh_doc_wd/CMakePresets.json" ]); then
+                printf 'note   build files here but cmake is not on PATH; run: sandhome install cmake\n'
+            fi
+        fi
     fi
     # A needed shim that is not there is a failure even when the machine looks
     # like it does not need it, because a shim built by an earlier run and a

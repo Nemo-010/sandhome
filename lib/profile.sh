@@ -26,6 +26,13 @@ sandhome_profile_main() {
   # # STOP: INTERACTIVE, NOT LOGIN. A tool that sends commands to a LOGIN shell would
   # otherwise have its environment changed silently and after the caller's own
   # setup. `$-` carries `i` only for a shell a person is typing at.
+  # A harness that spawns a non-login, non-interactive shell per tool call never
+  # reads this file at all (neither profile nor rc), so widening this guard
+  # would not reach it and would run env.sh on every shell start that does.
+  # That shell loads `$SANDHOME_HOME/entry.sh` instead, which needs no PATH
+  # and no login: `. "${XDG_DATA_HOME:-$HOME/.local/share}/sandhome/entry.sh"`
+  # (issue #122). This guard stays, and the entry point is the non-interactive
+  # path, so neither depends on the other.
   case "$-" in
     *i*) ;;
     *)   return 0 ;;

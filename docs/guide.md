@@ -13,14 +13,19 @@ the page to read before adding a toolchain to it.
 - **`SANDHOME_EXEC`**  -  the root that runs binaries. Default: the home root when
   it runs binaries, otherwise the roomiest candidate that both is writable and
   *actually runs a file* and clears `SANDHOME_MIN_EXEC_MB` (128) megabytes free.
-  Candidates are tried in the order
-  `$SANDHOME_EXEC`, the home, `/dev/shm`, `/tmp`, `/run/user/<uid>`,
-  `$HOME/.cache/sandhome/exec`, and order is only a tie-break: preferring the
-  first candidate that merely cleared the floor put `/dev/shm` (184MB) ahead of
-  `/tmp` (488MB) and the default toolset failed for want of room (issue #37).
-  There is no `/var/tmp`: it was in an older list
-  only because the probe report created it, and `/var` is precisely the
-  directory a sealed cage tends not to have.
+  Candidates are the explicit override, the working-tree namespaced dirs (PWD,
+  its parents, the git top level), the named work volumes (`/workspace`,
+  `$GITHUB_WORKSPACE`, `$RUNNER_TEMP`, `$AGENT_WORKFOLDER`, `$WORKSPACE`,
+  `/mnt`, `/data`, `/scratch`, `/srv`), then the home, `/dev/shm`, `/tmp`,
+  `/run/user/<uid>`, `$HOME/.cache/sandhome/exec`, and order is only a tie-break:
+  preferring the first candidate that merely cleared the floor put `/dev/shm`
+  (184MB) ahead of `/tmp` (488MB) and the default toolset failed for want of
+  room (issue #37). Exec perms differ by sandbox, so every candidate is probed
+  with a real file before it can win: a roomy noexec volume loses on its merits
+  and a small exec-capable one wins only when nothing roomier runs. On this
+  machine `/workspace` runs and holds 117GB while `/tmp` and `/dev/shm` refuse
+execve, so the plan picks the workspace volume; on a cage without it the same
+  entries are absent and the fallback is the roomiest tmpfs that runs.
 
   **Free space decides between working candidates, and it is the decision that
   matters.** On this sandbox `/dev/shm` works and has 244MB while `/tmp` works
@@ -135,7 +140,7 @@ sh bootstrap.sh [options]
 
 | option | meaning |
 | --- | --- |
-| `--toolset NAME` | `minimal`, `cli`, `developer`, `languages`, `agent`. What each carries is in the table below |
+| `--toolset NAME` | `minimal`, `cli`, `developer`, `project`, `languages`, `agent`. What each carries is in the table below |
 | `--with LIST` / `--without LIST` | add or drop toolchains by name |
 | `--list-toolchains` | print the known names |
 | `--home DIR` / `--exec DIR` | override the roots. An option beats the environment variable of the same name. |
@@ -144,27 +149,31 @@ sh bootstrap.sh [options]
 | `--no-profile` / `--no-path-line` | leave the login files alone |
 | `--dry-run` / `--json` | preview (with per-toolchain `feas` lines and a `total_exec_need_mb` total), or one JSON report |
 | `--doh-url URL` | DNS-over-HTTPS resolver for a confirmed no-resolver cage (see `SANDHOME_DOH_URL` in the reference). Off unless set. |
-| | blocked origins: when plain downloaders fail for a non-DNS reason (a 403), one mirror leg runs before the failure message. `SANDHOME_MIRROR_URL` (default the pkgforge passthrough) carries any origin URL and is a second egress path; `SANDHOME_MIRROR_GH_URL` (default the API mirror) is an authenticated, read-only GitHub API proxy that serves `api.github.com` JSON at 5000/hour where a caller's IP gets 60/hour, so API reads route to it while downloads go through the passthrough. Empty either to opt out. The pin still applies: mirrored bytes are the origin's bytes under another route (byte-identical, measured). |
+| | blocked origins: when plain downloaders fail for a non-DNS reason (a 403), mirror legs run before the failure message. `SANDHOME_MIRROR_URL` (default the pkgforge passthrough) carries any origin URL and is a second egress path; `SANDHOME_MIRROR_GH_URL` (default the API mirror) is an authenticated, read-only GitHub API proxy that serves `api.github.com` JSON at 5000/hour where a caller's IP gets 60/hour. API reads try the API mirror first and fall through to the passthrough (which was measured to carry api.github.com too), so an API read has two routes; downloads go through the passthrough, and a 420 (a path shape the API mirror does not serve, measured for release assets and raw) falls through rather than failing the fetch. Empty either base to opt out of its position. The pin still applies: mirrored bytes are the origin's bytes under another route (byte-identical, measured). |
 
-The five toolsets, and the difference between them is the compilers:
+The six toolsets, and the difference between them is the compilers:
 
 | toolset | carries | copy-view MB (declared sum) |
 | --- | --- | --- |
 | `minimal` | `jq` | 8 |
 | `cli` | `jq ripgrep fd` | 56 |
 | `developer` | `jq ripgrep fd python node` | 286 |
-| `languages` | `developer` plus `rust go zig deno bun mold` | 1196 |
-| `agent` | the same as `languages` | 1196 |
+| `project` | `developer` plus `go rust clang cmake meson ninja mold pkgconf perl` | 3766 |
+| `languages` | `developer` plus `rust go zig deno bun mold clang cmake meson ninja pkgconf perl` | 4316 |
+| `agent` | the same as `languages` | 4316 |
 
 The sums are the declared copy-mode figures added up; launch mode costs less
 per the per-toolchain table in `docs/architecture.md`, which owns every
 figure here. `--dry-run` prices the actual request against the actual root
 before spending anything.
 
-`clang` is the one toolchain in no toolset, and is asked for by name:
+`clang` is in `project`, `languages` and `agent`, and is asked for by name otherwise:
 `sandhome install clang` or `bootstrap.sh --with clang`. Its download is above
 1GB and its tree wants ~16GB on the home root; in launch mode its exec view
-is launcher copies, so a small exec root holds it. A toolchain already on
+is launcher copies, so a small exec root holds it. `cmake`, `meson`, `pkgconf`
+and `perl` ride with the same three toolsets and are folded in by work-tree
+detection (`CMakeLists.txt`, `meson.build`, `configure.ac`) on any toolset, so
+a C/C++ checkout configures without hand-assembling the chain. A toolchain already on
 `PATH` is adopted, not downloaded; `SANDHOME_FORCE=1` (or a comma list of
 names, or `sandhome install --force NAME`) installs locally regardless.
 

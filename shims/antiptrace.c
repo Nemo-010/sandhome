@@ -171,17 +171,52 @@ static int sh_memfd(const char *name) {
     return -1;
 }
 
-/* The edited copy is handed back through a memfd. The name is DELIBERATELY not
+/* The edited copy is handed back through a memfd, with a temp-file fallback
+ * when the sandbox denies memfd_create. The name is DELIBERATELY not
  * a path: memfd_create names an anonymous file, and readlink("/proc/self/fd/N")
  * on it reads "/memfd:sandhome-status (deleted)". That is honest -- the caller's
  * fd really is not the on-disk /proc file -- and a consumer that re-reads the
- * fd gets the edited bytes either way. */
+ * fd gets the edited bytes either way.
+ * REDUNDANCY: MEMFD, THEN A TEMP FILE, NEVER AN EXHAUSTED FD. A seccomp profile
+ * that denies memfd_create leaves sh_memfd at -1; returning -1 here makes the
+ * caller hand back the original descriptor AFTER it was read to EOF, so every
+ * later read gets EOF and cat prints nothing (measured: this sandbox denies
+ * memfd and both cat shapes went empty). The fallback writes the edited bytes
+ * to an unlinked temp file in the first writable dir that takes it, so the
+ * shim keeps zeroing TracerPid where memfd does not exist. Only when nothing
+ * takes the bytes does the caller rewind and hand back the original. */
 static int sh_reopen_edited(char *content, ssize_t len) {
     int fd = sh_memfd("sandhome-status");
-    if (fd < 0) return -1;
-    if (len > 0 && write(fd, content, (size_t)len) != len) { close(fd); return -1; }
-    lseek(fd, 0, SEEK_SET);
-    return fd;
+    if (fd >= 0) {
+        if (len > 0 && write(fd, content, (size_t)len) != len) { close(fd); return -1; }
+        lseek(fd, 0, SEEK_SET);
+        return fd;
+    }
+    {
+        const char *dirs[8];
+        int nd = 0, i;
+        char tmpl[4096];
+        dirs[nd++] = getenv("SANDHOME_EXEC");
+        dirs[nd++] = getenv("TMPDIR");
+        dirs[nd++] = "/tmp";
+        dirs[nd++] = "/dev/shm";
+        dirs[nd++] = "/workspace";
+        dirs[nd++] = getenv("HOME");
+        for (i = 0; i < nd; i++) {
+            const char *d = dirs[i];
+            int tfd;
+            if (!d || !*d) continue;
+            if (strlen(d) + 32 >= sizeof tmpl) continue;
+            snprintf(tmpl, sizeof tmpl, "%s/.sandhome-status.XXXXXX", d);
+            tfd = mkstemp(tmpl);
+            if (tfd < 0) continue;
+            unlink(tmpl);
+            if (len > 0 && write(tfd, content, (size_t)len) != len) { close(tfd); continue; }
+            lseek(tfd, 0, SEEK_SET);
+            return tfd;
+        }
+    }
+    return -1;
 }
 
 /* Read the whole descriptor, however its size reports. /proc files report
@@ -233,7 +268,7 @@ static int sh_maybe_fake_fd(const char *path, int fd) {
     if (!changed) { free(buf); return fd; }
     nfd = sh_reopen_edited(buf, n);
     free(buf);
-    if (nfd < 0) return fd;
+    if (nfd < 0) { lseek(fd, 0, SEEK_SET); return fd; }
     close(fd);
     return nfd;
 }

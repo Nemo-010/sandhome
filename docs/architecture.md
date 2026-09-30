@@ -69,6 +69,8 @@ number to appear in its row, so the table and the modules cannot drift.
 | go | 150 | 12 |
 | jq | 8 | 8 |
 | meson | 32 | 8 |
+| perl | 8 | 8 |
+| pkgconf | 8 | 8 |
 | mold | 60 | 8 |
 | ninja | 8 | 8 |
 | node | 200 | 16 |

@@ -741,7 +741,7 @@ ts_body=$(sed -n '/^sh_toolset_names()/,/^}/p' "$ROOT/bootstrap.sh" 2>/dev/null)
 ts_bad=''
 pv_bad=''
 ehd_bad=''
-for ts_name in minimal cli developer languages agent; do
+for ts_name in minimal cli developer project languages agent; do
     # The names are stored as printf 'jq ripgrep fd\n', so the trailing \n is
     # a literal backslash-n inside the quoted string: it is a SEPARATOR, and
     # `tr -d '\\'` would eat the n off the end of the last name instead.
@@ -790,12 +790,14 @@ if grep -q 'FAKEPTY_SIZE.*reference\|reference.*FAKEPTY_SIZE' "$ROOT/docs/guide.
 else
     t_ok 0 'the guide does not defer the pty variables to the reference'
 fi
-# clang is deliberately in no toolset, and the guide must say so rather than let
-# a consumer assume `languages` includes it.
-if grep -q 'clang' "$ts_body" 2>/dev/null; then
-    t_ok 1 'clang stays out of every toolset'
+# clang rides with the build toolsets, and the guide must say so rather than let
+# a consumer assume `languages` is compilers only. The old rule (clang in no
+# toolset) rotted when project shipped it; the new rule is that project,
+# languages and agent all carry the from-source chain, and the guide names it.
+if grep -q 'clang.*project.*languages.*agent\|languages.*clang\|project.*clang' "$ROOT/docs/guide.md" 2>/dev/null; then
+    t_ok 0 'the guide names clang in the build toolsets'
 else
-    t_ok 0 'clang stays out of every toolset'
+    t_ok 1 'the guide names clang in the build toolsets'
 fi
 # # STOP: THE GENERATED errandsh TABLE AND THE HAND-WRITTEN SKILL TABLE MUST
 # AGREE. The reference published `(unset)` for all five errandsh variables

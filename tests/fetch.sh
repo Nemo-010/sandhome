@@ -30,7 +30,7 @@ _sh_real_have() { command -v "$1" >/dev/null 2>&1; }
 
 t_begin fetch
 
-work=$(mktemp -d "${TMPDIR:-/tmp}/sandhome-fetch.XXXXXX")
+work=$(t_exec_tmpdir sandhome-fetch)
 trap 'rm -rf "$work"' EXIT
 SH_HOME_TMP="$work/home-tmp"
 export SH_HOME_TMP
@@ -375,5 +375,25 @@ esac
 t_is "$(SANDHOME_MIRROR_URL= sh_mirror_url 'https://github.com/x/y' || printf empty)" 'empty' 'an emptied mirror base opts out'
 t_is "$(sh_mirror_url 'ftp://x/y' || printf empty)" 'empty' 'a non-http URL maps nowhere'
 t_is "$(SANDHOME_MIRROR_URL=https://m.example/ sh_mirror_url 'https://github.com/x/y')" 'https://m.example/https://github.com/x/y' 'the mirror base is configurable'
+# REDUNDANCY: AN API READ HAS TWO ROUTES, NOT ONE. The passthrough was measured
+# to carry api.github.com JSON too, so the API mirror is first and the
+# passthrough is second; a 420 on the first falls through to the second rather
+# than failing the fetch (issue #124). Downloads list only the passthrough for
+# the github shapes the API mirror 420s, and both lists stay pure string work.
+api_list=$(sh_mirror_urls 'https://api.github.com/repos/x/y')
+case "$api_list" in
+    *'https://api.gh.pkgforge.dev/repos/x/y'*'https://api.rv.pkgforge.dev/https://api.github.com/repos/x/y'*) t_ok 0 'an API read lists the API mirror then the passthrough' ;;
+    *) t_ok 1 "an API read lists the API mirror then the passthrough (got: $api_list)" ;;
+esac
+dl_list=$(sh_mirror_urls 'https://github.com/x/y/releases/download/v1/y.tar.gz')
+case "$dl_list" in
+    *'https://api.rv.pkgforge.dev/https://github.com/x/y/releases/download/v1/y.tar.gz'*) t_ok 0 'a download lists the passthrough first' ;;
+    *) t_ok 1 "a download lists the passthrough first (got: $dl_list)" ;;
+esac
+case "$dl_list" in
+    *api.gh.pkgforge.dev*) t_ok 1 "a github download never lists the API mirror (got: $dl_list)" ;;
+    *) t_ok 0 'a github download never lists the API mirror' ;;
+esac
+t_is "$(SANDHOME_MIRROR_GH_URL= sh_mirror_urls 'https://api.github.com/repos/x/y' | head -1)" 'https://api.rv.pkgforge.dev/https://api.github.com/repos/x/y' 'an emptied API base falls through to the passthrough'
 
 t_end

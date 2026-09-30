@@ -33,7 +33,7 @@ fi
 
 t_begin bootstrap
 
-work=$(mktemp -d "${TMPDIR:-/tmp}/sandhome-e2e.XXXXXX")
+work=$(t_exec_tmpdir sandhome-e2e)
 trap 'rm -rf "$work"' EXIT
 
 # Pick a home root that cannot exec, so the split is real. /state/home and
@@ -316,11 +316,20 @@ DRIVER
 mkdir -p "$work/scratch/lib" "$work/scratch/tools"
 : > "$work/scratch/lib/common.sh"
 # The repo dir must read as a scratch fetch dir (under TMPDIR), which is the
-# only shape that persists; a clone path takes no branch either way.
-sh "$work/persist-driver.sh" "$ROOT" "$work/scratch" "$work/phome" 1 > "$work/persist.out" 2>&1
+# only shape that persists; a clone path takes no branch either way. $work may
+# itself be on an exec-capable volume outside TMPDIR (t_exec_tmpdir prefers
+# /workspace), so the scratch tree is made under TMPDIR explicitly, not under
+# $work, or the dry-run branch never triggers and the clause fails against
+# correct code.
+scratch_base=${TMPDIR:-/tmp}/sandhome-scratch-$$
+rm -rf "$scratch_base"
+mkdir -p "$scratch_base/lib" "$scratch_base/tools"
+: > "$scratch_base/lib/common.sh"
+sh "$work/persist-driver.sh" "$ROOT" "$scratch_base" "$work/phome" 1 > "$work/persist.out" 2>&1
 t_contains "$(cat "$work/persist.out" 2>/dev/null)" 'would install the durable library' \
     'a dry run names the durable library as would-install'
 t_ok "$([ ! -e "$work/phome/repo" ]; echo $?)" 'a dry run writes no durable library (#70)'
+rm -rf "$scratch_base" 2>/dev/null
 sh "$work/persist-driver.sh" "$ROOT" "$ROOT" "$work/phome2" 0 >/dev/null 2>&1
 t_ok "$([ ! -e "$work/phome2/repo" ]; echo $?)" 'a clone checkout persists nothing (nothing to persist)'
 SANDHOME_REPO="$ROOT" SANDHOME_HOME="$dryhome" SANDHOME_EXEC="$work/dry-exec" \
@@ -713,5 +722,56 @@ case "$nh_ok" in
     *sandhome/1*) t_ok 0 'the command still works with SANDHOME_HOME and no HOME' ;;
     *) t_ok 1 "the command still works with SANDHOME_HOME and no HOME (got $nh_ok)" ;;
 esac
+
+# EVERY COMMAND THAT PARSES FLAGS REFUSES AN UNKNOWN ONE WITH RC=2 (issue
+# #125). toolchains, shims and report silently accepted `--bogus` with rc=0;
+# the fix names the accepted flags and refuses the rest, and this loop keeps
+# the set from drifting: a new command that parses flags and forgets the
+# refusal fails here rather than silently ignoring a script's typo.
+if [ -n "${cmd_home:-}" ] && [ -r "$cmd_home/env.sh" ] && [ -n "${cmd_exec:-}" ]; then
+    flag_fail=''
+    for flag_cmd in "toolchains" "shims" "report" "space" "install" "doctor" "status" "repair" "resume" "gc" "prune" "add" "project" "exec"; do
+        flag_out=$(SANDHOME_HOME="$cmd_home" SANDHOME_EXEC="$cmd_exec" SANDHOME_REPO_DIR="$ROOT" \
+            sh "$ROOT/bin/sandhome" "$flag_cmd" --definitely-not-a-flag 2>&1)
+        flag_rc=$?
+        # gc takes DAYS as a bare word but still refuses dash flags; exec takes
+        # --shell as its only flag; the rest take --help/--json or nothing.
+        if [ "$flag_rc" = 2 ]; then
+            :
+        else
+            flag_fail="$flag_fail $flag_cmd:$flag_rc"
+        fi
+    done
+    t_is "$flag_fail" '' 'every flag-parsing command refuses an unknown flag with rc=2'
+    # exec --shell names the string form explicitly, and a single non-program
+    # argument already runs through the shell; both must work with the env loaded.
+    shell_out=$(SANDHOME_HOME="$cmd_home" SANDHOME_EXEC="$cmd_exec" SANDHOME_REPO_DIR="$ROOT" \
+        sh "$ROOT/bin/sandhome" exec --shell 'echo shell-ok' 2>&1)
+    t_contains "$shell_out" 'shell-ok' 'exec --shell runs the string through the shell'
+    single_out=$(SANDHOME_HOME="$cmd_home" SANDHOME_EXEC="$cmd_exec" SANDHOME_REPO_DIR="$ROOT" \
+        sh "$ROOT/bin/sandhome" exec 'echo single-ok' 2>&1)
+    t_contains "$single_out" 'single-ok' 'a single non-program argument runs through the shell'
+    # The report names the invoking shell, whether the exec bin is on PATH now,
+    # and the entry path, so a harness that spawns a non-login shell per call
+    # sees what it needs without discovering the asymmetry itself (issue #122).
+    rep_out=$(SANDHOME_HOME="$cmd_home" SANDHOME_EXEC="$cmd_exec" SANDHOME_REPO_DIR="$ROOT" \
+        sh "$ROOT/bin/sandhome" report 2>&1)
+    t_contains "$rep_out" 'login_shell=' 'the report names whether this shell is a login shell'
+    t_contains "$rep_out" 'env_on_path=' 'the report names whether the exec bin is on PATH'
+    t_contains "$rep_out" 'entry=' 'the report names the entry point'
+    # The entry point tries three roots, not one baked path: a snippet read
+    # before `resume` rewrites it still finds a moved view via SANDHOME_EXEC.
+    if [ -r "$cmd_home/entry.sh" ]; then
+        entry_src=$(cat "$cmd_home/entry.sh" 2>/dev/null)
+        t_contains "$entry_src" 'SANDHOME_EXEC/bin/sandhome' 'the entry point falls back to SANDHOME_EXEC'
+        t_contains "$entry_src" 'repo/bin/sandhome' 'the entry point falls back to the durable repo after a tmpfs clear'
+        t_contains "$entry_src" 'command -v sandhome' 'the entry point falls back to PATH'
+        t_contains "$entry_src" 'return 127' 'the entry point fails loudly when nothing resolves'
+    else
+        t_ok 1 'the entry point falls back to SANDHOME_EXEC'
+    fi
+else
+    t_skip 'no installed home to check flag refusal against'
+fi
 
 t_end

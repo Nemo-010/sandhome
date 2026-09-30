@@ -39,12 +39,30 @@ tc_meson_install() {
     # uv must be reachable. The python toolchain owns it and leaves it on PATH
     # (TC_python_DESC says so); the closure guarantees python is installed
     # first, but a hand-run `install meson` may reach here with no PATH, so
-    # fall back to the exec view the same way the rest of the tree does.
+    # four locations are tried before giving up. The brittle single fallback
+    # (`UV_TOOL_BIN_DIR` with a fixed `views/python` suffix) missed the real
+    # layout on a split root, so the exec views, the home toolchains and the
+    # repo-adjacent python are all tried: every one is still a file that must
+    # exist and run, never a guessed PATH.
     sh_me_uv=''
     if sh_have uv; then
         sh_me_uv=uv
-    elif [ -n "${UV_TOOL_BIN_DIR:-}" ] && [ -x "${UV_TOOL_BIN_DIR%/uv-bin}/views/python/bin/uv" ]; then
-        sh_me_uv="${UV_TOOL_BIN_DIR%/uv-bin}/views/python/bin/uv"
+    elif [ -n "${UV_TOOL_BIN_DIR:-}" ] && [ -x "$UV_TOOL_BIN_DIR/uv" ]; then
+        sh_me_uv="$UV_TOOL_BIN_DIR/uv"
+    elif [ -n "${SANDHOME_EXEC:-}" ] && [ -x "$SANDHOME_EXEC/views/python/bin/uv" ]; then
+        sh_me_uv="$SANDHOME_EXEC/views/python/bin/uv"
+    elif [ -n "${SANDHOME_EXEC:-}" ] && [ -x "$SANDHOME_EXEC/bin/uv" ]; then
+        sh_me_uv="$SANDHOME_EXEC/bin/uv"
+    elif [ -n "${SH_HOME:-}" ]; then
+        for sh_me_try in "$SH_HOME"/toolchains/python/*/bin/uv "$SH_HOME"/toolchains/python/bin/uv; do
+            # shellcheck disable=SC2086
+            for sh_me_hit in $sh_me_try; do
+                [ -x "$sh_me_hit" ] || continue
+                sh_me_uv=$sh_me_hit
+                break
+            done
+            [ -n "$sh_me_uv" ] && break
+        done
     fi
     [ -n "$sh_me_uv" ] || { sh_warn 'meson needs uv (install the python toolchain first)'; return 1; }
     rm -rf "$sh_me_root" 2>/dev/null
@@ -58,10 +76,14 @@ tc_meson_install() {
     esac
     # uv links the console script where UV_TOOL_BIN_DIR points. Copy it into the
     # toolchain's own bin so this module owns a file, exactly as the other
-    # modules do, and so repair can rebuild the view from the payload.
+    # modules do, and so repair can rebuild the view from the payload. Three
+    # locations are tried because the launcher may live under a hashed env dir
+    # while only the stable link is on PATH.
     sh_me_src=''
     if [ -n "${UV_TOOL_BIN_DIR:-}" ] && [ -e "$UV_TOOL_BIN_DIR/meson" ]; then
         sh_me_src=$UV_TOOL_BIN_DIR/meson
+    elif [ -n "${SANDHOME_EXEC:-}" ] && [ -e "$SANDHOME_EXEC/uv-bin/meson" ]; then
+        sh_me_src="$SANDHOME_EXEC/uv-bin/meson"
     elif sh_have meson; then
         sh_me_src=$(sh_path_where meson)
     fi

@@ -20,7 +20,7 @@ export SH_REPO_DIR SH_LIB_DIR
 
 t_begin space
 
-tmp=$(mktemp -d "${TMPDIR:-/tmp}/sandhome-space.XXXXXX")
+tmp=$(t_exec_tmpdir sandhome-space)
 # STOP: THE TRAP READS A NAME NOTHING REASSIGNS. Line ~354 repoints $tmp into a
 # subdirectory for the roomiest-candidate fixtures, so a trap on $tmp removed
 # only that subdir and every suite run leaked its top temp dir. The trap reads
@@ -35,7 +35,7 @@ sh_dir_writable "$tmp/writable" && t_ok 0 'dir_writable accepts a writable dir' 
 sh_dir_writable "$tmp/ro" && t_ok 1 'dir_writable rejects a read-only dir' || t_ok 0 'dir_writable rejects a read-only dir'
 sh_dir_writable "$tmp/nope" && t_ok 1 'dir_writable rejects a missing dir' || t_ok 0 'dir_writable rejects a missing dir'
 
-sh_exec_probe /tmp && t_ok 0 'exec_probe says /tmp runs a binary' || t_ok 1 'exec_probe says /tmp runs a binary'
+sh_exec_probe "$tmp" && t_ok 0 'exec_probe says the exec-capable test dir runs a binary' || t_ok 1 'exec_probe says the exec-capable test dir runs a binary'
 
 # A directory that the sandbox allows no exec from is the case this whole tree is
 # about. When there is one, the probe must say no; when there is not, this clause
@@ -122,6 +122,7 @@ t_ok "$([ ! -d "$ghost" ]; echo $?)" 'the probe report did not create the candid
 # A present candidate carries a verdict, so a consumer reading the list knows
 # why a roomy directory was passed over (issue #125). The exec root this test
 # runs against is exec-capable, so its verdict is chosen or usable.
+mkdir -p "$tmp/probed" 2>/dev/null
 exec_report=$(SANDHOME_EXEC="$tmp/probed" sh_space_probe_report 2>/dev/null)
 case "$exec_report" in
     *'verdict=chosen'*|*'verdict=usable'*) t_ok 0 'a present candidate carries a verdict' ;;
@@ -137,6 +138,36 @@ if [ -r /state/home ] && ! sh_exec_probe /state/home 2>/dev/null; then
 else
     t_skip 'no known noexec candidate on this host to check the noexec verdict'
 fi
+# A working candidate with less than the floor is too-small, not usable: room is
+# a reason to lose the ranking exactly like noexec is, and without the word the
+# list reads as though the plan ignored a working root.
+small_dir=$tmp/too-small-cand
+mkdir -p "$small_dir" 2>/dev/null
+if sh_dir_writable "$small_dir" && sh_exec_probe "$small_dir" 2>/dev/null; then
+    small_report=$(SANDHOME_MIN_EXEC_MB=999999999 sh_space_probe_report 2>/dev/null)
+    case "$small_report" in
+        *'verdict=too-small'*) t_ok 0 'a working candidate under the floor is too-small' ;;
+        *) t_ok 1 "a working candidate under the floor is too-small (got: $small_report)" ;;
+    esac
+else
+    t_skip 'could not build a working candidate to check the too-small verdict'
+fi
+# The probe names the total beside the free, so larger volumes are comparable
+# at a glance: free alone cannot tell 40MB of 245MB from 40MB of 4TB.
+mkdir -p "$tmp/probed" 2>/dev/null
+probe_line=$(SANDHOME_EXEC="$tmp/probed" sh_space_probe_report 2>/dev/null | grep 'candidate=' | grep 'exists=yes' | head -1 || true)
+case "$probe_line" in
+    *'total_mb='*) t_ok 0 'a present candidate names its total beside its free' ;;
+    *) t_ok 1 "a present candidate names its total beside its free (got: $probe_line)" ;;
+esac
+# The named work volumes are candidates even when PWD is elsewhere: a harness
+# that runs in /tmp beside a roomy /workspace must still consider it, and exec
+# perms differ by sandbox so listing never decides (the probe does).
+ws_cands=$(sh_exec_candidates)
+case " $ws_cands " in
+    *' /workspace/.sandhome/exec '*) t_ok 0 'the workspace volume is a candidate' ;;
+    *) t_ok 1 "the workspace volume is a candidate (got: $ws_cands)" ;;
+esac
 
 # NOTE: THE CANDIDATE LIST IS DEDUPLICATED. A $HOME equal to the home root put
 # the same directory in the list twice, and it was probed and reported twice.
@@ -1069,7 +1100,25 @@ case "$sl_out" in
     *'(yours)'*) t_ok 0 'space --largest tags the consumer build output' ;;
     *) t_ok 1 "space --largest tags the consumer build output (got: $sl_out)" ;;
 esac
-rm -rf "$sl"
+# Prefix, not basename: a nested sandhome-owned dir stays sandhome and a
+# consumer dir named `cache` inside a project stays yours.
+sl2="$tmp/largest2"
+rm -rf "$sl2"
+mkdir -p "$sl2/home" "$sl2/exec/cache/nested" "$sl2/exec/myproj" "$sl2/home/tmp"
+head -c 20000 /dev/urandom > "$sl2/exec/cache/nested/f" 2>/dev/null
+head -c 20000 /dev/urandom > "$sl2/exec/myproj/cache" 2>/dev/null
+SH_HOME="$sl2/home"; SH_EXEC="$sl2/exec"; SH_HOME_TMP="$sl2/home/tmp"
+export SH_HOME SH_EXEC SH_HOME_TMP
+sl2_out=$(sh_space_largest 10)
+case "$sl2_out" in
+    *"$sl2/exec/cache"*'(sandhome)'*) t_ok 0 'a nested cache stays sandhome' ;;
+    *) t_ok 1 "a nested cache stays sandhome (got: $sl2_out)" ;;
+esac
+case "$sl2_out" in
+    *"$sl2/exec/myproj"*'(yours)'*) t_ok 0 'a consumer dir holding a file named cache stays yours' ;;
+    *) t_ok 1 "a consumer dir holding a file named cache stays yours (got: $sl2_out)" ;;
+esac
+rm -rf "$sl" "$sl2"
 
 # A create-plan mkdir -p's every candidate, including the namespaced work-tree
 # one, even when it does not choose it. The tree is left as it was found.

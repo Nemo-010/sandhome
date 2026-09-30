@@ -158,6 +158,16 @@ sh_exec_candidates() {
     # Layer 1: the explicit override and the work-tree namespaced dirs (PWD,
     # its parents up to two levels, and the git top level). Parents cover
     # `project/subdir` runs; git covers a PWD outside the checkout.
+    # REDUNDANCY: NAMED VOLUMES FIRST, BECAUSE PWD MISSES THEM. PWD parents and
+    # git cover the checkout, but a harness that runs in /tmp with a roomy
+    # /workspace beside it never names it through PWD at all. The durable
+    # work volumes are named explicitly so the roomiest exec-capable one can
+    # win on its merits: /workspace here is 117GB and exec-capable while /tmp
+    # and /dev/shm refuse execve, and on a cage without /workspace the same
+    # entries are absent and cost nothing. CI and container harnesses name
+    # theirs through the environment, so those are read too. Every entry is
+    # still probed with a real file before it can win: exec perms differ by
+    # sandbox, so listing is never deciding and a noexec volume loses here.
     sh_ec_git=''
     if sh_have git; then
         sh_ec_git=$(git rev-parse --show-toplevel 2>/dev/null) || sh_ec_git=''
@@ -177,6 +187,16 @@ sh_exec_candidates() {
         ${sh_ec_git:+"$sh_ec_git/.sandhome/exec"} \
         ${sh_ec_par1:+"$sh_ec_par1"} \
         ${sh_ec_par2:+"$sh_ec_par2"} \
+        ${GITHUB_WORKSPACE:+"$GITHUB_WORKSPACE/.sandhome/exec"} \
+        ${RUNNER_TEMP:+"$RUNNER_TEMP/.sandhome/exec"} \
+        ${AGENT_WORKFOLDER:+"$AGENT_WORKFOLDER/.sandhome/exec"} \
+        ${WORKSPACE:+"$WORKSPACE/.sandhome/exec"} \
+        ${SANDHOME_WORKSPACE:+"$SANDHOME_WORKSPACE/.sandhome/exec"} \
+        "/workspace/.sandhome/exec" \
+        "/mnt/.sandhome/exec" \
+        "/data/.sandhome/exec" \
+        "/scratch/.sandhome/exec" \
+        "/srv/.sandhome/exec" \
         "$SH_HOME" \
         /dev/shm \
         /tmp \
@@ -1410,17 +1430,36 @@ sh_space_probe_report() {
         # consumer reading `--probe` sees a roomy candidate and cannot tell why
         # it was passed over. The verdict names the reason in one word so the
         # list is a decision (issue #125).
+        # REDUNDANCY: FIVE VERDICTS, NOT THREE, BECAUSE ROOM IS A REASON TOO.
+        # A candidate that runs a file but holds less than SANDHOME_MIN_EXEC_MB
+        # loses the ranking exactly like a noexec one does, and without a word
+        # for it the list reads as though the plan ignored a working root. The
+        # order is the plan's own order: writable, then exec, then room, then
+        # chosen. A verdict is never inferred from mount options, only from
+        # the same probes the plan runs.
         sh_spr_verdict=usable
+        sh_spr_free=$(sh_free_mb "$sh_spr_c" 2>/dev/null)
+        case "$sh_spr_free" in ''|*[!0-9]*) sh_spr_free=0 ;; esac
         if [ "$sh_spr_w" = no ]; then
             sh_spr_verdict=not-writable
         elif [ "$sh_spr_x" = no ]; then
             sh_spr_verdict=noexec
+        elif [ "$sh_spr_free" -lt "${SANDHOME_MIN_EXEC_MB:-128}" ]; then
+            sh_spr_verdict=too-small
         elif [ "$sh_spr_c" = "$sh_spr_chosen" ]; then
             sh_spr_verdict=chosen
         fi
-        printf 'candidate=%s exists=yes writable=%s exec=%s mount=%s free_mb=%s verdict=%s%s\n' \
-            "$sh_spr_c" "$sh_spr_w" "$sh_spr_x" \
-            "$(sh_mount_opts "$sh_spr_c")" "$(sh_free_mb "$sh_spr_c")" "$sh_spr_verdict" "$sh_spr_pick"
+        sh_spr_total=$(sh_total_mb "$sh_spr_c" 2>/dev/null)
+        case "$sh_spr_total" in ''|*[!0-9]*) sh_spr_total='' ;; esac
+        if [ -n "$sh_spr_total" ]; then
+            printf 'candidate=%s exists=yes writable=%s exec=%s mount=%s free_mb=%s total_mb=%s verdict=%s%s\n' \
+                "$sh_spr_c" "$sh_spr_w" "$sh_spr_x" \
+                "$(sh_mount_opts "$sh_spr_c")" "$sh_spr_free" "$sh_spr_total" "$sh_spr_verdict" "$sh_spr_pick"
+        else
+            printf 'candidate=%s exists=yes writable=%s exec=%s mount=%s free_mb=%s verdict=%s%s\n' \
+                "$sh_spr_c" "$sh_spr_w" "$sh_spr_x" \
+                "$(sh_mount_opts "$sh_spr_c")" "$sh_spr_free" "$sh_spr_verdict" "$sh_spr_pick"
+        fi
     done
 }
 
@@ -1702,10 +1741,30 @@ sh_space_largest() {
         # help (issue #125). `sandhome` marks what gc/repair own; `yours` marks
         # build output only the caller can remove. The tag is appended after the
         # path so the size-then-path shape callers already parse is unchanged.
+        # REDUNDANCY: PREFIX, NOT BASENAME, BECAUSE A CONSUMER NESTS. The first
+        # version matched the basename against a fixed list, so `$EXEC/myproj/target`
+        # read as `yours` (right) but `$EXEC/cache/myproj` read as `sandhome`
+        # only when the leaf matched, and a nested `views.bak` or `cargo-install.old`
+        # read as `yours` while gc would still reclaim part of it. The rule is
+        # now the exec-root layout the tree itself writes: anything under the
+        # known sandhome-owned top levels is sandhome, everything else is yours.
+        # The check is a prefix on the full path, so it survives renames of the
+        # leaf and does not mistake a consumer dir named `cache` inside a project
+        # for the top-level cache. Unknown top levels stay `yours`, which is the
+        # safe direction: gc never touches them, so claiming gc could reclaim
+        # them would be the wrong advice.
         sh_sl_tag=yours
-        case "${sh_sl_e##*/}" in
-            views|cache|staging|npm-global|uv-bin|uv-tools|go-bin|cargo-install|projects) sh_sl_tag=sandhome ;;
+        case "$sh_sl_e" in
+            "$SH_EXEC"/views|"$SH_EXEC"/views/*|"$SH_EXEC"/cache|"$SH_EXEC"/cache/*|"$SH_EXEC"/staging|"$SH_EXEC"/staging/*|"$SH_EXEC"/tmp|"$SH_EXEC"/tmp/*) sh_sl_tag=sandhome ;;
+            "$SH_EXEC"/npm-global|"$SH_EXEC"/npm-global/*|"$SH_EXEC"/uv-bin|"$SH_EXEC"/uv-bin/*|"$SH_EXEC"/uv-tools|"$SH_EXEC"/uv-tools/*|"$SH_EXEC"/go-bin|"$SH_EXEC"/go-bin/*|"$SH_EXEC"/cargo-install|"$SH_EXEC"/cargo-install/*|"$SH_EXEC"/projects|"$SH_EXEC"/projects/*|"$SH_EXEC"/bin|"$SH_EXEC"/bin/*) sh_sl_tag=sandhome ;;
         esac
+        # Fallback for an SH_EXEC that is unset in a test harness: match the
+        # leaf the old way so the tag still answers rather than going silent.
+        if [ "$sh_sl_tag" = yours ]; then
+            case "${sh_sl_e##*/}" in
+                views|cache|staging|tmp|npm-global|uv-bin|uv-tools|go-bin|cargo-install|projects|bin) sh_sl_tag=sandhome ;;
+            esac
+        fi
         printf '%s\t%s\t%s\n' "$sh_sl_k" "$sh_sl_e" "$sh_sl_tag"
     done | $sh_sl_sort 2>/dev/null | {
         sh_sl_i=0
