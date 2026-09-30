@@ -31,6 +31,19 @@ if command -v curl >/dev/null 2>&1; then
     }
 fi
 
+# A host whose only jq is this project's own global hook (a symlink to
+# .sandhome-dispatch) must not be adopted by the main end-to-end run below. The
+# dispatcher is a wrapper script, and adopting it correctly leaves it on PATH
+# rather than linking it into the isolated exec view, so the split clauses could
+# not run. The hook is the project's artifact, not a toolchain carrier, so force
+# a real install when it is all the host has; a real jq is still adopted as
+# before. Only this run is forced: the hermetic runs use a PATH with no jq at
+# all, and their "second run adopts" clauses must still see an adoption.
+force_jq=''
+case "$(readlink "$(command -v jq 2>/dev/null)" 2>/dev/null)" in
+    *'.sandhome-dispatch') force_jq=jq ;;
+esac
+
 t_begin bootstrap
 
 work=$(t_exec_tmpdir sandhome-e2e)
@@ -61,7 +74,7 @@ else
 fi
 exec_root="$work/exec"
 
-out=$(SANDHOME_HOME="$home" SANDHOME_EXEC="$exec_root" \
+out=$(SANDHOME_HOME="$home" SANDHOME_EXEC="$exec_root" SANDHOME_FORCE="$force_jq" \
       sh "$ROOT/bootstrap.sh" --toolset minimal --no-profile --no-path-line 2>"$work/err.txt")
 status=$?
 if [ "$status" != 0 ]; then
@@ -347,7 +360,7 @@ fi
 # the COUNT of failures, which is one byte: 130 broken invariants answered 5.
 doc_home=$work/doc-home
 doc_exec=$work/doc-exec
-SANDHOME_HOME="$doc_home" SANDHOME_EXEC="$doc_exec" \
+SANDHOME_HOME="$doc_home" SANDHOME_EXEC="$doc_exec" SANDHOME_FORCE="$force_jq" \
     sh "$ROOT/bootstrap.sh" --toolset minimal --no-profile --no-path-line --no-shell \
     >/dev/null 2>"$work/doc-err.txt"
 if [ -r "$doc_home/env.sh" ]; then

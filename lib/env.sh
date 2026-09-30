@@ -125,6 +125,25 @@ sh_env_body() {
     printf 'if [ -n "${XDG_RUNTIME_DIR:-}" ]; then\n'
     printf '  mkdir -p "$XDG_RUNTIME_DIR" 2>/dev/null && chmod 0700 "$XDG_RUNTIME_DIR" 2>/dev/null || true\n'
     printf 'fi\n'
+    # # NOTE: TMPDIR MUST RUN A FILE. A temp file some tools write and then run
+    # - a compiler's assembler stage, python's multiprocessing, a build that
+    # re-execs itself - fails on a noexec mount exactly like any other binary,
+    # and the sandbox that needs sandhome is the one whose home (and often
+    # /tmp) is noexec. `sh_env_write` probes the ambient TMPDIR once and bakes
+    # the decision: when it does not run a file, every shell points TMPDIR at
+    # the exec root; when it does, an operator's own TMPDIR is kept and only an
+    # unset one defaults to the exec root. This is what lets a consumer run
+    # `python3 script.py` with no `TMPDIR=` and no `. env.sh` in front of it.
+    if [ "${SH_ENV_TMPDIR_FORCE:-no}" = yes ]; then
+        printf 'TMPDIR="$SANDHOME_EXEC/tmp"\n'
+        printf 'export TMPDIR\n'
+    else
+        printf 'if [ -z "${TMPDIR:-}" ]; then\n'
+        printf '  TMPDIR="$SANDHOME_EXEC/tmp"\n'
+        printf '  export TMPDIR\n'
+        printf 'fi\n'
+    fi
+    printf 'if [ -n "${TMPDIR:-}" ]; then mkdir -p "$TMPDIR" 2>/dev/null || true; fi\n'
     printf 'if [ -d "$SANDHOME_HOME/env.d" ]; then\n'
     printf '  for _sh_env_f in "$SANDHOME_HOME"/env.d/*.sh; do\n'
     printf '    [ -r "$_sh_env_f" ] && . "$_sh_env_f"\n'
@@ -244,6 +263,19 @@ sh_env_write() {
     if [ "$SH_DRY_RUN" = 1 ]; then
         sh_step "would write $SH_HOME/env.sh"
         return 0
+    fi
+    # # NOTE: THE TMPDIR DECISION IS PROBED ONCE, THEN BAKED. `sh_exec_probe`
+    # writes a file and runs it, which is the only honest answer to "can this
+    # directory hold an executable temp file" - a writable /tmp that is noexec
+    # answers no, and mount flags do not say so. The answer goes into env.sh as
+    # a forced assignment or a guarded default, so no shell pays for the probe.
+    SH_ENV_TMPDIR_FORCE=no
+    if [ -n "${SH_EXEC:-}" ]; then
+        sh_ew_tmpdir="${TMPDIR:-/tmp}"
+        if [ -z "$sh_ew_tmpdir" ] || [ ! -d "$sh_ew_tmpdir" ] || \
+           ! sh_exec_probe "$sh_ew_tmpdir" 2>/dev/null; then
+            SH_ENV_TMPDIR_FORCE=yes
+        fi
     fi
     sh_ew_tmp="$SH_HOME/env.sh.tmp.$$"
     sh_env_body > "$sh_ew_tmp" || return 1
@@ -560,6 +592,19 @@ sh_global_view_names() {
         case "$sh_gv_n" in
             sandhome|errandsh|faketty|sandhome-memexec) continue ;;
         esac
+        # A view entry that is a symlink to a wrapper script which PATH already
+        # finds must not be exposed by the hook. The dispatcher execs the entry,
+        # so a wrapper that re-resolves its own name finds the hook link and
+        # execs itself forever: errand's /state/home/bin/gh is a #!/bin/sh script
+        # that does exactly this, and exposing it made `gh --version` never
+        # return (measured; `sandhome status` then paid its probe timeout for
+        # it). An ELF binary cannot look itself up, and a real file installed in
+        # the view is not a wrapper for another copy, so only a symlink to a
+        # script already on PATH is filtered; PATH keeps serving the tool.
+        if [ -L "$SH_EXEC_BIN/$sh_gv_n" ] && sh_is_script "$SH_EXEC_BIN/$sh_gv_n" && \
+           [ -n "$(sh_path_where "$sh_gv_n")" ]; then
+            continue
+        fi
         printf '%s\n' "$sh_gv_n"
     done
 }
@@ -669,6 +714,13 @@ sh_global_record() {
 # sh_global_install -> install or refresh the hook. Returns 0 whether or not a
 # candidate existed: no candidate is a fact about the host, not a failure to fix.
 sh_global_install() {
+    # The switch has to live here, not only in the bootstrap: `sandhome install`
+    # and `sandhome repair` call this directly, and a suite that set
+    # SANDHOME_GLOBAL=0 still had the hook written into the machine's real PATH
+    # by those two commands (found by consuming the v1 hook, issue #127).
+    case "${SANDHOME_GLOBAL:-}" in
+        0|no|off|none) return 0 ;;
+    esac
     if [ "${SH_DRY_RUN:-0}" = 1 ]; then
         sh_step "would install the global hook (a PATH directory that loads the environment)"
         return 0

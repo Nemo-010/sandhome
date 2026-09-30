@@ -235,7 +235,11 @@ alternative was measured are:
 4. **Put exec-only caches on `SANDHOME_EXEC`.** Go is the example above.
 5. **Declare `tc_<name>_adopted`** if the tool may be adopted. Without it an
    adopted toolchain is linked from wherever it happens to be on `PATH`, which
-   is a guess.
+   is a guess. One exception: an adopted binary that is a `#!` script already
+   reachable on `PATH` is left where `PATH` finds it, never linked into the
+   view. The view is prepended to `PATH`, so such a link would shadow the copy
+   `PATH` has, and a wrapper that re-resolves its own name (errand's `gh`
+   wrapper) would find the link, exec itself and loop until the probe timeout.
 6. **Refuse with a reason.** A missing asset, an unsupported kernel/arch pair or
    a failed digest is a warning plus a non-zero return, never a silent skip that
    later reads as a transport failure.
@@ -328,8 +332,11 @@ is never replaced by a symlink. `sh_global_remove` deletes only what the install
 recorded writing, and never a file it did not create. `bootstrap.sh` installs
 the hook after the environment is written; `SANDHOME_GLOBAL=0` (or `--no-global`)
 keeps it out of a directory the caller does not own, which is what the test
-suite does. `sandhome report` prints `global=<state>`, and `sandhome
-global --status` reads the record back.
+suite does. The switch lives in `sh_global_install` itself, not only in the
+bootstrap, because `sandhome install` and `sandhome repair` call it directly:
+until it did, a suite that exported the switch still had the hook written into
+the machine's real `PATH` by those two commands (issue #127). `sandhome report`
+prints `global=<state>`, and `sandhome global --status` reads the record back.
 
 Measured on the sandbox this was built in, where `$HOME` is `/state/home` and
 refuses `execve`: with the hook installed, a fresh `env -i` shell whose `PATH`

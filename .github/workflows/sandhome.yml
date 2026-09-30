@@ -27,7 +27,7 @@ jobs:
       - name: the JSON report parses
         run: |
           set -e
-          sh bootstrap.sh --toolset minimal --no-profile --no-path-line --no-shell --json > report.json
+          sh bootstrap.sh --toolset minimal --no-profile --no-path-line --no-shell --no-global --json > report.json
           jq -e '.schema == "sandhome/1"' report.json > /dev/null
           sh bin/sandhome toolchains --json | jq -e 'length > 0' > /dev/null
           sh bin/sandhome report --json | jq -e 'has("failures")' > /dev/null

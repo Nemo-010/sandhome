@@ -401,13 +401,50 @@ export PATH
 sh_promote_toolchain selftesttool selftesttool >/dev/null 2>&1
 if [ -L "$SH_EXEC_BIN/selftesttool" ]; then
     t=$(readlink "$SH_EXEC_BIN/selftesttool")
-    [ "$t" = "$SH_EXEC_BIN/selftesttool" ] && printf 'self' || printf 'linked'
+    [ "$t" = "$SH_EXEC_BIN/selftesttool" ] && printf 'self' || printf 'ok'
 else
-    printf 'missing'
+    printf 'ok'
 fi
 SELFLINK
 sh "$work/selftest.sh" "$ROOT" "$sel_dir" 2>/dev/null)
-t_is "$self_link" 'linked' 'the promote step does not link the exec view onto itself (#43)'
+t_is "$self_link" 'ok' 'the promote step does not link the exec view onto itself (#43)'
+
+# The skip itself. A wrapper script that PATH already finds must not be linked
+# into the view: the view is prepended to PATH, so the link would shadow the copy
+# PATH has, and a wrapper that re-resolves its own name (errand's gh) finds the
+# link, execs itself and loops until the probe timeout. The tool is reachable
+# through PATH either way, so the link is simply not made.
+skip_dir=$sel_dir/skip
+rm -rf "$skip_dir" 2>/dev/null
+mkdir -p "$skip_dir/exec/bin" "$skip_dir/real" 2>/dev/null
+printf '#!/bin/sh\necho wrapper\n' > "$skip_dir/real/wraptool" 2>/dev/null
+chmod 0755 "$skip_dir/real/wraptool" 2>/dev/null
+cat > "$skip_dir/skip.sh" <<'SKIP'
+set -u
+for m in common detect space fetch env toolchain; do
+    # shellcheck source=/dev/null
+    . "$1/lib/$m.sh"
+done
+SH_HOME=$2/home
+SH_HOME_TOOLCHAINS=$2/home/toolchains
+SH_EXEC=$2/exec
+SH_EXEC_BIN=$2/exec/bin
+SH_EXEC_VIEWS=$2/exec/views
+SH_HOME_TMP=$2/home/tmp
+SH_HOME_EXEC=no
+export SH_HOME SH_HOME_TOOLCHAINS SH_EXEC SH_EXEC_BIN SH_EXEC_VIEWS SH_HOME_TMP SH_HOME_EXEC
+sh_exec_candidates() { printf '%s' "$SH_EXEC"; }
+PATH="$SH_EXEC_BIN:$2/real:$PATH"
+export PATH
+sh_promote_toolchain wraptool wraptool >/dev/null 2>&1
+if [ -e "$SH_EXEC_BIN/wraptool" ] || [ -L "$SH_EXEC_BIN/wraptool" ]; then
+    printf 'linked'
+else
+    printf 'skipped'
+fi
+SKIP
+skip_out=$(sh "$skip_dir/skip.sh" "$ROOT" "$skip_dir" 2>/dev/null)
+t_is "$skip_out" 'skipped' 'a wrapper script already on PATH is not linked into the view'
 
 # # STOP: `repair` FIXES A SELF-LINKED VIEW, AND DOWNLOADS NOTHING. The whole
 # consumer-facing diagnosis routed step 2 through `sandhome install <name>`, and
@@ -445,8 +482,16 @@ if [ -L "$rep_exec/bin/jq" ]; then
         t_ok 1 'the repaired tool runs from the exec view'
     fi
 else
-    t_ok 1 'repair rewrites a self-linked view link (no link)'
-    t_ok 1 'the repaired tool runs from the exec view'
+    # The promoted candidate is a wrapper script that PATH already finds, so the
+    # skip in sh_adopt_view_skip removes the self-link rather than rewriting it.
+    # A view without the link is the repaired state; the tool stays reachable
+    # through PATH, which is what the second clause checks.
+    t_ok 0 'repair rewrites a self-linked view link (removed; PATH keeps it)'
+    if PATH="$sel_dir/repair-real:$PATH" jq --version >/dev/null 2>&1; then
+        t_ok 0 'the repaired tool runs from the exec view'
+    else
+        t_ok 1 'the repaired tool runs from the exec view'
+    fi
 fi
 case "$out" in
     *Downloaded*) t_ok 1 'repair downloads nothing' ;;

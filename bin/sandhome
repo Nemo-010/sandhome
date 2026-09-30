@@ -1236,6 +1236,12 @@ cmd_status() {
     esac
     sh_cs_present=0
     sh_cs_total=0
+    # The readiness scan probes EVERY known toolchain, including ones the setup
+    # did not ask for. A wedged or self-re-resolving binary (see
+    # sh_adopt_view_skip) must not make a one-line summary wait the install-time
+    # 60s timeout per name; status is a summary, not the correctness gate, and
+    # the gate is doctor above. Bound the scan and leave the global alone.
+    SH_PROBE_TIMEOUT_SECS=5
     for sh_cs_t in $(sh_toolchain_available); do
         [ -n "$sh_cs_t" ] || continue
         sh_cs_total=$((sh_cs_total + 1))

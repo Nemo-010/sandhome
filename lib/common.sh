@@ -170,6 +170,38 @@ sh_path_where() {
     done
 }
 
+# sh_is_script FILE -> 0 when FILE starts with `#!`. A shell script can look its
+# own name up on PATH again; an ELF binary cannot. Read with the shell builtin,
+# so no external reader is required.
+sh_is_script() {
+    [ -f "$1" ] || return 1
+    # `read` returns non-zero at EOF without a newline and still sets the
+    # variable, so a one-line script with no trailing newline still counts.
+    sh_is_head=
+    IFS= read -r sh_is_head < "$1" 2>/dev/null || :
+    case "$sh_is_head" in
+        '#!'*) return 0 ;;
+    esac
+    return 1
+}
+
+# sh_adopt_view_skip BIN TARGET -> 0 when an adopted TARGET must NOT be linked
+# into the exec view. The view is prepended to PATH, so a symlink there shadows
+# the copy PATH already has; harmless for an ELF binary, but a wrapper script
+# that re-resolves its own name finds the view link, execs itself and loops.
+# Measured in this sandbox: errand's /state/home/bin/gh is a #!/bin/sh script
+# that finds the next gh on PATH, and once sandhome linked it into the view,
+# `gh --version` never returned, so `sandhome install gh` failed its own
+# verification probe and `sandhome status` paid the probe timeout. A script
+# already reachable without the view is therefore left where PATH finds it.
+sh_adopt_view_skip() {
+    sh_avs_target=$2
+    [ -n "$sh_avs_target" ] || return 1
+    sh_is_script "$sh_avs_target" || return 1
+    [ -n "$(sh_path_where "$1")" ] || return 1
+    return 0
+}
+
 # sh_first_line COMMAND... -> the command's first line, or nothing. `head -1`
 # without head, which Photon and openSUSE minimal images do not always carry.
 # STOP: `read` RETURNS NON-ZERO AT EOF WITHOUT A NEWLINE and still sets the variable;

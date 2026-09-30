@@ -43,13 +43,16 @@ chmod 0755 "$gh_bin/cargo" 2>/dev/null
 cp "$ROOT/bin/sandhome" "$gh_bin/sandhome" 2>/dev/null
 chmod 0755 "$gh_bin/sandhome" 2>/dev/null
 
-# gh_env -> the two roots the library reads, for the subshells below.
+# gh_env -> the roots the library reads plus the on switch. tests/lib.sh exports
+# SANDHOME_GLOBAL=0 so the suite never writes the real PATH; the clauses that
+# exercise the hook turn it back to install for their subshell.
 gh_env() {
     SH_SELF=global-test
     SH_HOME=$gh_home
     SH_EXEC=$gh_exec
     SH_EXEC_BIN=$gh_bin
-    export SH_SELF SH_HOME SH_EXEC SH_EXEC_BIN
+    SANDHOME_GLOBAL=install
+    export SH_SELF SH_HOME SH_EXEC SH_EXEC_BIN SANDHOME_GLOBAL
 }
 
 # ------------------------------------------------------------- direct dir --
@@ -68,6 +71,11 @@ t_is "$( gh_env; sh_global_read command )" 'yes' 'the command was copied into th
 gh_out=$(env -i HOME="$work/fake" PATH="$gh_direct:/usr/bin:/bin" \
          sh -c 'cargo hello' </dev/null 2>&1)
 t_is "$gh_out" 'loaded|hello' 'a fresh shell runs a tool by name with the environment loaded'
+# The dispatcher through PATH with no shell in the way: the shell here is the
+# system sh, which sources nothing, so only the hook can have loaded the env.
+t_is "$(env -i HOME="$work/fake" PATH="$gh_direct:/usr/bin:/bin" \
+       /usr/bin/env cargo hook </dev/null 2>&1)" \
+     'loaded|hook' 'an exec through the hook loads the environment with no shell'
 t_contains "$(env -i HOME="$work/fake" PATH="$gh_direct:/usr/bin:/bin" \
              sh -c 'command -v cargo' </dev/null 2>&1)" \
             "$gh_direct/cargo" 'the fresh shell finds the tool through the hook, not the view'
@@ -83,6 +91,29 @@ gh_missing_rc=$?
 mv "$gh_bin/cargo.hidden" "$gh_bin/cargo" 2>/dev/null
 t_is "$gh_missing_rc" 127 'an uninstalled tool through the hook exits 127'
 t_contains "$gh_missing" 'not installed' 'an uninstalled tool through the hook says so by name'
+
+# A view entry that is a wrapper script already reachable on PATH is not exposed
+# by the hook. The dispatcher execs the entry, so a wrapper that re-resolves its
+# own name would find the hook link and exec itself forever (errand's gh); an
+# ELF binary cannot do that, so only the script is skipped.
+wrapper_dir=$work/wrapperbin
+mkdir -p "$wrapper_dir" 2>/dev/null
+printf '#!/bin/sh\necho wrapped\n' > "$wrapper_dir/wrapped"
+chmod 0755 "$wrapper_dir/wrapped" 2>/dev/null
+ln -sfn "$wrapper_dir/wrapped" "$gh_bin/wrapped" 2>/dev/null
+( gh_env
+  PATH="$gh_bin:$wrapper_dir:$gh_direct:/usr/bin:/bin"; export PATH
+  sh_global_install >/dev/null 2>&1 )
+t_is "$([ -e "$gh_direct/wrapped" ] && printf yes || printf no)" 'no' \
+     'a wrapper script already on PATH is not exposed by the hook'
+t_is "$(env -i HOME="$work/fake" PATH="$gh_direct:$wrapper_dir:/usr/bin:/bin" \
+       sh -c 'wrapped' </dev/null 2>&1)" 'wrapped' \
+     'PATH still runs the wrapper the hook did not expose'
+# Put the shared view back the way the clauses below expect it.
+rm -f "$gh_bin/wrapped" 2>/dev/null
+( gh_env
+  PATH="$gh_bin:$gh_direct:/usr/bin:/bin"; export PATH
+  sh_global_install >/dev/null 2>&1 )
 
 # A foreign file in a shared directory is never removed.
 printf '#!/bin/sh\necho foreign\n' > "$gh_direct/foreign"
@@ -130,6 +161,21 @@ if [ -n "$gh_noexec" ]; then
 else
     t_skip 'no writable noexec directory to build the symlink case from'
 fi
+
+# --------------------------------------------- the switch is in the library --
+# `sandhome install` and `sandhome repair` call sh_global_install directly, so
+# the switch has to be honoured there and not only in the bootstrap. Set only in
+# the bootstrap, a suite with SANDHOME_GLOBAL=0 still had the hook written into
+# the machine's real PATH by those two commands (found by consuming the v1 hook).
+gh_off=$work/global-off
+mkdir -p "$gh_off" 2>/dev/null
+( gh_env
+  PATH="$gh_bin:$gh_off:/usr/bin:/bin"; export PATH
+  SANDHOME_GLOBAL=0; export SANDHOME_GLOBAL
+  sh_global_install >/dev/null 2>&1 )
+t_is "$([ -e "$gh_off/sandhome" ] && printf yes || printf no)" 'no' \
+     'SANDHOME_GLOBAL=0 keeps sh_global_install from writing'
+t_is "$( gh_env; sh_global_report )" 'none' 'SANDHOME_GLOBAL=0 leaves no record'
 
 # --------------------------------------------------------- no candidate ----
 # A PATH of read-only system directories has no hook to install, and that is a

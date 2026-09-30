@@ -1279,6 +1279,15 @@ sh_promote_toolchain() {
                 # exec view filtered out.
                 sh_ptc_link=''
             fi
+            # A view link to a wrapper script that is already on PATH is a trap:
+            # the script re-resolves its own name, finds the view link first and
+            # execs itself forever (see sh_adopt_view_skip). Drop any link a
+            # previous run wrote and leave the binary where PATH finds it.
+            if [ -n "$sh_ptc_link" ] && sh_adopt_view_skip "$sh_ptc_bin" "$sh_ptc_link"; then
+                rm -f "$SH_EXEC_BIN/$sh_ptc_bin" 2>/dev/null || true
+                sh_ptc_done=yes
+                continue
+            fi
             if [ -n "$sh_ptc_link" ]; then
                 mkdir -p "$SH_EXEC_BIN" 2>/dev/null || true
                 ln -sfn "$sh_ptc_link" "$SH_EXEC_BIN/$sh_ptc_bin" 2>/dev/null || \
@@ -1292,6 +1301,11 @@ sh_promote_toolchain() {
             # rediscover the link this function is about to rewrite.
             sh_ptc_which=$(sh_path_where "$sh_ptc_bin")
             if [ -n "$sh_ptc_which" ] && [ -x "$sh_ptc_which" ]; then
+                if sh_adopt_view_skip "$sh_ptc_bin" "$sh_ptc_which"; then
+                    rm -f "$SH_EXEC_BIN/$sh_ptc_bin" 2>/dev/null || true
+                    sh_ptc_done=yes
+                    continue
+                fi
                 if "$sh_ptc_which" --version >/dev/null 2>&1; then
                     mkdir -p "$SH_EXEC_BIN" 2>/dev/null || true
                     ln -sfn "$sh_ptc_which" "$SH_EXEC_BIN/$sh_ptc_bin" 2>/dev/null || \

@@ -214,7 +214,7 @@ usage: sh bootstrap.sh [options]
 | `SANDHOME_FORCE` | toolchain.sh bootstrap.sh sandhome rust.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_GC_FORCE` | space.sh sandhome | `unset, and the feature is off until it is set` |
 | `SANDHOME_GH_VERSION` | gh.sh | `unset, and the feature is off until it is set` |
-| `SANDHOME_GLOBAL` | bootstrap.sh | `install` |
+| `SANDHOME_GLOBAL` | env.sh bootstrap.sh | `install` |
 | `SANDHOME_GO_DL_JSON_URL` | sandhome go.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_GO_VERSION_URL` | sandhome go.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_HERE` | profile.sh | `unset, and the feature is off until it is set` |

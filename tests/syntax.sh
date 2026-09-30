@@ -127,6 +127,12 @@ root = os.environ["SH_SANDHOME_ROOT"]
 for dirpath, dirnames, filenames in os.walk(root):
     if ".git" in dirnames:
         dirnames.remove(".git")
+    # The default exec root is `$PWD/.sandhome/exec`, and it holds installed
+    # binaries. It is gitignored, so a tree that carries one still ships no
+    # ELF files; without this the repo suite went red after its own
+    # bootstrap (found by consuming the checkout).
+    if ".sandhome" in dirnames:
+        dirnames.remove(".sandhome")
     for fn in filenames:
         fpath = os.path.join(dirpath, fn)
         try:

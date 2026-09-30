@@ -90,7 +90,16 @@ error, and a test suite that runs on such a host must not go red over it.
   the one line.
 - The hook is skipped entirely by `--no-global` or `SANDHOME_GLOBAL=0`, which
   is what the test suite uses so it never writes into a PATH directory the
-  machine owns.
+  machine owns. The switch is honored in `sh_global_install` itself, not only
+  in the bootstrap, because `sandhome install` and `sandhome repair` call it
+  directly; a suite that exported the switch still had the hook written into
+  the machine's real `PATH` by those two commands until it was moved there
+  (issue #127).
+- A view entry that is a symlink to a `#!` wrapper script which `PATH` already
+  finds is not exposed by the hook. The dispatcher execs the view entry, so a
+  wrapper that re-resolves its own name (errand's `gh`) would find the hook
+  link and exec itself forever; an ELF binary cannot, so only the symlinked
+  script is filtered and `PATH` keeps serving it.
 
 ## The measurement
 

@@ -19,7 +19,25 @@ t_begin() {
     TESTS_RUN=0
     TESTS_FAIL=0
     TESTS_SKIP=0
+    T_STAMP=''
+    TESTS_LAST_TIME=$(date +%s 2>/dev/null)
+    case "$TESTS_LAST_TIME" in ''|*[!0-9]*) TESTS_LAST_TIME=0 ;; esac
     printf '== %s\n' "$TESTS_NAME"
+}
+
+# t_stamp -> sets T_STAMP to " +Ns" since the previous clause when
+# SH_TEST_TIMING=1, and to nothing otherwise. A slow suite is then diagnosed
+# from its own output (which clause paid) instead of guessed at. Test-only, so
+# it is not part of the published reference.
+t_stamp() {
+    T_STAMP=''
+    [ "${SH_TEST_TIMING:-0}" = 1 ] || return 0
+    : "${TESTS_LAST_TIME:=0}"
+    sh_t_now=$(date +%s 2>/dev/null)
+    case "$sh_t_now" in ''|*[!0-9]*) return 0 ;; esac
+    T_STAMP=" +$((sh_t_now - TESTS_LAST_TIME))s"
+    TESTS_LAST_TIME=$sh_t_now
+    return 0
 }
 
 # STOP: t_ok AND t_is COMPARE WITH THE SHELL AND NOT WITH `test`. A `test`/`[` that
@@ -36,9 +54,11 @@ t_ok() {
         return 0
     fi
     if [ "$1" = 0 ]; then
-        printf '  ok   %s\n' "$2"
+        t_stamp
+        printf '  ok   %s%s\n' "$2" "$T_STAMP"
     else
-        printf '  FAIL %s\n' "$2"
+        t_stamp
+        printf '  FAIL %s%s\n' "$2" "$T_STAMP"
         TESTS_FAIL=$((TESTS_FAIL + 1))
     fi
 }
@@ -51,18 +71,21 @@ t_is() {
         return 0
     fi
     if [ "$1" = "$2" ]; then
-        printf '  ok   %s\n' "$3"
+        t_stamp
+        printf '  ok   %s%s\n' "$3" "$T_STAMP"
     else
-        printf '  FAIL %s (got %s, wanted %s)\n' "$3" "$1" "$2"
+        t_stamp
+        printf '  FAIL %s (got %s, wanted %s)%s\n' "$3" "$1" "$2" "$T_STAMP"
         TESTS_FAIL=$((TESTS_FAIL + 1))
     fi
 }
 
 t_contains() {
     TESTS_RUN=$((TESTS_RUN + 1))
+    t_stamp
     case "$1" in
-        *"$2"*) printf '  ok   %s\n' "$3" ;;
-        *)      printf '  FAIL %s (no %s in %s)\n' "$3" "$2" "$1"
+        *"$2"*) printf '  ok   %s%s\n' "$3" "$T_STAMP" ;;
+        *)      printf '  FAIL %s (no %s in %s)%s\n' "$3" "$2" "$1" "$T_STAMP"
                 TESTS_FAIL=$((TESTS_FAIL + 1)) ;;
     esac
 }
@@ -72,7 +95,8 @@ t_contains() {
 # and never turns a red file green.
 t_skip() {
     TESTS_SKIP=$((TESTS_SKIP + 1))
-    printf '  skip %s\n' "$1"
+    t_stamp
+    printf '  skip %s%s\n' "$1" "$T_STAMP"
 }
 
 # t_end [EXIT_CODE] -> summarise, EXIT with the code, and never merely return

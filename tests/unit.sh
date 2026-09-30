@@ -225,6 +225,22 @@ t_is "$(XDG_RUNTIME_DIR=/nonexistent-xdg-dir sh -c "$xdg_body
 printf '%s' \"\$XDG_RUNTIME_DIR\"")" '/tmp/sandhome-xdg-exec/xdg-runtime' 'a dangling XDG_RUNTIME_DIR is replaced'
 rm -rf /tmp/sandhome-xdg-exec
 
+# TMPDIR is baked exec-capable at env-write time. The probe runs once, in the
+# installer, so no shell pays for it; a TMPDIR that does not run a file is
+# replaced by the exec root, and an exec-capable one is left alone with the
+# exec root only as a default. This is what lets a consumer run a build with no
+# `TMPDIR=` and no `. env.sh` in front of it (issue #127 follow-up).
+tf_home="$tmp/tf-home"; tf_exec="$tmp/tf-exec"
+mkdir -p "$tf_home" "$tf_exec/bin"
+( SH_HOME="$tf_home" SH_EXEC="$tf_exec" SH_EXEC_BIN="$tf_exec/bin" \
+  TMPDIR="$tmp/does-not-exist-$$" sh_env_write >/dev/null 2>&1 )
+t_is "$(grep -c '^TMPDIR="\$SANDHOME_EXEC/tmp"' "$tf_home/env.sh" 2>/dev/null)" '1' \
+     'a TMPDIR that does not run a file is pinned to the exec root'
+( SH_HOME="$tf_home" SH_EXEC="$tf_exec" SH_EXEC_BIN="$tf_exec/bin" \
+  TMPDIR="$tmp" sh_env_write >/dev/null 2>&1 )
+t_is "$(grep -c '^if \[ -z "\${TMPDIR:-}" \]' "$tf_home/env.sh" 2>/dev/null)" '1' \
+     'an exec-capable TMPDIR is kept, with the exec root only as a default'
+
 # The version parsers, run against local files so they are tested offline. Both
 # were wrong once in the same direction: the first line was taken where the
 # format does not put the answer on the first line.
