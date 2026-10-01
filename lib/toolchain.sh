@@ -479,7 +479,9 @@ sh_toolchain_install_one() {
         elif [ "$sh_te_probe_rc" = 0 ]; then
             sh_say "toolchain $sh_te_name: a working copy is already here; adopting it"
             ADOPTED="$ADOPTED $sh_te_name"
-        elif sh_toolchain_payload_present "$sh_te_name"; then
+        elif sh_toolchain_payload_present "$sh_te_name" && \
+             { ! command -v "tc_${sh_te_name}_payload_satisfies" >/dev/null 2>&1 || \
+               "tc_${sh_te_name}_payload_satisfies"; }; then
         # The view is gone but the payload survived (a tmpfs restart clears
         # the exec root, never the home): rebuild the view from the bytes
         # already here instead of downloading them again (issue #73). A force
@@ -487,6 +489,13 @@ sh_toolchain_install_one() {
         # kept payload turns out to be a half-written one, the verification
         # probe below fails and the run falls back to a real install rather
         # than reporting a toolchain that does not run.
+        #
+        # # STOP: "WITHOUT DOWNLOADING" IS A CLAIM ABOUT THE REQUEST, NOT THE
+        # BYTES. qemuuser can hold a complete host payload and still be asked
+        # for a guest it does not have, and the reuse message promised a view
+        # it could not build (issue #146). A module may define
+        # tc_<name>_payload_satisfies to answer whether the on-disk payload
+        # can serve THIS request; without the hook the old behaviour holds.
         sh_say "toolchain $sh_te_name: payload already in $SH_HOME_TOOLCHAINS/$sh_te_name; rebuilding the view without downloading"
         INSTALLED="$INSTALLED $sh_te_name"
         SH_TE_REUSED=1

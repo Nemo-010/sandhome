@@ -223,6 +223,15 @@ tc_node_env() {
     # node` script whose inode is noexec). The npx one-shot cache
     # (`~/.npm/_npx`) has the same property, so it is relocated too.
     mkdir -p "$SH_EXEC/npm-global" "$SH_EXEC/cache/npm" 2>/dev/null || true
+    # # STOP: A DOWNLOADED BROWSER IS AN EXECUTABLE, SO ITS CACHE IS NOT DATA.
+    # Puppeteer defaults to $HOME/.cache/puppeteer and Playwright to
+    # $HOME/.cache/ms-playwright, and the home is the mount that refuses
+    # execve: the download succeeds, `--version` then answers Permission
+    # denied, and `launch()` fails with an error that names the cache rather
+    # than the mount (issue #143). The exec root is the only root a browser can
+    # run from, so both caches are pointed there by default; a caller who set
+    # either keeps it. The dirs are created so the first install has a target.
+    mkdir -p "$SH_EXEC/puppeteer" "$SH_EXEC/ms-playwright" 2>/dev/null || true
     # Self-sufficient under `set -u`: a leftover fragment must not abort a shell
     # that sources it with the names unset. See tools/go.sh for the shape.
     sh_env_write_fragment node <<EOF
@@ -233,6 +242,9 @@ NPM_CONFIG_PREFIX="\$SANDHOME_EXEC/npm-global"
 NPM_CONFIG_CACHE="\$SANDHOME_EXEC/cache/npm"
 NPM_CONFIG_UPDATE_NOTIFIER=false
 export NPM_CONFIG_PREFIX NPM_CONFIG_CACHE NPM_CONFIG_UPDATE_NOTIFIER
+PUPPETEER_CACHE_DIR="\${PUPPETEER_CACHE_DIR:-\$SANDHOME_EXEC/puppeteer}"
+PLAYWRIGHT_BROWSERS_PATH="\${PLAYWRIGHT_BROWSERS_PATH:-\$SANDHOME_EXEC/ms-playwright}"
+export PUPPETEER_CACHE_DIR PLAYWRIGHT_BROWSERS_PATH
 case ":\$PATH:" in
   *":\$SANDHOME_EXEC/npm-global/bin:"*) ;;
   *) PATH="\$SANDHOME_EXEC/npm-global/bin:\$PATH" ;;

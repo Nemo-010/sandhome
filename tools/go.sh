@@ -4,20 +4,69 @@ TC_go_DESC='Go, from the official go.dev tarball (GOROOT stays in the home root)
 TC_go_BINS='go/bin/go go/bin/gofmt'
 TC_go_EXEC_MB=150
 
-# tc_go_exec_mb -> the fresh-install exec need in MB: 12 in launch mode (the
-# launchers; the tree measured a 3MB view), 150 in copy mode (pkg/tool are
-# real executables the go command spawns, ~90MB measured). Read by the gate
-# below and the feasibility plan (issues #92, #105).
+# tc_go_copy_bins -> the executables that must be REAL copies in the view even
+# in launch mode: go and gofmt, and the compiler tools the go command forks.
+# The same mechanism as tc_zig_copy_bins (issue #77) and tc_rust_copy_bins:
+# `go` derives GOROOT from its own executable and FORKS its own tools
+# (compile, link, the telemetry child) out of `pkg/tool/<platform>/`, so a
+# launcher copy -- whose image path is the anonymous `/memfd:sandhome
+# (deleted)` -- answers `go version` and then dies on every real build:
+#
+#   go: refusing to execute itself (.../views/go/go/bin/go)
+#   go: cannot map this copy back to its payload; set SANDHOME_EXEC and SANDHOME_HOME
+#   go: cannot find GOROOT directory: 'go' binary is trimmed and GOROOT is not set
+#   can't start telemetry child process: fork/exec /memfd:sandhome: no such file or directory
+#
+# Measured with a launch-mode go view: `go version` rc=0, `go build` rc=2 and
+# no artifact (issue #150). The whole `pkg/tool` tree is named because every
+# compiler pass the go command spawns comes from there, and a launcher copy
+# of any one of them fails the same way. The size gate prices the real copies
+# through this list, which is why tc_go_exec_mb stays honest about it.
+tc_go_copy_bins() {
+    sh_gcb_root=$(sh_toolchain_root go)
+    printf '%s ' 'go/bin/go go/bin/gofmt'
+    for sh_gcb_t in "$sh_gcb_root"/go/pkg/tool/*/*; do
+        [ -f "$sh_gcb_t" ] || continue
+        printf '%s ' "${sh_gcb_t#"$sh_gcb_root"/}"
+    done
+    unset sh_gcb_root sh_gcb_t
+}
+
+# tc_go_exec_mb -> the fresh-install exec need in MB: 120 in launch mode (go,
+# gofmt and pkg/tool are real copies even there, about 110MB measured),
+# 150 in copy mode (pkg/tool are real executables the go command spawns,
+# ~90MB measured). Read by the gate below and the feasibility plan
+# (issues #92, #105). The launch number must stay honest about the copy
+# list above: pricing launch at the old 12MB aims a 110MB view at a root
+# that cannot hold it (issue #150).
 tc_go_exec_mb() {
     if [ "${SH_VIEW_MODE:-copy}" = launch ]; then
-        printf '12'
+        printf '120'
     else
         printf '150'
     fi
 }
 
+# tc_go_probe -> 0 when go can resolve its own runtime tree, not merely when
+# it can print a version. `go version` is the one subcommand that cannot fail
+# on the launch-mode defect: the view copy is the memexec loader, so the
+# process image is the anonymous `/memfd:sandhome (deleted)`, and go resolves
+# GOROOT from its own executable and forks its own tools -- every one of those
+# fails while `go version` answers happily. Measured: `go version` rc=0,
+# `go build` rc=2 with no artifact, `go env GOROOT` failing, and doctor
+# reporting toolchain_go=yes (issue #150). This is issue #77's ask 2 -- "the
+# probe must exercise the tool, not --version" -- applied to go.
+#
+# `go env GOROOT` is the probe because it fails on every shape the defect
+# takes: the self-exec refusal, the payload-map failure, the trimmed-binary
+# GOROOT error and the memfd fork error. It touches nothing but the toolchain
+# it is testing, so it is safe to run on every adopt.
 tc_go_probe() {
-    sh_have go && go version >/dev/null 2>&1
+    sh_have go || return 1
+    sh_gp_root=$(go env GOROOT 2>/dev/null) || return 1
+    [ -n "$sh_gp_root" ] || return 1
+    [ -d "$sh_gp_root" ] || return 1
+    return 0
 }
 
 tc_go_version_latest() {

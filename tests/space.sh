@@ -1120,8 +1120,8 @@ SH_HOME="$sl2/home"; SH_EXEC="$sl2/exec"; SH_HOME_TMP="$sl2/home/tmp"
 export SH_HOME SH_EXEC SH_HOME_TMP
 sl2_out=$(sh_space_largest 10)
 case "$sl2_out" in
-    *"$sl2/exec/cache"*'(sandhome)'*) t_ok 0 'a nested cache stays sandhome' ;;
-    *) t_ok 1 "a nested cache stays sandhome (got: $sl2_out)" ;;
+    *"$sl2/exec/cache"*'(reclaim)'*) t_ok 0 'a nested cache stays reclaim (gc removes it, #141)' ;;
+    *) t_ok 1 "a nested cache stays reclaim (gc removes it, #141; got: $sl2_out)" ;;
 esac
 case "$sl2_out" in
     *"$sl2/exec/myproj"*'(yours)'*) t_ok 0 'a consumer dir holding a file named cache stays yours' ;;

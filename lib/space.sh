@@ -1264,7 +1264,26 @@ sh_promote_toolchain() {
     sh_ptc_root=$(sh_toolchain_root "$sh_ptc_name")
     sh_ptc_view=$(sh_toolchain_view "$sh_ptc_name")
     if [ -d "$sh_ptc_root" ]; then
-        if [ "$SH_HOME_EXEC" = yes ]; then
+        # # STOP: THE COLLAPSE IS FOR "NO SEPARATE ROOT", NOT FOR "THE HOME RUNS
+        # FILES". `SH_HOME_EXEC=yes` means the home happens to permit execve,
+        # which on a tmpfs `/tmp` or a normal disk home is ordinary -- so this
+        # branch put every payload, view and launcher in the home even when the
+        # caller named a different, roomier root with `--exec`/`SANDHOME_EXEC`.
+        # Measured: `--exec /workspace/cp/exec` (152GB free) named and recorded
+        # (`exec_reason=explicit`), while `install rust` aimed at the home and
+        # failed "900MB wanted, 172MB free" on the 488MB tmpfs the caller had
+        # named the other root to avoid (issue #149). The plan's own rule is
+        # that an explicitly named root wins ("an operator who named
+        # SANDHOME_EXEC has said where executables must go"); this applies it
+        # to the payload, not only to the root.
+        #
+        # The condition reads the PLAN's answer, not the caller's variable:
+        # bin/sandhome binds SANDHOME_EXEC from SH_EXEC at every entry point,
+        # so testing SANDHOME_EXEC for emptiness never fires and the collapse
+        # went dead for the ordinary no-root case. SH_EXEC = SH_HOME is the
+        # plan saying there is no separate root, which is exactly when a
+        # needless copy of every payload is avoided.
+        if [ "$SH_HOME_EXEC" = yes ] && [ "$SH_EXEC" = "$SH_HOME" ]; then
             sh_ptc_view=$sh_ptc_root
         else
             # Prune before comparing: a view-only entry (payload deleted
@@ -1433,6 +1452,51 @@ sh_space_ceiling() {
     fi
 }
 
+# sh_space_payloads -> where installed toolchain payloads actually are: exec
+# when every payload under the home has its view on the exec root, home when
+# none does (the collapse put views into the home), both when mixed, none when
+# no payload is installed. This is read off disk, not off the plan: the plan
+# says where things should go, this says where they are, so the two answers
+# cannot disagree again (issue #149: the root was explicit while every view
+# sat in the home). Only a REAL payload counts: an adopted toolchain leaves
+# auxiliary data under the home (the npm seed home/toolchains/node/npm that
+# tc_node_ensure_npm fetches for an adopted node) without any view, and that
+# is by design, not a collapse. sh_toolchain_payload_present checks the
+# module's declared binaries, so a seed without them is not a payload.
+sh_space_payloads() {
+    sh_spl_home=0
+    sh_spl_exec=0
+    if [ -n "${SH_HOME_TOOLCHAINS:-}" ] && [ -d "$SH_HOME_TOOLCHAINS" ]; then
+        for sh_spl_d in "$SH_HOME_TOOLCHAINS"/*; do
+            [ -d "$sh_spl_d" ] || continue
+            sh_spl_n=${sh_spl_d##*/}
+            case "$sh_spl_n" in .*|staging|tmp) continue ;; esac
+            if command -v sh_toolchain_payload_present >/dev/null 2>&1; then
+                sh_toolchain_payload_present "$sh_spl_n" 2>/dev/null || continue
+            fi
+            # Without toolchain.sh the predicate is unavailable and every
+            # directory counts, the old behaviour. bin/sandhome always loads
+            # every library, so this arm only serves a hand-sourced shell.
+            if [ -n "${SH_EXEC_VIEWS:-}" ] && [ -d "$SH_EXEC_VIEWS/$sh_spl_n" ]; then
+                sh_spl_exec=$((sh_spl_exec + 1))
+            else
+                sh_spl_home=$((sh_spl_home + 1))
+            fi
+        done
+    fi
+    unset sh_spl_d sh_spl_n
+    if [ "$sh_spl_exec" -gt 0 ] && [ "$sh_spl_home" -gt 0 ]; then
+        printf 'both'
+    elif [ "$sh_spl_exec" -gt 0 ]; then
+        printf 'exec'
+    elif [ "$sh_spl_home" -gt 0 ]; then
+        printf 'home'
+    else
+        printf 'none'
+    fi
+    unset sh_spl_home sh_spl_exec
+}
+
 # sh_space_report -> one line per root, and the mounts that were tried. This is
 # what `sandhome space` prints and what the bootstrap says when it had to split.
 sh_space_report() {
@@ -1453,6 +1517,7 @@ sh_space_report() {
     printf 'min_exec_mb=%s\n' "$SANDHOME_MIN_EXEC_MB"
     printf 'max_exec_free_mb=%s\n' "$(sh_space_max_exec_free)"
     printf 'exec_ceiling=%s\n' "$(sh_space_ceiling)"
+    printf 'payloads=%s\n' "$(sh_space_payloads)"
 }
 
 # sh_space_probe_report -> every candidate tried, with the real answer for each.
@@ -1659,7 +1724,7 @@ sh_space_gc() {
     # toolchain data rebuilt by `repair`, not caches, and deleting them would
     # break every toolchain to reclaim the root they run from.
     if sh_have find; then
-        for sh_gc_dir in "$SH_EXEC/cache" "$SH_EXEC/tmp" "$SH_EXEC/go-bin"; do
+        for sh_gc_dir in "$SH_EXEC/cache" "$SH_EXEC/tmp"; do
             [ -n "$sh_gc_dir" ] || continue
             [ -d "$sh_gc_dir" ] || continue
             for sh_gc_e in "$sh_gc_dir"/* "$sh_gc_dir"/.[!.]*; do
@@ -1790,9 +1855,14 @@ sh_space_largest() {
         # sandhome's caches, and `gc` deliberately does not touch those. Without
         # a tag the list reads as though `gc` could reclaim all of it, so the
         # consumer deletes the wrong thing or waits for a command that will not
-        # help (issue #125). `sandhome` marks what gc/repair own; `yours` marks
-        # build output only the caller can remove. The tag is appended after the
-        # path so the size-then-path shape callers already parse is unchanged.
+        # help (issue #125). Three tags, one meaning each: `reclaim` is what a
+        # default `gc` removes, `sandhome` is what the tree owns and `gc` keeps,
+        # `yours` is anything else. `space --reclaim` and `gc --dry-run` read
+        # the same scan `gc` runs, so the tags and the numbers cannot disagree
+        # again (issue #141: the legend said `sandhome` is what gc reclaims
+        # while the tag also covered views, which gc never touches, and named
+        # `$SH_EXEC/staging`, which this tree never creates -- gc clears
+        # `$SH_HOME/.staging` and `$SH_EXEC/.staging`).
         # REDUNDANCY: PREFIX, NOT BASENAME, BECAUSE A CONSUMER NESTS. The first
         # version matched the basename against a fixed list, so `$EXEC/myproj/target`
         # read as `yours` (right) but `$EXEC/cache/myproj` read as `sandhome`
@@ -1807,14 +1877,24 @@ sh_space_largest() {
         # them would be the wrong advice.
         sh_sl_tag=yours
         case "$sh_sl_e" in
-            "$SH_EXEC"/views|"$SH_EXEC"/views/*|"$SH_EXEC"/cache|"$SH_EXEC"/cache/*|"$SH_EXEC"/staging|"$SH_EXEC"/staging/*|"$SH_EXEC"/tmp|"$SH_EXEC"/tmp/*) sh_sl_tag=sandhome ;;
-            "$SH_EXEC"/npm-global|"$SH_EXEC"/npm-global/*|"$SH_EXEC"/uv-bin|"$SH_EXEC"/uv-bin/*|"$SH_EXEC"/uv-tools|"$SH_EXEC"/uv-tools/*|"$SH_EXEC"/go-bin|"$SH_EXEC"/go-bin/*|"$SH_EXEC"/cargo-install|"$SH_EXEC"/cargo-install/*|"$SH_EXEC"/projects|"$SH_EXEC"/projects/*|"$SH_EXEC"/bin|"$SH_EXEC"/bin/*) sh_sl_tag=sandhome ;;
+            "$SH_EXEC"/cache|"$SH_EXEC"/cache/*|"$SH_EXEC"/tmp|"$SH_EXEC"/tmp/*|"$SH_EXEC"/.staging|"$SH_EXEC"/.staging/*) sh_sl_tag=reclaim ;;
         esac
+        if [ "$sh_sl_tag" = yours ]; then
+            case "$sh_sl_e" in
+                "$SH_EXEC"/node-gyp-tmp-*|"$SH_EXEC"/.node-gyp-tmp-*) sh_sl_tag=reclaim ;;
+            esac
+        fi
+        if [ "$sh_sl_tag" = yours ]; then
+            case "$sh_sl_e" in
+                "$SH_EXEC"/views|"$SH_EXEC"/views/*|"$SH_EXEC"/bin|"$SH_EXEC"/bin/*|"$SH_EXEC"/.sandhome-lib|"$SH_EXEC"/.sandhome-lib/*|"$SH_EXEC"/npm-global|"$SH_EXEC"/npm-global/*|"$SH_EXEC"/uv-bin|"$SH_EXEC"/uv-bin/*|"$SH_EXEC"/go-bin|"$SH_EXEC"/go-bin/*|"$SH_EXEC"/cargo-install|"$SH_EXEC"/cargo-install/*) sh_sl_tag=sandhome ;;
+            esac
+        fi
         # Fallback for an SH_EXEC that is unset in a test harness: match the
         # leaf the old way so the tag still answers rather than going silent.
         if [ "$sh_sl_tag" = yours ]; then
             case "${sh_sl_e##*/}" in
-                views|cache|staging|tmp|npm-global|uv-bin|uv-tools|go-bin|cargo-install|projects|bin) sh_sl_tag=sandhome ;;
+                cache|tmp|.staging|node-gyp-tmp-*) sh_sl_tag=reclaim ;;
+                views|bin|npm-global|uv-bin|go-bin|cargo-install) sh_sl_tag=sandhome ;;
             esac
         fi
         printf '%s\t%s\t%s\n' "$sh_sl_k" "$sh_sl_e" "$sh_sl_tag"
@@ -1826,7 +1906,7 @@ sh_space_largest() {
             printf '%sKB\t%s\t(%s)\n' "$sh_sl_k" "$sh_sl_p" "$sh_sl_tag"
         done
     }
-    printf '%s\n' 'tag: sandhome = a cache gc/prune can reclaim; yours = build output you remove when the root drains'
+    printf '%s\n' 'tag: reclaim = gc removes this; sandhome = this tree owns it and gc keeps it; yours = you installed or built it, remove it yourself'
     return 0
 }
 

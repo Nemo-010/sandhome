@@ -152,6 +152,45 @@ sh_env_body() {
         printf 'fi\n'
     fi
     printf 'if [ -n "${TMPDIR:-}" ]; then mkdir -p "$TMPDIR" 2>/dev/null || true; fi\n'
+    # # STOP: LEAKSANITIZER NEEDS ptrace, AND THIS CAGE DENIES IT. An
+    # `-fsanitize=address` build compiles and links, then loses every byte of
+    # its own stdout and exits 1 at exit, because LSan stops threads with
+    # ptrace and dies with `LeakSanitizer has encountered a fatal error ...
+    # does not work under ptrace`. The programme's output is lost with it
+    # (stdout is block-buffered and LSan calls _exit on its fatal path), so the
+    # failure reads as "my binary produced nothing" (issue #144). The answer is
+    # `detect_leaks=0`, measured on this tree and the shape dropssh's sanitizer
+    # run settled on; ASan and UBSan keep working. Only written when the
+    # measured ptrace answer says the leak checker cannot work, and written as
+    # a guarded default so a caller who sets ASAN_OPTIONS keeps it.
+    if [ -z "${SH_PTRACE:-}" ]; then
+        SH_PTRACE=$(sh_ptrace_from_file)
+    fi
+    if [ -n "${SH_PTRACE:-}" ]; then
+        printf 'SANDHOME_PTRACE=%s\n' "$(sh_sq_quote "$SH_PTRACE")"
+        printf 'export SANDHOME_PTRACE\n'
+    fi
+    # # EVERY ANSWER THE PROBE CAN GIVE IS NAMED, BECAUSE `*` HIDES THE
+    # MISSING ONE. The probe returns yes, no, partial (lib/detect.sh) or
+    # `unknown` when there is neither python3 nor a C compiler to measure
+    # with. Written as `''|yes) skip`, a host the probe never ran on silently
+    # lost the workaround and #144 came back -- the same shape as the defect,
+    # one level up. The workaround is the cheap side of the trade: it costs
+    # leak detection, which cannot work without ptrace anyway, and its absence
+    # costs the programme's entire stdout. So it is written for every answer
+    # except a measured `yes`, and an unmeasured host is treated as needing
+    # it. A caller who sets ASAN_OPTIONS or LSAN_OPTIONS keeps theirs; the
+    # lines below are guarded defaults. SANDHOME_ASAN=off restores the
+    # unmodified environment for a host where leak checking works.
+    : "${SANDHOME_ASAN:=on}"
+    case "$SANDHOME_ASAN:${SH_PTRACE:-}" in
+        off:*) ;;
+        *:yes) ;;
+        *)
+            printf 'ASAN_OPTIONS="${ASAN_OPTIONS:-detect_leaks=0}"\n'
+            printf 'LSAN_OPTIONS="${LSAN_OPTIONS:-detect_leaks=0}"\n'
+            printf 'export ASAN_OPTIONS LSAN_OPTIONS\n' ;;
+    esac
     printf 'if [ -d "$SANDHOME_HOME/env.d" ]; then\n'
     printf '  for _sh_env_f in "$SANDHOME_HOME"/env.d/*.sh; do\n'
     printf '    [ -r "$_sh_env_f" ] && . "$_sh_env_f"\n'
@@ -239,6 +278,34 @@ sh_wanted_from_file() {
         esac
     done < "$SH_HOME/env.sh"
     printf '%s' "$sh_wff_out"
+}
+
+# sh_ptrace_from_file -> the ptrace answer recorded in env.sh, or nothing. The
+# bootstrap measures it once; a later install or repair regenerates env.sh
+# without having run the probe, so the recorded value is read back and
+# rewritten rather than dropped. Same shape as sh_wanted_from_file, for the
+# same reason: a fact this process does not hold must not be erased by a
+# routine write.
+sh_ptrace_from_file() {
+    sh_pff_out=''
+    [ -r "$SH_HOME/env.sh" ] || {
+        printf ''
+        return 0
+    }
+    sh_pff_cr=$(printf '\r')
+    while IFS= read -r sh_pff_l || [ -n "$sh_pff_l" ]; do
+        sh_pff_l=${sh_pff_l%"$sh_pff_cr"}
+        case "$sh_pff_l" in
+            SANDHOME_PTRACE=*)
+                sh_pff_out=${sh_pff_l#SANDHOME_PTRACE=}
+                sh_pff_out=${sh_pff_out#\'}
+                sh_pff_out=${sh_pff_out%\'}
+                sh_pff_out=${sh_pff_out#\"}
+                sh_pff_out=${sh_pff_out%\"}
+                ;;
+        esac
+    done < "$SH_HOME/env.sh"
+    printf '%s' "$sh_pff_out"
 }
 
 # sh_wanted_merge NAMES... -> fold NAMES into SH_WANTED_TOOLCHAINS, each once.
@@ -591,7 +658,16 @@ sh_bake_value() {
 # `--no-lib` and SANDHOME_MIRROR_LIB=0 turn it off for a host that would rather
 # not hold a second copy; the bake and the pointers still run.
 sh_exec_mirror_library() {
-    sh_eml_exec=${SH_EXEC:-}
+    # # THE ROOT IS READ THROUGH SANDHOME_EXEC, AS EVERY OTHER WRITER READS IT.
+    # This took `${SH_EXEC:-}`, while bin/sandhome binds `SANDHOME_EXEC` from
+    # `SH_EXEC` at each entry point and the dispatcher, env.sh and the plan
+    # all work from `SANDHOME_EXEC`. A caller that holds only the bound name
+    # -- a sourced env.sh, a fragment, a repair path -- got `sh_eml_exec=` and
+    # an early `return 0`, so the mirror was silently not written. Measured:
+    # the same call with SH_EXEC set refreshed the mirror, and without it
+    # returned 0 having done nothing. SH_EXEC is still honoured, because the
+    # bootstrap sets both.
+    sh_eml_exec=${SANDHOME_EXEC:-${SH_EXEC:-}}
     sh_eml_repo=${SH_REPO_DIR:-}
     [ -n "$sh_eml_exec" ] || return 0
     [ -n "$sh_eml_repo" ] || return 0
@@ -639,7 +715,16 @@ sh_exec_mirror_library() {
 # root the plan chose self-contained, on the repair path as well as the first
 # install (#41).
 sh_exec_install_launchers() {
+    # SANDHOME_EXEC first, as sh_exec_mirror_library and the plan do; SH_EXEC
+    # is the bootstrap's spelling and both are set there. A caller holding
+    # only the bound name still gets a self-contained root.
     sh_eil_bin=${SH_EXEC_BIN:-}
+    if [ -z "$sh_eil_bin" ]; then
+        case "${SANDHOME_EXEC:-${SH_EXEC:-}}" in
+            '') : ;;
+            *) sh_eil_bin=${SANDHOME_EXEC:-${SH_EXEC:-}}/bin ;;
+        esac
+    fi
     sh_eil_repo=${SH_REPO_DIR:-}
     [ -n "$sh_eil_bin" ] || return 0
     [ -n "$sh_eil_repo" ] || return 0
@@ -1000,6 +1085,36 @@ sh_global_skip_entry() {
             "$SH_EXEC"|"$SH_EXEC/global") return 0 ;;
         esac
     fi
+    # # STOP: A TOOLCHAIN VIEW BIN IS NOT A PATH ENTRY; A NEUTRAL DIRECTORY ON
+    # THE EXEC ROOT STILL IS. The list refused $SH_EXEC_BIN and $SH_EXEC/global
+    # and then everything else under the exec root was a candidate -- including
+    # `$SH_EXEC/views/<name>/bin`, which is the SAME KIND of indirection as
+    # $SH_EXEC_BIN: it is on PATH only because env.sh put it there, so a shell
+    # that has not read the environment cannot be served by it. Measured on a
+    # home that refuses execve, after the bootstrap (whose PATH already carried
+    # the view bins, because sh_env_load ran first):
+    #
+    #   global record:  .../exec/views/node/bin  .../exec/views/python/bin
+    #   clashes:        node npm npx uv uvx
+    #   ls .../exec/views/python/bin/: .sandhome-dispatch, node -> .sandhome-dispatch,
+    #     npm, npx, jq, rg, fd, AND the real uv/uvx ELF binaries beside them
+    #   a sourced shell: command -v node -> .../exec/views/PYTHON/bin/node
+    #
+    # The hook wrote a dispatcher and node/npm/npx links into the python view,
+    # under another view's names, and clashed with uv/uvx. It is the rule
+    # sh_global_view_names already applies to NAMES ("a hit inside this tree is
+    # not PATH will serve it"); this is the same rule for the DIRECTORIES the
+    # hook is written into.
+    #
+    # The pattern is the view ROOT, not the whole exec root: `views` itself is
+    # a directory this tree made to hold views, so nothing a consumer put there
+    # is a PATH entry (tests/global.sh keeps `$SH_EXEC/plain-bin` a candidate,
+    # which is the control that this must not become "everything is a skip").
+    if [ -n "${SH_EXEC:-}" ]; then
+        case "$1" in
+            "$SH_EXEC"/views|"$SH_EXEC"/views/*) return 0 ;;
+        esac
+    fi
     sh_global_is_sandbox "$1" && return 0
     return 1
 }
@@ -1179,6 +1294,45 @@ _sh_gwd_end
         printf '%s\n' '  printf "sandhome-dispatch loaded=%s exec=%s\n" "$_sandhome_loaded" "${SANDHOME_EXEC:-unset}"'
         printf '%s\n' '  exit 0'
         printf '%s\n' 'fi'
+        cat <<'_sandhome_installer_end'
+# # STOP: A CLI INSTALLED AFTER THE SETUP IS REACHABLE IN THE NEXT FRESH
+# SHELL. The hook's names are a fixed list written by `sandhome global`, so
+# `npm install -g cowsay` left cowsay in npm-global/bin but not in the hook,
+# and a later `cowsay` was "command not found" until the operator remembered
+# to run `sandhome global` (issue #142). When the name is an installer, run it
+# as a CHILD (never exec: there is no "after an exec"), then expose every new
+# executable in the sandbox bins as a hook link beside this script. The four
+# sandboxes are the same ones env.sh prepends; a name already exposed is left
+# alone, and a failure to link never changes the installer's exit status.
+case "$_sandhome_name" in
+  npm|npx|pnpm|yarn|corepack|go|cargo|rustup|uv|uvx|pip|pip3|pipx) _sandhome_install=yes ;;
+  *) _sandhome_install=no ;;
+esac
+if [ "$_sandhome_install" = yes ]; then
+  _sandhome_rc=127
+  _sandhome_ran=no
+  for _sandhome_p in "${SANDHOME_EXEC:-/nonexistent}/bin/$_sandhome_name" "${_sandhome_view:-/nonexistent}/$_sandhome_name"; do
+    [ -x "$_sandhome_p" ] || continue
+    "$_sandhome_p" "$@"
+    _sandhome_rc=$?
+    _sandhome_ran=yes
+    break
+  done
+  if [ "$_sandhome_ran" = yes ] && [ -n "${SANDHOME_EXEC:-}" ]; then
+    for _sandhome_sb in uv-bin npm-global/bin go-bin cargo-install/bin; do
+      [ -d "$SANDHOME_EXEC/$_sandhome_sb" ] || continue
+      for _sandhome_x in "$SANDHOME_EXEC/$_sandhome_sb"/*; do
+        [ -x "$_sandhome_x" ] || continue
+        _sandhome_b=${_sandhome_x##*/}
+        [ -e "${0%/*}/$_sandhome_b" ] && continue
+        ln -sf .sandhome-dispatch "${0%/*}/$_sandhome_b" 2>/dev/null || true
+      done
+    done
+    unset _sandhome_sb _sandhome_x _sandhome_b
+  fi
+  [ "$_sandhome_ran" = yes ] && exit "$_sandhome_rc"
+fi
+_sandhome_installer_end
         printf '%s\n' 'if [ -n "${SANDHOME_EXEC:-}" ] && [ -x "$SANDHOME_EXEC/bin/$_sandhome_name" ]; then'
         printf '%s\n' '  exec "$SANDHOME_EXEC/bin/$_sandhome_name" "$@"'
         printf '%s\n' 'fi'
@@ -1187,14 +1341,35 @@ _sh_gwd_end
         printf '%s\n' 'fi'
         printf '%s\n' '# A tool the hook does not name, in a directory the hook just put on PATH.'
         printf '%s\n' 'if [ -n "${SANDHOME_EXEC:-}" ]; then'
-        printf '%s\n' '  for _sandhome_sb in "$SANDHOME_EXEC/npm-global/bin" "$SANDHOME_EXEC/uv-bin" "$SANDHOME_EXEC/go-bin"; do'
+        # # STOP: THIS LIST IS THE SAME VARIABLE AS THE PREPEND ABOVE, BECAUSE
+        # A HAND-WRITTEN COPY OF IT WAS WRONG. It named npm-global/bin, uv-bin
+        # and go-bin and omitted cargo-install/bin, while the linker above it
+        # links every directory -- so a `cargo install` CLI was linked into
+        # the hook, `command -v` found it, and running it answered "not
+        # installed; reinstall the CLI": the hook exposed a name it could not
+        # resolve (issue #141's class, still live in the #142 feature).
+        # Measured with a CLI in each of the four sandbox directories.
+        # sh_gwd_for is built above from sh_global_sandbox_dirs, the one
+        # function both halves call, so a fifth sandbox directory cannot be
+        # added to one place and missed in the other. It is REVERSED to match
+        # the resolution order above (npm-global/bin before uv-bin, the order
+        # env.sh prepends), because a name in two prefixes must resolve to
+        # the same one either way.
+        printf '  for _sandhome_sb in %s; do\n' "$sh_gwd_for"
         printf '%s\n' '    if [ -x "$_sandhome_sb/$_sandhome_name" ]; then'
         printf '%s\n' '      exec "$_sandhome_sb/$_sandhome_name" "$@"'
         printf '%s\n' '    fi'
         printf '%s\n' '  done'
         printf '%s\n' '  unset _sandhome_sb'
         printf '%s\n' 'fi'
-        printf '%s\n' 'printf "%s\n" "sandhome: $_sandhome_name is not installed; run: sandhome install $_sandhome_name" >&2'
+        # # STOP: THE REMEDY MUST FIT THE NAME. This said `sandhome install
+        # $_sandhome_name` for every name, but the names the hook exposes are
+        # not all toolchains: a `go install`ed CLI whose payload `gc` removed
+        # got told to run `sandhome install stringer`, which answers "unknown
+        # toolchain" and then still rewrote env.sh and the hook before exiting
+        # 1 (issue #141). The message now names both real paths: reinstall the
+        # CLI and refresh the hook, or install the toolchain by name.
+        printf '%s\n' 'printf "%s\n" "sandhome: $_sandhome_name is not installed; run: reinstall the CLI then '\''sandhome global'\'', or, if it is a toolchain, '\''sandhome install $_sandhome_name'\''" >&2'
         printf '%s\n' 'exit 127'
     } > "$sh_gwd_tmp" 2>/dev/null || { rm -f "$sh_gwd_tmp" 2>/dev/null; return 1; }
     chmod 0755 "$sh_gwd_tmp" 2>/dev/null || true
@@ -1286,6 +1461,35 @@ sh_global_relocate_record() {
         fi
         sh_grr_i=$((sh_grr_i + 1))
     done < "$sh_grr_old/dirs"
+    # # STOP: A HOOK WRITTEN IN PLACE INTO A DIRECTORY THE PLAN NOW REFUSES IS
+    # STILL OURS TO REMOVE. The relocate path only handled a directory that had
+    # been replaced by a SYMLINK (link=yes), so a hook written directly into a
+    # bin directory -- the shape an exec-capable exec root produces, which is
+    # how `$SH_EXEC/views/node/bin` was taken (see sh_global_skip_entry) -- kept
+    # its `.sandhome-dispatch` and its name links after the rule changed, and a
+    # repair refreshed everything around it while leaving the shadow in place.
+    # The test is narrow: the directory is ours only when it sits under
+    # $SH_EXEC AND carries our own dispatcher, so a host directory that happens
+    # to live under the exec root is still never touched.
+    if [ -n "${SH_EXEC:-}" ] && [ -n "$sh_grr_dir" ] && \
+       [ ! -L "$sh_grr_dir" ] && [ -d "$sh_grr_dir" ] && [ -x "$sh_grr_dir/.sandhome-dispatch" ]; then
+        case "$sh_grr_dir" in
+            "$SH_EXEC"/*) ;;
+            *) return 0 ;;
+        esac
+        sh_grr_cleaned=0
+        for sh_grr_f in "$sh_grr_dir"/* "$sh_grr_dir"/.[!.]*; do
+            [ -L "$sh_grr_f" ] || continue
+            sh_grr_b=${sh_grr_f##*/}
+            [ "$sh_grr_b" = '.sandhome-dispatch' ] && continue
+            sh_grr_t=$(readlink "$sh_grr_f" 2>/dev/null) || continue
+            [ "$sh_grr_t" = '.sandhome-dispatch' ] || continue
+            rm -f "$sh_grr_f" 2>/dev/null && sh_grr_cleaned=$((sh_grr_cleaned + 1))
+        done
+        rm -f "$sh_grr_dir/.sandhome-dispatch" 2>/dev/null || true
+        sh_warn "$sh_grr_dir carried an earlier global hook written in place; the dispatcher and its $sh_grr_cleaned link(s) were removed (the directory is inside the exec root, where env.sh already puts it on PATH)"
+        return 0
+    fi
     [ "$sh_grr_link" = yes ] || return 0
     [ -n "${SH_EXEC:-}" ] || return 0
     # Ours, or nothing: the link must be the one this tree writes.

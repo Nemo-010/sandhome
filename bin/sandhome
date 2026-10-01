@@ -37,17 +37,26 @@ else
     # `.sandhome-home` pointer are absolute paths, and a checkout that a tmpfs
     # restart or a cleanup took away makes both of them wrong; a directory
     # BESIDE this copy cannot be, because it moves with the copy. The bootstrap
-    # mirrors lib/ and bin/ into $SANDHOME_EXEC/.sandhome-lib and `repair`
-    # re-mirrors it, so `env -i <exec>/bin/sandhome doctor` still works on a
-    # host whose checkout is gone and whose home pointer is stale. That is the
-    # case issue #133 left behind: the fix made the bake durable, and this
-    # makes the thing the bake points at optional.
+    # and `sh_exec_install_launchers` (which install and repair go through)
+    # mirror lib/ and bin/ into $SANDHOME_EXEC/.sandhome-lib, so `env -i
+    # <exec>/bin/sandhome doctor` still works on a host whose checkout is gone
+    # and whose home pointer is stale. That is the case issue #133 left behind:
+    # the fix made the bake durable, and this makes the thing the bake points
+    # at optional.
     sh_priv=''
     case "$0" in
         */*) sh_priv=${0%/*}/.. ;;
     esac
     if [ -n "$sh_priv" ] && [ -r "$sh_priv/.sandhome-lib/lib/common.sh" ]; then
-        sh_repo=$(CDPATH='' cd -- "$sh_priv" 2>/dev/null && pwd) || sh_repo=''
+        # # STOP: THE MIRROR ITSELF IS THE REPO, NOT THE DIRECTORY BESIDE IT.
+        # This set sh_repo to sh_priv (the exec root) after testing the mirror
+        # at sh_priv/.sandhome-lib, so the next `-r $sh_repo/lib/common.sh`
+        # failed and the mirror was discarded: the fallback existed, was
+        # checked, and never worked. `env -i <exec>/bin/sandhome` therefore
+        # exited 2 on every fresh pipe setup until `repair` rewrote the bake
+        # (issue #147). The cd target is the mirror directory that was just
+        # proven readable.
+        sh_repo=$(CDPATH='' cd -- "$sh_priv/.sandhome-lib" 2>/dev/null && pwd) || sh_repo=''
     fi
     if [ -z "${sh_repo:-}" ] || [ ! -r "$sh_repo/lib/common.sh" ]; then
         case "$0" in
@@ -419,8 +428,9 @@ and the ceiling across exec-capable candidates (max_exec_free_mb and
 exec_ceiling). --probe lists every candidate with writable/exec/free/total
 and a verdict (chosen, usable, noexec, not-writable, too-small) so the list
 is a decision, not a table of numbers. --largest [N] lists the N biggest
-top-level entries on the exec root with an owner tag (sandhome = a cache
-gc/prune can reclaim; yours = build output you remove), which is what to
+top-level entries on the exec root with an owner tag (reclaim = gc removes
+it, sandhome = this tree owns it and gc keeps it, yours = build output you
+remove), which is what to
 remove first when the root fills with build output. --reclaim
 prints the cache bytes `gc --now` would reclaim, removing nothing.
 HELP
@@ -910,11 +920,20 @@ cmd_install() {
     # exit 0, so a script could not tell a typo from a success. sh_fail already
     # increments the counter, so an unknown name and a failed install both end
     # the command non-zero through the check at the bottom of this file.
+    sh_c_bad=0
     for sh_c_n in $sh_c_final; do
         if ! sh_toolchain_known "$sh_c_n"; then
             sh_fail "unknown toolchain $sh_c_n; run 'sandhome toolchains' for the list"
+            sh_c_bad=1
         fi
     done
+    # # STOP: AN UNKNOWN NAME ABORTS BEFORE THE ENV AND HOOK ARE REWRITTEN.
+    # The loop above only counted the failure and fell through to sh_env_write
+    # and sh_global_install, so `sandhome install stringer` rewrote env.sh,
+    # recorded a bogus wanted name and refreshed the hook before the counter
+    # turned the exit code non-zero (issue #141). Nothing is written for a
+    # request that names no toolchain.
+    [ "$sh_c_bad" = 0 ] || return 1
     sh_env_load
     # The helper may postdate the exec root (an older setup, a wiped tmpfs
     # recovered by repair): rebuild the decision before any promote, so a

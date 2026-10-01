@@ -130,6 +130,25 @@ tc_qemuuser_probe() {
     sh_have qemu-x86_64 && qemu-x86_64 --version >/dev/null 2>&1
 }
 
+# tc_qemuuser_payload_satisfies -> 1 when the on-disk payload is missing a
+# guest the current request names. sh_toolchain_ensure asks this BEFORE taking
+# the "payload already present; rebuilding the view without downloading" path,
+# because that message is only true when the payload can answer the request.
+# The probe cannot be used here: it needs the promoted view, and the whole
+# question is whether to build that view without a download (issue #146).
+tc_qemuuser_payload_satisfies() {
+    [ -n "${SANDHOME_QEMUUSER_EXTRA:-}" ] || return 0
+    tc_qemuuser_bins_from_disk >/dev/null 2>&1 || true
+    for sh_qps_x in ${SANDHOME_QEMUUSER_EXTRA:-}; do
+        case "$sh_qps_x" in qemu-*) sh_qps_n=$sh_qps_x ;; *) sh_qps_n=qemu-$sh_qps_x ;; esac
+        case " $TC_qemuuser_BINS " in
+            *" bin/$sh_qps_n "*) ;;
+            *) return 1 ;;
+        esac
+    done
+    return 0
+}
+
 # tc_qemuuser_guests -> the guest arches present on disk (aarch64, arm, ...),
 # one per line, or nothing. The host emulator is excluded: it is always
 # present when the probe passes, and listing it as a guest would read as
@@ -245,22 +264,84 @@ tc_qemuuser_install() {
     # shape that rots: the version literal goes stale while the module still
     # says it is current. The Forgejo API answers the newest tag, and only
     # the RESULT needs to be pinned -- the digest of the bytes we fetch.
+    # Best-effort, because the archive is kept: when resolution fails and the
+    # kept archive is here, the install proceeds on the recorded tag and says
+    # so loudly (issue #146). Freshness is then unconfirmed, which the warning
+    # names; availability is kept, which is what a cache is for.
+    sh_qu_tag=''
     if ! sh_qu_tag=$(tc_qemuuser_tag); then
-        sh_warn 'could not resolve the newest qemu-static tag from the Forgejo API'
-        return 1
+        sh_qu_tag=''
+    fi
+    sh_qu_recorded=''
+    [ -r "$sh_qu_root/qu.tag" ] && sh_qu_recorded=$(sh_first_line cat "$sh_qu_root/qu.tag" 2>/dev/null)
+    if [ -z "$sh_qu_tag" ]; then
+        if [ -n "$sh_qu_recorded" ] && [ -f "$sh_qu_root/qu.tar.xz" ]; then
+            sh_warn "could not resolve the newest qemu-static tag; proceeding on the recorded $sh_qu_recorded with the kept archive (freshness unconfirmed)"
+            sh_qu_tag=${sh_qu_recorded%% *}
+        else
+            sh_warn 'could not resolve the newest qemu-static tag from the Forgejo API'
+            return 1
+        fi
     fi
     sh_qu_rel="ziglang/qemu-static/releases/download/$sh_qu_tag/$sh_qu_asset-$sh_qu_tag.tar.xz"
     sh_qu_pin=$(sh_pin_for "https://codeberg.org/$sh_qu_rel" qemuuser)
 
     mkdir -p "$sh_qu_root" 2>/dev/null || return 1
-    # Direct first, mirror second: either serves identical bytes, and the pin
-    # below holds whichever answered, so a fallback never weakens the check.
-    if ! sh_fetch_verified "https://codeberg.org/$sh_qu_rel" "$sh_qu_root/qu.tar.xz" "$sh_qu_pin"; then
-        if ! sh_fetch_verified "https://api.rv.pkgforge.dev/https://codeberg.org/$sh_qu_rel" "$sh_qu_root/qu.tar.xz" "$sh_qu_pin"; then
-            return 1
+    # # STOP: A KEPT ARCHIVE IS REUSED BEFORE THE NETWORK IS TOUCHED. Adding a
+    # guest to an existing payload (`install qemuuser --extra aarch64`) used to
+    # re-download the same 63MB archive, because the install deleted it after
+    # the first extraction: the run printed "rebuilding the view without
+    # downloading" for a view that could not serve the guest, then "downloading
+    # a fresh copy" (issue #146). The archive holds every guest, so keeping it
+    # costs one file on the home side and makes the second run a local extract.
+    # It is verified against the same pin before reuse, so a truncated or
+    # altered file is discarded and fetched again.
+    # The kept archive is reused when it is the resolved release: the recorded
+    # tag beside it is compared, not the network. A known pin still verifies
+    # the bytes (a mismatch is corruption and deletes); with no pin recorded
+    # the tag match plus a successful extraction is the check, and an archive
+    # that does not unpack falls through to a fresh fetch below. The kept file
+    # is never deleted before its replacement verifies, so a failed fetch
+    # leaves the previous bytes in place for the retry.
+    sh_qu_reuse=no
+    if [ -f "$sh_qu_root/qu.tar.xz" ] && [ -n "$sh_qu_recorded" ] && \
+       [ "$sh_qu_recorded" = "$sh_qu_tag $sh_qu_asset" ]; then
+        if [ -n "$sh_qu_pin" ]; then
+            sh_qu_kept=$(sh_sha256 "$sh_qu_root/qu.tar.xz" 2>/dev/null)
+            if [ -n "$sh_qu_kept" ] && sh_digest_matches "$sh_qu_kept" "$sh_qu_pin"; then
+                sh_qu_reuse=yes
+            else
+                rm -f "$sh_qu_root/qu.tar.xz" "$sh_qu_root/qu.tag" 2>/dev/null || true
+            fi
+        else
+            sh_qu_reuse=yes
         fi
+        if [ "$sh_qu_reuse" = yes ]; then
+            sh_say "reusing the kept qemu-static archive at $sh_qu_root/qu.tar.xz"
+            if ! tc_qemuuser_extract "$sh_qu_root/qu.tar.xz" "$sh_qu_root"; then
+                sh_warn 'the kept qemu-static archive does not unpack; fetching a fresh copy'
+                rm -f "$sh_qu_root/qu.tar.xz" "$sh_qu_root/qu.tag" 2>/dev/null || true
+                sh_qu_reuse=no
+            fi
+        fi
+    elif [ -f "$sh_qu_root/qu.tar.xz" ]; then
+        # A different recorded release, or none recorded: the bytes cannot be
+        # the resolved one, so they go and the fetch below replaces them.
+        rm -f "$sh_qu_root/qu.tar.xz" "$sh_qu_root/qu.tag" 2>/dev/null || true
     fi
-    if ! tc_qemuuser_extract "$sh_qu_root/qu.tar.xz" "$sh_qu_root"; then
+    unset sh_qu_kept
+    if [ "$sh_qu_reuse" != yes ]; then
+        # Direct first, mirror second: either serves identical bytes, and the
+        # pin below holds whichever answered, so a fallback never weakens the
+        # check.
+        if ! sh_fetch_verified "https://codeberg.org/$sh_qu_rel" "$sh_qu_root/qu.tar.xz" "$sh_qu_pin"; then
+            if ! sh_fetch_verified "https://api.rv.pkgforge.dev/https://codeberg.org/$sh_qu_rel" "$sh_qu_root/qu.tar.xz" "$sh_qu_pin"; then
+                return 1
+            fi
+        fi
+        printf '%s' "$sh_qu_tag $sh_qu_asset" > "$sh_qu_root/qu.tag" 2>/dev/null || true
+    fi
+    if [ "$sh_qu_reuse" != yes ] && ! tc_qemuuser_extract "$sh_qu_root/qu.tar.xz" "$sh_qu_root"; then
         sh_warn "could not unpack the qemu-static archive (no working tar+lzma path here)"
         return 1
     fi
@@ -320,7 +401,9 @@ tc_qemuuser_install() {
         }
     fi
     chmod 0755 "$sh_qu_root/bin/"* 2>/dev/null || true
-    rm -rf "$sh_qu_dir" "$sh_qu_root/qu.tar.xz"
+    # The extracted tree is 280MB and is dropped; qu.tar.xz (63MB) is kept so
+    # the next `--extra` is a local extract rather than a second download.
+    rm -rf "$sh_qu_dir"
     return 0
 }
 

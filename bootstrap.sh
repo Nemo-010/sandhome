@@ -578,7 +578,16 @@ sh_bootstrap_install_command() {
         sh_fail 'could not install sandhome onto the exec root'
         return 1
     fi
+    # # STOP: THE BOOTSTRAP WRITES THE PRIVATE MIRROR TOO. bin/sandhome's
+    # comment claims the bootstrap mirrors lib/ and bin/ into
+    # $SANDHOME_EXEC/.sandhome-lib, but only install and repair called
+    # sh_exec_mirror_library, so a fresh pipe setup had no mirror and
+    # `env -i <exec>/bin/sandhome` failed while the docs said it works
+    # (issue #147). Mirrored here from the tree in hand; bootstrap re-bakes and
+    # re-mirrors from the durable repo after sh_repo_persist.
+    sh_exec_mirror_library || true
     sh_step "installed $SH_EXEC_BIN/sandhome"
+    sh_step "mirrored the library beside it at $SH_EXEC/.sandhome-lib"
     # # A STABLE ABSOLUTE WAY IN, BECAUSE A NON-LOGIN SHELL HAS NO PATH. The exec
     # bin is on PATH only through ~/.profile, which a login shell reads; an agent
     # harness spawns a non-login shell per tool call, so nothing sources the
@@ -760,8 +769,17 @@ sandhome_bootstrap_main() {
 
     sh_say "$SH_OS_ID on $SH_KERNEL $SH_ARCH, $SH_LIBC, wsl=$SH_WSL, privilege=$SH_PRIVILEGE"
     sh_say "pty=$SH_PTY passwd=$SH_PASSWD"
-    if [ "$SH_HOME_EXEC" = yes ]; then
-        sh_say "home and exec are the same root: $SH_HOME"
+    # # STOP: THE ROOTS LINE MUST NAME THE ROOTS THE RUN WILL USE. This printed
+    # "home and exec are the same root: $SH_HOME" whenever the home happens to
+    # run files, even when `--exec` named a different root -- so the one line a
+    # consumer reads to find out where things will land said the opposite of
+    # what the plan had decided, and read as "--exec was ignored" (issue #149).
+    # The condition is now whether the two roots ARE the same, and a named
+    # root says so.
+    if [ "$SH_EXEC" = "$SH_HOME" ]; then
+        sh_say "home and exec are the same root: $SH_HOME (no separate root named; the home runs binaries)"
+    elif [ "$SH_HOME_EXEC" = yes ]; then
+        sh_say "home $SH_HOME (runs binaries); exec $SH_EXEC (named)"
     else
         sh_say "home $SH_HOME (noexec); exec $SH_EXEC"
     fi
@@ -925,6 +943,12 @@ sandhome_bootstrap_main() {
     # tree under /tmp that the reaper, a reboot, or gc removes, after which
     # every `sandhome` call exits 2. See sh_repo_persist in lib/env.sh.
     sh_repo_persist || true
+    # sh_repo_persist repoints SH_REPO_DIR at the durable copy under the home
+    # when it ran from scratch. Re-bake the command and the private mirror from
+    # THERE, so the bake names a tree that survives the /tmp cleanup below
+    # instead of the scratch extraction dir that is about to be removed
+    # (issue #147: the pipe bootstrap baked /tmp/sandhome-bootstrap.*/sandhome-main).
+    sh_exec_install_launchers || true
     sh_env_write
     sh_env_load
     sh_bootstrap_path_line

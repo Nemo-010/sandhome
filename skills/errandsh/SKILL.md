@@ -51,7 +51,9 @@ The cage has no `/dev/ptmx`, so there is no kernel pty to allocate;
 program on the list is run in the foreground on the session's descriptors. `pty
 CMD` forces it for anything else, `ERRANDSH_PTY=0` turns the automatic part off,
 and because the interposer is exported and `exec`'d a subshell the program
-starts keeps the terminal.
+starts keeps the terminal. `faketty` also gives an unset or `dumb` `TERM` the
+name `xterm-256color` (or `SANDHOME_FAKEPTY_TERM`), because a userspace pty that
+reports `isatty` but names no terminal still fails every terminfo lookup.
 
 The one thing it cannot reach is a STATICALLY LINKED full-screen program:
 `LD_PRELOAD` has nothing to interpose into. While a command runs the session is

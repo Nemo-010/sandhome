@@ -216,6 +216,7 @@ usage: sh bootstrap.sh [options]
 
 | variable | read by | default |
 | --- | --- | --- |
+| `SANDHOME_ASAN` | env.sh | `on` |
 | `SANDHOME_BIN_DIR` | bootstrap.sh sandhome | `$SH_REPO_DIR/bin` |
 | `SANDHOME_CMAKE_VERSION` | cmake.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_CRIT_MB` | space.sh sandhome | `unset, and the feature is off until it is set` |
@@ -251,6 +252,7 @@ usage: sh bootstrap.sh [options]
 | `SANDHOME_PCT_MEANINGFUL_MB` | space.sh sandhome | `unset, and the feature is off until it is set` |
 | `SANDHOME_PKGCONF_VERSION` | pkgconf.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_PROFILE` | profile.sh | `1` |
+| `SANDHOME_PTRACE` | env.sh | `*)` |
 | `SANDHOME_QEMUUSER_EXTRA` | sandhome qemuuser.sh | `$SANDHOME_QEMUUSER_EXTRA $sh_c_x` |
 | `SANDHOME_REF` | bootstrap.sh sandhome | `unset, and the feature is off until it is set` |
 | `SANDHOME_REPO` | env.sh profile.sh bootstrap.sh sandhome | `unset, and the feature is off until it is set` |

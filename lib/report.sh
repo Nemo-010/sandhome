@@ -328,6 +328,43 @@ sh_doctor() {
             fi
             ;;
     esac
+    # # A SPLIT THE CALLER ASKED FOR AND DID NOT GET IS AN INVARIANT. When
+    # the exec root was explicitly named and differs from the home, every
+    # installed payload must have its view on the exec root; a view collapsed
+    # into the home means the next install aims hundreds of megabytes at the
+    # root the caller named --exec to avoid (issue #149). Only a REAL payload
+    # counts: an adopted toolchain leaves auxiliary data under the home (the
+    # npm seed home/toolchains/node/npm that tc_node_ensure_npm fetches for
+    # an adopted node) without any view, and that is by design, not a
+    # collapse. The check runs only when the named root is writable and runs
+    # files: a root that cannot be used is the plan's refusal, not this
+    # gate's. The repair is the command that rebuilds views where the plan
+    # says they belong.
+    if [ "${SH_EXEC_CHOSEN_REASON:-}" = explicit ] && [ -n "${SH_EXEC:-}" ] && \
+       [ "${SH_EXEC:-}" != "${SH_HOME:-}" ] && \
+       sh_dir_writable "$SH_EXEC" 2>/dev/null && sh_exec_probe "$SH_EXEC" 2>/dev/null; then
+        sh_doc_split_missing=''
+        if [ -n "${SH_HOME_TOOLCHAINS:-}" ] && [ -d "$SH_HOME_TOOLCHAINS" ]; then
+            for sh_doc_sd in "$SH_HOME_TOOLCHAINS"/*; do
+                [ -d "$sh_doc_sd" ] || continue
+                sh_doc_sn=${sh_doc_sd##*/}
+                case "$sh_doc_sn" in .*|staging|tmp) continue ;; esac
+                if command -v sh_toolchain_payload_present >/dev/null 2>&1; then
+                    sh_toolchain_payload_present "$sh_doc_sn" 2>/dev/null || continue
+                fi
+                if [ ! -d "$SH_EXEC_VIEWS/$sh_doc_sn" ]; then
+                    sh_doc_split_missing="$sh_doc_split_missing $sh_doc_sn"
+                fi
+            done
+        fi
+        sh_doc_split_missing=$(sh_lead "$sh_doc_split_missing")
+        if [ -n "$sh_doc_split_missing" ]; then
+            sh_doctor_check split_views "explicit:$SH_EXEC missing:$sh_doc_split_missing" 'views on the named exec root (repair: sandhome repair)'
+        else
+            sh_doctor_check split_views ok ok
+        fi
+        unset sh_doc_sd sh_doc_sn sh_doc_split_missing
+    fi
     # The global hook is gated WHEN A RECORD EXISTS (issue #127). `sh_global_report`
     # does not repeat what an install once claimed: it runs each recorded
     # directory through a fresh `env -i` shell and reads back the dispatcher's
@@ -336,10 +373,53 @@ sh_doctor() {
     # host layout (nothing was recorded) and passes; the failure line names the
     # repair command through its `wanted` text.
     sh_doc_global=$(sh_global_report 2>/dev/null)
+    # # EVERY ARM THAT NAMES A DIRECTORY IS CHECKED, NOT ONLY `on:`. A recorded
+    # hook directory under the exec root is wrong whichever answer the probe
+    # gave it: `on:` means it answers a fresh shell (the shadowing case) and
+    # `stale:` means it does not answer any more, and both are a directory this
+    # tree must not be installed into. Keying the check on `on:*` alone missed
+    # the `stale:` half, measured by driving sh_doctor with a recorded view-bin
+    # path whose dispatcher does not answer.
+    sh_doc_hookdir=''
     case "$sh_doc_global" in
-        stale:*) sh_doctor_check global_hook "$sh_doc_global" 'on:<dir> or none (repair: sandhome global)' ;;
-        *)       sh_doctor_check global_hook "$sh_doc_global" "$sh_doc_global" ;;
+        on:*)    sh_doc_hookdir=${sh_doc_global#on:} ;;
+        stale:*) sh_doc_hookdir=${sh_doc_global#stale:} ;;
     esac
+    # # THE HOOK MAY LEGITIMATELY LIVE ON THE EXEC ROOT; IT MUST NOT LIVE IN A
+    # DIRECTORY THIS TREE USES AS INDIRECTION. A `PATH` directory on the exec
+    # root is a normal install target (the bootstrap puts the hook in
+    # `$SH_EXEC/global` when the exec root is itself on PATH), but `views/<n>/bin`
+    # and the exec `bin` are not PATH entries a consumer has: they are
+    # advertised BY env.sh, so a hook there shadows that view's own tools with
+    # another view's names. Measured: node/npm/npx written into the python view,
+    # clashing with uv/uvx, so a sourced shell answered `command -v node` from
+    # the python view (issue #149). The test is the indirection set, not the
+    # exec root, because the exec root is a legitimate target.
+    sh_doc_hook_bad=0
+    if [ -n "$sh_doc_hookdir" ] && [ -n "${SH_EXEC:-}" ]; then
+        case "$sh_doc_hookdir" in
+            "$SH_EXEC"/views|$SH_EXEC/views/*) sh_doc_hook_bad=1 ;;
+        esac
+        if [ -n "${SH_EXEC_BIN:-}" ]; then
+            case "$sh_doc_hookdir" in
+                "$SH_EXEC_BIN"|"$SH_EXEC_BIN"/*) sh_doc_hook_bad=1 ;;
+            esac
+        fi
+    fi
+    if [ "$sh_doc_hook_bad" = 1 ]; then
+        sh_doctor_check global_hook "inside-exec-root:$sh_doc_hookdir" 'a PATH directory outside the tree indirection (repair: sandhome global --remove, then sandhome global)'
+    else
+        # # THE PASS ARM COMPARES THE VALUE WITH ITSELF. `on:<dir>` is a
+        # directory the probe answered, and any such directory outside the
+        # indirection set is healthy; writing a literal want here made every
+        # normal `on:<dir>` a failure, which the suite caught. Only `stale:`
+        # names a wanted value, because there is a wanted value for it
+        # (`on:<dir> or none`).
+        case "$sh_doc_global" in
+            stale:*) sh_doctor_check global_hook "$sh_doc_global" 'on:<dir> or none (repair: sandhome global)' ;;
+            *)       sh_doctor_check global_hook "$sh_doc_global" "$sh_doc_global" ;;
+        esac
+    fi
     # The working tree may itself be noexec (issue #24): build output there
     # fails at run time with Permission denied, which reads as an install bug.
     # This is informational, never a failure: the fix is to build under
@@ -569,6 +649,31 @@ sh_doctor() {
                 sh_doc_fail=$((sh_doc_fail + 1)) ;;
         esac
     done
+    # # A DOWNLOADED BROWSER IS AN EXECUTABLE, SO DOCTOR CHECKS ITS CACHE.
+    # Puppeteer defaults to $HOME/.cache/puppeteer and Playwright to
+    # $HOME/.cache/ms-playwright, and the home is the mount that refuses
+    # execve: the download succeeds and the launch dies with Permission denied
+    # (issue #143). The node fragment points both at the exec root; this gate
+    # fails when node is wanted and either variable does not point there, so
+    # the fragment cannot rot back to the home default unnoticed. It reads the
+    # wanted list from env.sh, the same list the toolchain loop above reads,
+    # because a fresh doctor has no INSTALLED/ADOPTED in its environment. A
+    # caller who set either to their own exec-capable path keeps it only when
+    # it is under the exec root this run chose; otherwise the browser would
+    # not run here.
+    case " ${sh_doc_wanted_all:-} " in
+        *" node "*)
+            for sh_doc_var in PUPPETEER_CACHE_DIR PLAYWRIGHT_BROWSERS_PATH; do
+                sh_doc_got=$(eval "printf '%s' \"\${$sh_doc_var:-}\"")
+                case "$sh_doc_got" in
+                    "$SH_EXEC"/*) : ;;
+                    *)
+                        printf 'FAIL %s=unset (expected under %s; run sandhome install --force node)\n' \
+                            "$sh_doc_var" "$SH_EXEC"
+                        sh_doc_fail=$((sh_doc_fail + 1)) ;;
+                esac
+            done ;;
+    esac
     # # STOP: A ROOT THAT IS DRAINING IS A FAILURE, AND IT IS NAMED IN WORDS.
     # `doctor` is the command ROUTE.md step 2 makes a session run to decide
     # whether the sandbox is ready, so it is the only place an agent is

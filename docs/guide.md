@@ -233,7 +233,12 @@ what was there before, then verifies the result: every recorded directory is
 run through a fresh `env -i` shell that has to print its marker back.
 `sandhome report` prints `global=on:<dir>` when a recorded directory answers
 that shell, `global=stale:<dir>` when one was recorded and no longer does
-(`doctor` fails on it and names the repair), and
+(`doctor` fails on it and names the repair),
+`global=inside-exec-root:<dir>` when the hook was written into a directory this
+tree uses as indirection (`$SANDHOME_EXEC/views/...` or the exec `bin`), which
+`doctor` fails too - such a directory is on `PATH` only because `env.sh` put it
+there, so a hook in it shadows that view's own tools with another view's names
+(issue #149) - and
 `global=none` when the host had no writable candidate; `sandhome global
 --status` names every directory and its state,
 `sandhome global` installs or repairs them, and `sandhome global --remove`
@@ -250,11 +255,17 @@ dispatcher puts those directories on the `PATH` of the tools it starts, and the
 hook reads them from disk for its name list. One `sandhome global` after an
 install is what teaches it a new CLI; a login shell is covered by the profile
 fragment and a shell with no `PATH` at all by `entry.sh`, and the two together
-cover the shells the dispatcher cannot (issue #138). Two directories are
+cover the shells the dispatcher cannot (issue #138). Two kinds of directory are
 refused outright and never become hook directories, whatever is in them: a
 `bin` directory this tree created for another installer to write into,
 because `npm i -g` writes **relative** links there and a redirect symlink
-strands every one of them.
+strands every one of them; and any directory under `$SANDHOME_EXEC/views`,
+because a view bin is on `PATH` only because `env.sh` put it there, so a shell
+that has sourced nothing cannot be served by it - taking one wrote a second
+view's names into it (measured: `node`, `npm`, `npx` into the python view,
+clashing with `uv`/`uvx`, so a sourced shell answered `command -v node` from the
+python view). A directory on the exec root that this tree did **not** make is
+still an ordinary candidate (issues #138, #149).
 
 ```sh
 sandhome version             # the schema version, and the cheapest way to prove the copy runs
@@ -463,9 +474,10 @@ pipe opened later is a new object and stays a pipe, so `jq -n 1 | cat` does not
 put ANSI codes into `cat`. Without the variable the older fds 0-2 behaviour is
 kept.
 
-`shell/faketty` is the caller-facing half: it sets that id, the window size and
-`LD_PRELOAD`, then `exec`s, so a subshell the command starts inherits the
-terminal. `sandhome pty CMD` and errandsh's foreground mode both go through it.
+`shell/faketty` is the caller-facing half: it sets that id, the window size, a
+usable `TERM` and `LD_PRELOAD`, then `exec`s, so a subshell the command starts
+inherits the terminal. `sandhome pty CMD` and errandsh's foreground mode both go
+through it.
 
 ```sh
 SANDHOME_SHIMS=1 . "$SANDHOME_HOME/env.sh"   # on, for this shell
@@ -563,6 +575,7 @@ not carry it:
 | `SANDHOME_FAKEPTY_SIZE` | the window size a full-screen program is told | `COLUMNSxLINES` when it is unset, then 80x24. When it **is** set it wins outright and `COLUMNS`/`LINES` are not consulted |
 | `SANDHOME_FAKEPTY_ID` | which descriptors count as the terminal | set by `env.sh` and `faketty`; unset, the feature is off |
 | `SANDHOME_FAKEPTY_CRLF` | `0` stops `\n` becoming `\r\n` on output | on, which is what a terminal with `OPOST\|ONLCR` does |
+| `SANDHOME_FAKEPTY_TERM` | the `TERM` a full-screen program is told when the caller's is unset, empty, `dumb` or `unknown` | `xterm-256color`. Only an unusable value is replaced, so a real `TERM` is never overwritten |
 
 A full-screen program lays out to this size once and does not ask again, so it
 has to be right before the program starts. Set it when a program is told 80x24
@@ -582,7 +595,7 @@ SANDHOME_FAKEPTY_SIZE=120x40 sandhome pty less big.log
 | `Too many levels of symbolic links` on a binary | the view links a tool to itself; `sandhome repair <name>` rewrites the link |
 | `fork/exec ... permission denied` after a successful `go build` | the Go build cache landed on a noexec root; re-run the install so `GOCACHE` is written to `SANDHOME_EXEC` |
 | `go install` binary neither runs nor is on PATH | `GOBIN` now points at `$SANDHOME_EXEC/go-bin` and is on PATH; re-run `sandhome install go`, then `go install`. Build output in a noexec work tree still will not run: build under `$SANDHOME_EXEC` |
-| `npm i -g` CLI not found or `bad interpreter` | the prefix lives on `$SANDHOME_EXEC/npm-global` with `bin` on `PATH`; re-run `sandhome install node`. **A CLI installed after the setup is not found by a shell that sourced nothing** until one `sandhome global` teaches the hook the new name (issue #138); a login shell finds it immediately. Project-local `.bin` on a noexec checkout has the same cause: run the project from `$SANDHOME_EXEC` |
+| `npm i -g` CLI not found or `bad interpreter` | the prefix lives on `$SANDHOME_EXEC/npm-global` with `bin` on `PATH`; re-run `sandhome install node`. **A CLI installed after the setup is found by a shell that sourced nothing as soon as the installer returns**: the dispatcher runs `npm`/`npx`/`go`/`cargo`/`uv` as a child and links every new executable into the hook (issue #142), so the normal installers need no manual `sandhome global`. A CLI copied in by other means still needs one `sandhome global`; a login shell finds it immediately. Project-local `.bin` on a noexec checkout has the same cause: run the project from `$SANDHOME_EXEC` |
 | `npm i -g` CLI exists but cannot be run (`sh: cowsay: not found` with the link present) | a directory this tree created for an installer to write into was taken as a hook directory, so the RELATIVE link `bin/cowsay -> ../lib/node_modules/...` resolved against the hook instead of the prefix (issue #138). `sandhome global` moves our own link out, restores the directory and rescues the stranded links |
 | `cargo` or `rustc` answers `error: command failed: 'cargo': Permission denied (os error 13)` from a fresh shell but works in a sourced one | rustup's proxies resolve the toolchain under `$RUSTUP_HOME`, which on a split root is the mount that refuses `execve`. The exec-bin entries now point at the real toolchain binaries and the proxies are rewritten on every repair; if the view predates that, run `sandhome repair rust` (issue #135) |
 | `rustc.real: Argument list too long` | the sysroot wrapper exec'd itself because its `.real` was a damaged copy. `sandhome repair rust` rebuilds the pair from the home compiler (issue #135) |
@@ -600,7 +613,10 @@ SANDHOME_FAKEPTY_SIZE=120x40 sandhome pty less big.log
 | `File size limit exceeded` on a download | `ulimit -f` pins a per-file cap; sandhome shards any download whose `Content-Length` exceeds it and unpacks a `.tar.*` from the stream. `SANDHOME_FETCH_CHUNK_MB` tunes the range size. A `.zip` above the cap is refused by name |
 | `mold` is on PATH but `-fuse-ld=mold` cannot find it | the mold archive ships both `mold` and `ld.mold`; both land on the exec bin. Check `command -v ld.mold`. Clang accepts `--ld-path=$(command -v mold)` as well |
 | `doctor` says `FAIL exec_space=low` or `=critical` | the exec root is draining. `sandhome space` names the state and the numbers, `sandhome space --probe` lists roomier candidates, `sandhome space --largest` names the entries holding the space, `sandhome gc` reclaims sandhome's own caches, and re-running the setup with `--exec DIR` moves everything to a roomy path. See section 1 for the thresholds |
-| the exec root filled | `sandhome gc` prints the entry count with the bytes reclaimed; staging (any age), exec caches (`cache/`, `tmp/`, `go-bin/`, `node-gyp-tmp-*` entries older than DAYS; `gc 0` or `gc --now` removes them however fresh), and home tmp older than DAYS are removed, toolchain data stays. What a live install holds survives even `gc 0` (`SANDHOME_GC_FORCE=1` overrides). Views are never reclaimed: stale view entries go with `sandhome prune`, views are rebuilt by `sandhome repair`, not by `gc` (#67). `gc` returning 0 bytes on a full root means the space is in build output you own or in views, so `sandhome space --largest` (or `space --reclaim` for the cache bytes `gc --now` would free) names it first. `GOCACHE`, `GOBIN`, `NPM_CONFIG_PREFIX`, `CARGO_INSTALL_ROOT`, `CARGO_TARGET_DIR`, and `target/` all land on the exec root: heavy and multi-target builds need a roomy `--exec DIR`. If no candidate fits, the install names the constraint before writing anything |
+| the exec root filled | `sandhome gc` prints the entry count with the bytes reclaimed; staging (any age, `$SH_HOME/.staging` and `$SH_EXEC/.staging`), exec caches (`cache/`, `tmp/`, `node-gyp-tmp-*` entries older than DAYS; `gc 0` or `gc --now` removes them however fresh), and home tmp older than DAYS are removed, toolchain data stays. What a live install holds survives even `gc 0` (`SANDHOME_GC_FORCE=1` overrides), and `go install` output in `go-bin` is not a cache: `gc` no longer removes it, nor anything else under the installer roots (`npm-global`, `uv-bin`, `cargo-install`) (issue #141). Views are never reclaimed: stale view entries go with `sandhome prune`, views are rebuilt by `sandhome repair`, not by `gc` (#67). `gc` returning 0 bytes on a full root means the space is in build output you own or in views, so `sandhome space --largest` names it first with one tag per entry (`reclaim` = gc removes it, `sandhome` = the tree owns it and gc keeps it, `yours` = remove it yourself; `space --reclaim` prints the cache bytes `gc --now` would free). `GOCACHE`, `GOBIN`, `NPM_CONFIG_PREFIX`, `CARGO_INSTALL_ROOT`, `CARGO_TARGET_DIR`, and `target/` all land on the exec root: heavy and multi-target builds need a roomy `--exec DIR`. If no candidate fits, the install names the constraint before writing anything |
+| an ASan/UBSan binary prints nothing and exits 1 (`LeakSanitizer has encountered a fatal error`) | LSan stops threads with `ptrace`, which this cage denies, and loses the programme's buffered stdout with it; `env.sh` sets `ASAN_OPTIONS=detect_leaks=0` and `LSAN_OPTIONS=detect_leaks=0` for every ptrace answer except a measured `yes`, so an unmeasured host gets the workaround too and ASan and UBSan keep working. A caller who sets either keeps theirs; `SANDHOME_ASAN=off` restores leak checking where it works. Use clang for a sanitizer build: `zig cc` ships no `libasan`/`libtsan`, while clang's own runtimes live under its resource dir (issue #144) |
+| a headless browser is `Permission denied`/`EACCES` after a successful install, or `bind() failed`/`Cannot start http server for devtools` | the browser cache defaulted to `$HOME/.cache`, the mount that refuses `execve`; `env.sh` points `PUPPETEER_CACHE_DIR` at `$SANDHOME_EXEC/puppeteer` and `PLAYWRIGHT_BROWSERS_PATH` at `$SANDHOME_EXEC/ms-playwright`, and `doctor` fails while either points elsewhere. Launch with `--no-sandbox` and puppeteer's `pipe: true`: a listener cannot bind here (issue #143) |
+| `npm install puppeteer` succeeds and the launch says Chrome is missing | the bundled npm blocks lifecycle scripts by default, so the postinstall that fetches Chrome never runs; approve it explicitly: `npm install-scripts approve puppeteer` (then reinstall). The same policy skips `node-gyp rebuild` for native addons: prefer a prebuilt, or approve the package the same way (issue #143) |
 | a tool is on PATH but its file is gone | the payload was deleted while its view entry survived; every reinstall leaves it because the mirror only adds. `sandhome prune <name>` drops view entries whose payload is gone, downloading nothing (#110) |
 | the exec root was cleared by a restart | the tmpfs exec view is gone while `env.sh` persists; re-run the setup, then run `sandhome repair` only if `doctor` still fails. Re-running the setup rebuilds the view on its own (measured); never run `install <name>` here, it re-runs the adopt path that broke 8 views in 8 rounds (#49, #43) |
 
