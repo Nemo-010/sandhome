@@ -224,7 +224,7 @@ More than one row can apply and then both are read.
 | install or adopt another toolchain later, or list what is here and how it reaches PATH | `skills/sandhome/SKILL.md` |
 | a tool installed and is not found, or a binary answers Permission denied | `skills/sandhome/SKILL.md` diagnose part, then `docs/guide.md` section 7 |
 | a Go program compiles and then fails to run with a permission error | `docs/guide.md` section 4 |
-| the current directory is on a noexec mount and build output will not run there | build under `$SANDHOME_EXEC` (see step 4); `sandhome doctor` names this state |
+| the current directory is on a noexec mount and build output will not run there | build under `$(sandhome exec-dir)` (see step 4); `sandhome doctor` names this state |
 | a remote shell has no echo, no line editing, no signals | `skills/errandsh/SKILL.md` |
 | an ssh login is refused, a program needs a passwd entry or a terminal, bind is denied, there is no pty | `skills/sealed-sandbox/SKILL.md` |
 | a local dev server, `npm run dev`, or any process that listens | nothing can listen here; see `skills/sealed-sandbox/SKILL.md` no-listen row: dial out to a relay or emit static output |
@@ -264,10 +264,17 @@ clean output from tools like jq and git.
 Build output must land where it can run. The working tree is often the noexec
 home itself, so `go build -o hello`, `cargo build`, `cc -o`, `make`, downloaded
 runtimes, and `npm i -g` output placed on the home fail with Permission denied
-or bad interpreter. Tool output that must execute lives on `$SANDHOME_EXEC`:
-`GOBIN`, `NPM_CONFIG_PREFIX`, `GOCACHE`, and `CARGO_INSTALL_ROOT` already point
-there; for anything else build under `$SANDHOME_EXEC` or copy the artifact
-there before running it. No wrapper or launcher lives in the work tree.
+or bad interpreter. Tool output that must execute lives on the exec root (`go
+build`'s default output, cargo's `target/`, a downloaded runtime): `GOBIN`,
+`NPM_CONFIG_PREFIX`, `GOCACHE`, and `CARGO_INSTALL_ROOT` already point there;
+for anything else build there or copy the artifact before running it. **The
+global hook does not export `SANDHOME_EXEC` into the shell** -- the hook applies
+`env.sh` to the process of the tool it dispatches, and a child cannot change its
+parent -- so in the fresh shell this file produces, name the root with a
+command, not a variable: `cd "$(sandhome exec-dir)"` for a build tree, or run
+the whole line through `sandhome exec --shell 'make -j4 && ./run'`, which applies
+the entire environment including `SANDHOME_EXEC` and `TMPDIR`. No wrapper or
+launcher lives in the work tree.
 
 The environment file is the single source of truth, and the bootstrap installs
 a **global hook** so no shell has to read it by hand: every directory already

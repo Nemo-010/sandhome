@@ -200,6 +200,45 @@ tc_node_install() {
 # that works only once node is on PATH, which the fragment below guarantees. What
 # is checked afterwards is that npm answers at all, and a miss is reported rather
 # than left to fail inside a later build.
+#
+# tc_node_repair_cli_js VIEW ROOT -> put real JavaScript back at the view's
+# npm-cli.js/npx-cli.js when a shell wrapper is there instead.
+#
+# The node view holds `bin/npm` as a symlink into
+# `lib/node_modules/npm/bin/npm-cli.js`. That target must stay JavaScript:
+# `node <dir-of-node>/npm` is the invocation Node documents and a real build
+# script used (`scripts/setup.sh` of rust-workers-minecraft), and a shell script
+# at a .js path dies with `SyntaxError: Invalid or unexpected token` while
+# `npm` itself still works (issue #157). The wrapper that the noexec repair
+# needs belongs on the exec bin, never at the symlink target; this restores the
+# target from the payload so a view that was clobbered is repaired rather than
+# left passing a version probe. A file whose first line already names node is
+# left alone.
+tc_node_repair_cli_js() {
+    sh_nr_view=$1
+    sh_nr_root=$2
+    [ -n "$sh_nr_view" ] && [ -d "$sh_nr_view/lib/node_modules/npm/bin" ] || return 0
+    for sh_nr_name in npm npx; do
+        sh_nr_dest="$sh_nr_view/lib/node_modules/npm/bin/${sh_nr_name}-cli.js"
+        [ -e "$sh_nr_dest" ] || continue
+        sh_nr_first=''
+        read -r sh_nr_first < "$sh_nr_dest" 2>/dev/null || sh_nr_first=''
+        case "$sh_nr_first" in
+            '#!'*node*|'#!'*env*) continue ;;
+        esac
+        sh_nr_src=''
+        for sh_nr_c in "$sh_nr_root/lib/node_modules/npm/bin/${sh_nr_name}-cli.js" \
+                       "$sh_nr_root/npm/lib/node_modules/npm/bin/${sh_nr_name}-cli.js" \
+                       "$sh_nr_root/npm/bin/${sh_nr_name}-cli.js"; do
+            [ -r "$sh_nr_c" ] && { sh_nr_src=$sh_nr_c; break; }
+        done
+        [ -n "$sh_nr_src" ] || continue
+        cp -f "$sh_nr_src" "$sh_nr_dest" 2>/dev/null && chmod 0755 "$sh_nr_dest" 2>/dev/null
+    done
+    unset sh_nr_dest sh_nr_first sh_nr_src sh_nr_c sh_nr_name
+    return 0
+}
+
 tc_node_env() {
     sh_ne_root=$(sh_toolchain_root node)
     # # STOP: A NODE WHOSE npm DOES NOT RUN GETS ONE, HERE, BEFORE ANY FRAGMENT
@@ -217,6 +256,10 @@ tc_node_env() {
         return 0
     fi
     sh_ne_view=$(sh_toolchain_view node)
+    # A view whose npm-cli.js is shell text cannot be run by `node <dir>/npm`
+    # (issue #157). Repair the target before the fragment so a repair cycle
+    # heals a clobbered view instead of only re-probing the wrapper.
+    tc_node_repair_cli_js "$sh_ne_view" "$sh_ne_root"
     # STOP: THE PREFIX AND CACHE LIVE ON THE EXEC ROOT, NOT THE HOME (issue
     # #21). A prefix under the noexec home leaves global CLIs neither on PATH
     # nor executable (`bad interpreter: Permission denied` on a `#!/usr/bin/env

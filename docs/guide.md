@@ -373,13 +373,14 @@ That lets the parser be tested against a local file, which is how both of the
 version parsers here are covered offline. See
 [`decisions/toolchain-contract.md`](decisions/toolchain-contract.md).
 
-### Downloads larger than the file-size limit
+### Files larger than the file-size limit
 
 A sandbox can pin a per-file cap (`ulimit -f`, RLIMIT_FSIZE) that no process can
 raise  -  measured on one host at 1,000,000,000 bytes, where `curl` died with
 `File size limit exceeded` on a 1.9GB asset. The figure is that host's reading,
 not a constant: any pinned cap behaves the same way. A single file above the cap is
 unreachable by construction, and resuming appends to a file already at the cap.
+
 `sandhome` never makes one: when `Content-Length` exceeds the cap, `sh_fetch_stream`
 fetches numbered ranges  -  each under the cap  -  and `sh_stream_untar` unpacks a
 `.tar.*` from the concatenated stream. The digest is taken over the stream, so
@@ -388,6 +389,42 @@ verification is unchanged. `SANDHOME_FETCH_CHUNK_MB` sets the range size
 refused by name, because a zip's directory sits at the end and cannot be read as
 a stream. `sandhome install clang` is the worked example: the x86_64 LLVM tarball
 is about 1.9GB.
+
+**The cap is per `write(2)`, not per download.** A tool that *generates* one
+enormous file is cut off exactly like a download, and sharding does not apply
+because there is no `Content-Length` to inspect and nothing to range over.
+Measured: `wasm-dis index_bg.wasm -o out.wat` on a 35.4 MiB module (whose text
+expansion is ~1 GB) dies with `File size limit exceeded` at the cap, on an exec
+root with 61 GB free. The fix is to stream it and bound the consumer instead of
+materialising one file: `wasm-dis index_bg.wasm 2>/dev/null | head -c 400000000
+> out.wat`, or point the tool at a directory (`wasm-dis -d dir/`), or split its
+output. Two 600 MB writes are fine; one 1.2 GB write is not, so "the file is
+under the cap" is not the question for a program that writes incrementally.
+`shard` applies to fetching only. `sandhome report` names the measured
+`file_size_limit` when the host pins one, so an agent can plan around it instead
+of discovering it by hitting it.
+
+### Cross targets, and the linker rustc does not own
+
+`SANDHOME_RUST_TARGETS` and `rustup target add` add a target's std, and for most
+cross targets that is the whole story: `zig cc` (or the host linker) links it.
+`wasm32-unknown-emscripten` is the exception, and it is the target Cloudflare's
+Workers Rust toolchain uses. Its linker is `emcc`, a separate ~640MB toolchain
+with its own LLVM, Binaryen and generated `EM_CONFIG`; `rustup target add`
+succeeds, the build then dies with `linker 'emcc' not found`, and the message
+reads like a broken `PATH` rather than a missing toolchain. The fix is four
+things together: `rustup target add`, Emscripten installed and activated,
+`EM_CONFIG` written (the sanity check runs without it and the link still fails),
+and `CARGO_TARGET_WASM32_UNKNOWN_EMSCRIPTEN_LINKER=emcc`. `--with emscripten` is
+not in a toolset on purpose: it overlaps `zig` (a wasm target) and `qemuuser`
+(another architecture), but neither gives Emscripten's `std::fs`/`epoll` surface
+on the Workers event loop, and 640MB is a lot to carry for one target. The
+tree's part today is to make the failure legible: `tools/rust.sh` says the
+target list is not a link promise, and `sandhome doctor` prints
+`emscripten_linker` when a recorded target needs `emcc` and there is none. An
+Emscripten toolchain module that installs the toolchain on the **exec root**
+(its native LLVM tools have to `execve`, so a home install only half-works) is
+the scoped follow-up.
 
 `--with clang` is the one toolchain not in a toolset, because its view is large
 (hundreds of MB) and it wants a roomy exec root; `zig`, `deno`, `bun` and `mold`
@@ -610,7 +647,11 @@ SANDHOME_FAKEPTY_SIZE=120x40 sandhome pty less big.log
 | an ssh login is refused with `publickey` | the login name is absent from the synthetic passwd; set `SANDHOME_PASSWD_USERS` |
 | a full-screen program runs in batch mode | it is statically linked (nothing to interpose into), or `faketty` is not built. `sandhome pty CMD` forces the userspace pty; `sandhome shims build` builds it |
 | `File size limit exceeded` on a download | `ulimit -f` pins a per-file cap; sandhome shards any download whose `Content-Length` exceeds it and unpacks a `.tar.*` from the stream. `SANDHOME_FETCH_CHUNK_MB` tunes the range size. A `.zip` above the cap is refused by name |
+| `File size limit exceeded` while a tool **writes** one file | the cap is per `write(2)`, so a disassembler's multi-GB `.wat`, a core dump, or a huge unpack is cut off the same way a large download is, and `shard` cannot help (the tool is generating, not fetching). Stream it and bound the consumer (`tool ... \| head -c N > out`), point it at a directory where it supports one, or split the output. See section 2 |
+| an adopted `rustup target add` prints `Read-only file system` and exits 0 | the adopted `RUSTUP_HOME` cannot take a write, so no target can be added to any toolchain and a later build dies with a missing std. `sandhome install rust` points `RUSTUP_HOME` at a writable root on the exec root with the toolchains linked in and `doctor` reports `rustup_writable` (#159) |
+| a third-party SDK installer aborts with `Cannot change ownership` / `tar` exit 2 / `installation failed` | its `tar -xf` has no `--no-same-owner` and the archive carries a foreign uid; the download is fine and the unpack is not. Patch the installer's `tar` call or unpack through `sh_tar` in `lib/fetch.sh` (#162) |
 | `mold` is on PATH but `-fuse-ld=mold` cannot find it | the mold archive ships both `mold` and `ld.mold`; both land on the exec bin. Check `command -v ld.mold`. Clang accepts `--ld-path=$(command -v mold)` as well |
+| `cargo build --target <T>` dies with `linker '<name>' not found` | the target's std is present and its linker is not. For `wasm32-unknown-emscripten` the linker is `emcc`, a separate toolchain with its own `EM_CONFIG`, not a PATH entry name rustc can find: install Emscripten, put its `upstream/emscripten` on PATH, point `EM_CONFIG` at its config, and set `CARGO_TARGET_WASM32_UNKNOWN_EMSCRIPTEN_LINKER=emcc`. `sandhome doctor` prints `emscripten_linker` while it is missing (#163). Any other `<name>` is a real missing PATH entry |
 | `doctor` says `FAIL exec_space=low` or `=critical` | the exec root is draining. `sandhome space` names the state and the numbers, `sandhome space --probe` lists roomier candidates, `sandhome space --largest` names the entries holding the space, `sandhome gc` reclaims sandhome's own caches, and re-running the setup with `--exec DIR` moves everything to a roomy path. See section 1 for the thresholds |
 | the exec root filled | `sandhome gc` prints the entry count with the bytes reclaimed; staging (any age, `$SH_HOME/.staging` and `$SH_EXEC/.staging`), exec caches (`cache/`, `tmp/`, `node-gyp-tmp-*` entries older than DAYS; `gc 0` or `gc --now` removes them however old except a live install's hold and entries changed in the last 30 minutes), and home tmp older than DAYS are removed, toolchain data stays. What a live install holds survives even `gc 0` (`SANDHOME_GC_FORCE=1` overrides), and `go install` output in `go-bin` is not a cache: `gc` no longer removes it, nor anything else under the installer roots (`npm-global`, `uv-bin`, `cargo-install`) (issue #141). Views are never reclaimed: stale view entries go with `sandhome prune`, views are rebuilt by `sandhome repair`, not by `gc` (#67). `gc` returning 0 bytes on a full root means the space is in build output you own or in views, so `sandhome space --largest` names it first with one tag per entry (`reclaim` = gc removes it, `sandhome` = the tree owns it and gc keeps it, `yours` = remove it yourself; `space --reclaim` prints the cache bytes `gc --now` would free). `GOCACHE`, `GOBIN`, `NPM_CONFIG_PREFIX`, `CARGO_INSTALL_ROOT`, `CARGO_TARGET_DIR`, and `target/` all land on the exec root: heavy and multi-target builds need a roomy `--exec DIR`. If no candidate fits, the install names the constraint before writing anything |
 | an ASan/UBSan binary prints nothing and exits 1 (`LeakSanitizer has encountered a fatal error`) | LSan stops threads with `ptrace`, which this cage denies, and loses the programme's buffered stdout with it; `env.sh` sets `ASAN_OPTIONS=detect_leaks=0` and `LSAN_OPTIONS=detect_leaks=0` for every ptrace answer except a measured `yes`, so an unmeasured host gets the workaround too and ASan and UBSan keep working. A caller who sets either keeps theirs; `SANDHOME_ASAN=off` restores leak checking where it works. Use clang for a sanitizer build: `zig cc` ships no `libasan`/`libtsan`, while clang's own runtimes live under its resource dir (issue #144) |

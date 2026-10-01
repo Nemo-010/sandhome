@@ -105,6 +105,21 @@ sh_env_body() {
         printf 'SANDHOME_WANTED_TOOLCHAINS=%s\n' "$(sh_sq_quote "$(sh_trim "$SH_WANTED_TOOLCHAINS")")"
         printf 'export SANDHOME_WANTED_TOOLCHAINS\n'
     fi
+    # # STOP: A REQUESTED CROSS TARGET IS RECORDED, SO A LATER ROUTINE WRITE
+    # DOES NOT DROP IT. `--target`/SANDHOME_RUST_TARGETS lived only in the
+    # installing process; a later `install python` started a fresh request and
+    # rewrote env.sh without it, and `resume` had no record either, so the
+    # target silently vanished and doctor could not name the link that then
+    # needs a toolchain which is not there (issue #163, the same class as
+    # #153). Seeded from the file when this process holds nothing, exactly as
+    # the wanted list is.
+    if [ -z "${SH_RUST_TARGETS:-}" ]; then
+        SH_RUST_TARGETS=$(sh_rust_targets_from_file)
+    fi
+    if [ -n "${SH_RUST_TARGETS:-}" ]; then
+        printf 'SANDHOME_RUST_TARGETS=%s\n' "$(sh_sq_quote "$(sh_trim "$SH_RUST_TARGETS")")"
+        printf 'export SANDHOME_RUST_TARGETS\n'
+    fi
     # # STOP: AN EXPLICIT VIEW MODE IS PERSISTED, SO `resume` HONOURS IT. The
     # mode lived only in the installing process, so `sandhome resume`, which
     # rebuilds every view after a tmpfs wipe, silently reverted the trees to
@@ -152,6 +167,20 @@ sh_env_body() {
         printf 'fi\n'
     fi
     printf 'if [ -n "${TMPDIR:-}" ]; then mkdir -p "$TMPDIR" 2>/dev/null || true; fi\n'
+    # # STOP: THE STANDARD CACHE ROOT IS AN EXECUTABLE ROOT FOR MANY TOOLS.
+    # TMPDIR and XDG_RUNTIME_DIR were already moved onto the exec root, and
+    # the browser caches were named one at a time (#143), but every other tool
+    # that follows the XDG spec still defaulted to $HOME/.cache on the mount
+    # that refuses execve. An executable a tool downloads there - worker-build's
+    # emsdk node/emcc/binaryen and wasm-bindgen CLI, a uv-managed wheel's
+    # console script, an AppImage unpack - writes fine and then cannot run
+    # (issue #158). One guarded default covers the class. The directory is made
+    # here so the first tool that wants it has a target, matching TMPDIR.
+    printf 'if [ -z "${XDG_CACHE_HOME:-}" ]; then\n'
+    printf '  XDG_CACHE_HOME="$SANDHOME_EXEC/cache"\n'
+    printf '  export XDG_CACHE_HOME\n'
+    printf 'fi\n'
+    printf 'if [ -n "${XDG_CACHE_HOME:-}" ]; then mkdir -p "$XDG_CACHE_HOME" 2>/dev/null || true; fi\n'
     # # STOP: LEAKSANITIZER NEEDS ptrace, AND THIS CAGE DENIES IT. An
     # `-fsanitize=address` build compiles and links, then loses every byte of
     # its own stdout and exits 1 at exit, because LSan stops threads with
@@ -278,6 +307,32 @@ sh_wanted_from_file() {
         esac
     done < "$SH_HOME/env.sh"
     printf '%s' "$sh_wff_out"
+}
+
+# sh_rust_targets_from_file -> the SANDHOME_RUST_TARGETS recorded in env.sh, or
+# nothing. Same shape and reason as sh_wanted_from_file: a requested cross
+# target is a fact this process may not hold when it rewrites the file, and a
+# routine write must not erase it (issue #163).
+sh_rust_targets_from_file() {
+    sh_rtf_out=''
+    [ -r "$SH_HOME/env.sh" ] || {
+        printf ''
+        return 0
+    }
+    sh_rtf_cr=$(printf '\r')
+    while IFS= read -r sh_rtf_l || [ -n "$sh_rtf_l" ]; do
+        sh_rtf_l=${sh_rtf_l%"$sh_rtf_cr"}
+        case "$sh_rtf_l" in
+            SANDHOME_RUST_TARGETS=*)
+                sh_rtf_out=${sh_rtf_l#SANDHOME_RUST_TARGETS=}
+                sh_rtf_out=${sh_rtf_out#\'}
+                sh_rtf_out=${sh_rtf_out%\'}
+                sh_rtf_out=${sh_rtf_out#\"}
+                sh_rtf_out=${sh_rtf_out%\"}
+                ;;
+        esac
+    done < "$SH_HOME/env.sh"
+    printf '%s' "$sh_rtf_out"
 }
 
 # sh_ptrace_from_file -> the ptrace answer recorded in env.sh, or nothing. The
@@ -584,15 +639,29 @@ sh_bake_command() {
         # shell is reading.
         return 0
     fi
-    cp -f "$sh_bc_src" "$sh_bc_dst" 2>/dev/null || return 1
-    chmod 0755 "$sh_bc_dst" 2>/dev/null || true
+    # # STOP: THE LAUNCHER IS BUILT FROM SRC THROUGH A TEMP FILE, NEVER BY
+    # COPYING ONTO DST FIRST. `sandhome install` runs AS the copy on the exec
+    # root, so sh_bc_dst is the very file the shell is reading; `cp -f src dst`
+    # truncates it mid-execution and a shell that reads its next chunk from a
+    # file being rewritten can be left with a half-written launcher. Measured:
+    # a bake left a 8264-byte `sandhome` whose last line opened a quote, and the
+    # next command died with `Syntax error: Unterminated quoted string`. A
+    # complete temp file renamed into place replaces the name atomically and
+    # leaves the running inode alone.
+    sh_bc_tmp="$sh_bc_dst.bake.$$"
+    sh_bc_ok=0
     case "${SH_REPO_DIR:-}:${SH_HOME:-}" in
         *\'*)
+            # A quote in either path cannot be baked. Still install the raw
+            # template (through the same atomic rename) so the command exists
+            # and falls back to the conventional home lookup.
+            if cp -f "$sh_bc_src" "$sh_bc_tmp" 2>/dev/null && \
+               chmod 0755 "$sh_bc_tmp" 2>/dev/null && \
+               mv -f "$sh_bc_tmp" "$sh_bc_dst" 2>/dev/null; then :; fi
+            rm -f "$sh_bc_tmp" 2>/dev/null
             sh_warn "not baking the paths into $sh_bc_dst (a quote in $SH_REPO_DIR or $SH_HOME); a launch with no HOME falls back to the conventional home"
             return 0 ;;
     esac
-    sh_bc_tmp="$sh_bc_dst.bake.$$"
-    sh_bc_ok=0
     {
         while IFS= read -r sh_bc_l || [ -n "$sh_bc_l" ]; do
             case "$sh_bc_l" in
@@ -600,9 +669,9 @@ sh_bake_command() {
                 SH_BAKED_HOME=*)     printf "SH_BAKED_HOME='%s'\n" "$SH_HOME" ;;
                 *) printf '%s\n' "$sh_bc_l" ;;
             esac
-        done < "$sh_bc_dst"
-    } > "$sh_bc_tmp" 2>/dev/null && mv -f "$sh_bc_tmp" "$sh_bc_dst" 2>/dev/null && \
-        chmod 0755 "$sh_bc_dst" 2>/dev/null && sh_bc_ok=1
+        done < "$sh_bc_src"
+    } > "$sh_bc_tmp" 2>/dev/null && chmod 0755 "$sh_bc_tmp" 2>/dev/null && \
+        mv -f "$sh_bc_tmp" "$sh_bc_dst" 2>/dev/null && sh_bc_ok=1
     rm -f "$sh_bc_tmp" 2>/dev/null
     if [ "$sh_bc_ok" != 1 ]; then
         sh_warn "could not bake the paths into $sh_bc_dst; a launch with no HOME falls back to the conventional home"
@@ -613,11 +682,71 @@ sh_bake_command() {
     # file would see, not against a guess about the format.
     sh_bc_r=$(sh_bake_value "$sh_bc_dst" SH_BAKED_REPO_DIR)
     sh_bc_h=$(sh_bake_value "$sh_bc_dst" SH_BAKED_HOME)
-    if [ "$sh_bc_r" = "$SH_REPO_DIR" ] && [ "$sh_bc_h" = "$SH_HOME" ]; then
+    # # STOP: THE BAKE IS VERIFIED WHOLE, NOT ONLY BY ITS TWO VALUES. A
+    # truncated launcher kept both baked lines near the top and passed the old
+    # check, then every command failed to parse. The shell's own parser is the
+    # cheapest whole-file check and it needs nothing but the interpreter.
+    if [ "$sh_bc_r" = "$SH_REPO_DIR" ] && [ "$sh_bc_h" = "$SH_HOME" ] && sh -n "$sh_bc_dst" 2>/dev/null; then
         sh_step "baked $SH_REPO_DIR and $SH_HOME into $sh_bc_dst"
     else
         sh_warn "the bake at $sh_bc_dst is incomplete (repo='$sh_bc_r' home='$sh_bc_h'); a launch with no HOME falls back to the conventional home"
     fi
+    return 0
+}
+
+# sh_entry_write -> write the sourceable entry point beside the home.
+#
+# The entry point is the cold-shell fallback for a host whose PATH cannot carry
+# the global hook. It is SOURCED, not executed, because the home may refuse
+# execve. It defines a `sandhome` function with three fallbacks: the baked exec
+# bin, the recorded exec bin, and the checkout's launcher read through `sh`.
+#
+# # STOP: THE FALLBACKS HAVE TO SURVIVE A WIPED EXEC ROOT, WHICH IS THE ONE
+# STATE THIS FILE EXISTS FOR. The repo launcher is mode 0644 by design, so a
+# `[ -x ]` test skipped it and the one copy that survives a tmpfs restart was
+# dead code (issue #154). And a PATH fallback that tests `command -v sandhome`
+# from inside a function named sandhome finds that function, then `command
+# sandhome` bypasses functions and fails, so the designed diagnostic was
+# replaced by `sandhome: not found` (issue #154). Both are fixed here, in one
+# writer, so the bootstrap and resume cannot drift apart.
+sh_entry_write() {
+    [ -d "${SH_HOME:-}" ] || return 0
+    [ -n "${SH_EXEC_BIN:-}" ] || return 0
+    sh_ew_qhome=$(sh_sq_quote "$SH_HOME")
+    sh_ew_qexec=$(sh_sq_quote "${SH_EXEC:-}")
+    sh_ew_qbin=$(sh_sq_quote "$SH_EXEC_BIN/sandhome")
+    # The home keeps its own copy of the checkout at $SH_HOME/repo, which is the
+    # copy that survives a tmpfs restart; the resolved repo is the second
+    # candidate. Both are mode 0644 by design, so each is read through `sh`.
+    sh_ew_qhomerepo=$(sh_sq_quote "$SH_HOME/repo/bin/sandhome")
+    if [ -n "${SH_REPO_DIR:-}" ]; then
+        sh_ew_qrepo=$(sh_sq_quote "$SH_REPO_DIR/bin/sandhome")
+    else
+        sh_ew_qrepo="''"
+    fi
+    {
+        printf '%s\n' '# sandhome entry point. Generated; sourced, not executed.'
+        printf '%s\n' "# Written because a non-login shell has no PATH (issue #122)."
+        printf '%s\n' "SANDHOME_HOME=\${SANDHOME_HOME:-$sh_ew_qhome}"
+        printf '%s\n' "SANDHOME_EXEC=\${SANDHOME_EXEC:-$sh_ew_qexec}"
+        printf '%s\n' 'export SANDHOME_HOME SANDHOME_EXEC'
+        printf '%s\n' "_sandhome_baked=$sh_ew_qbin"
+        printf '%s\n' "_sandhome_home_repo=$sh_ew_qhomerepo"
+        printf '%s\n' "_sandhome_repo=$sh_ew_qrepo"
+        printf '%s\n' 'sandhome() {'
+        printf '%s\n' '  if [ -x "$_sandhome_baked" ]; then "$_sandhome_baked" "$@"; return $?; fi'
+        printf '%s\n' '  if [ -n "${SANDHOME_EXEC:-}" ] && [ -x "$SANDHOME_EXEC/bin/sandhome" ]; then "$SANDHOME_EXEC/bin/sandhome" "$@"; return $?; fi'
+        printf '%s\n' '  if [ -r "$_sandhome_home_repo" ]; then sh "$_sandhome_home_repo" "$@"; return $?; fi'
+        printf '%s\n' '  if [ -n "${_sandhome_repo:-}" ] && [ -r "$_sandhome_repo" ]; then sh "$_sandhome_repo" "$@"; return $?; fi'
+        printf '%s\n' '  _sandhome_ext=$(command -v sandhome 2>/dev/null)'
+        printf '%s\n' '  case "$_sandhome_ext" in'
+        printf '%s\n' '    /*|*/*) if [ -x "$_sandhome_ext" ]; then "$_sandhome_ext" "$@"; return $?; fi ;;'
+        printf '%s\n' '  esac'
+        printf '%s\n' '  printf "%s\\n" "sandhome: no working copy (baked $_sandhome_baked missing, SANDHOME_EXEC/bin/sandhome missing, repo/bin/sandhome missing, nothing on PATH; re-run the setup)" >&2; return 127'
+        printf '%s\n' '}'
+        printf '%s\n' "[ -r \"\$SANDHOME_HOME/env.sh\" ] && . \"\$SANDHOME_HOME/env.sh\""
+    } > "$SH_HOME/entry.sh" 2>/dev/null
+    unset sh_ew_qhome sh_ew_qexec sh_ew_qbin sh_ew_qhomerepo sh_ew_qrepo
     return 0
 }
 

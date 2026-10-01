@@ -38,14 +38,18 @@ sandhome_profile_main() {
   # nothing about a tool call needs them. A harness that reads neither profile
   # nor rc still uses entry.sh, so the two paths stay independent (issue #122).
   #
-  # THE READ IS THE SAFE ONE. env.sh starts with `set -u`-era expansions and
-  # creates directories; a shell that is merely non-interactive is not a shell
-  # that wants a login's side effects, and a fragment that fails on a missing
-  # HOME would put a stderr line in front of every command. So the file is read
-  # in a SUBSHELL and its assignments are kept only when the read succeeded:
-  # a success is the whole environment (that is env.sh's contract, and the
-  # entry point and the dispatcher already rely on it), and a failure changes
-  # nothing at all, which is what the old `break` did not guarantee.
+  # THE READ IS THE SAFE ONE, AND IT APPLIES THE WHOLE FILE. env.sh is the
+  # single source of truth and the dispatcher and entry point already source it;
+  # this fragment used to re-export a hard-coded five-name subset (the roots,
+  # SANDHOME_REPO_DIR, the wanted list and PATH), so every other name env.sh
+  # exports - ASAN_OPTIONS/LSAN_OPTIONS, TMPDIR, XDG_RUNTIME_DIR, the toolchain
+  # roots and the browser caches - was dropped in a login shell while the
+  # toolchain itself still worked through the hook. An ASan build then died
+  # with `LeakSanitizer has encountered a fatal error` even though env.sh sets
+  # detect_leaks=0 (issue #155, reopening #144). Sourcing the file applies
+  # everything the contract says it applies; the read is guarded so a file that
+  # cannot be read changes nothing, and stderr is discarded so a login is never
+  # prefixed with noise.
   if [ -z "${SANDHOME_HOME:-}" ]; then
     _shp_envcand=''
     for _shp_env in "${SANDHOME_HOME:-}/env.sh" \
@@ -59,17 +63,9 @@ sandhome_profile_main() {
       break
     done
     if [ -n "$_shp_envcand" ]; then
-      _shp_envout=$(. "$_shp_envcand" 2>/dev/null; :; printf '%s' "${PATH:-}") || _shp_envout=''
-      if [ -n "$_shp_envout" ]; then
-        # One eval, one source of truth: the same bytes the dispatcher applies
-        # and `sandhome env` prints. PATH is set from the captured value rather
-        # than taken from the subshell, because a subshell's PATH does not
-        # survive the read.
-        SANDHOME_HOME=''
-        eval "$( . "$_shp_envcand" 2>/dev/null; printf '%s' \
-          "SANDHOME_HOME=${SANDHOME_HOME-}; SANDHOME_EXEC=${SANDHOME_EXEC-}; SANDHOME_REPO_DIR=${SANDHOME_REPO_DIR-}; SANDHOME_WANTED_TOOLCHAINS=${SANDHOME_WANTED_TOOLCHAINS-}; PATH=$_shp_envout" )" 2>/dev/null || true
-        [ -n "${SANDHOME_HOME:-}" ] || SANDHOME_HOME=${_shp_envcand%/env.sh}
-      fi
+      # shellcheck source=/dev/null
+      . "$_shp_envcand" 2>/dev/null || true
+      [ -n "${SANDHOME_HOME:-}" ] || SANDHOME_HOME=${_shp_envcand%/env.sh}
     fi
   fi
 

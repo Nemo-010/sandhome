@@ -43,7 +43,10 @@ tc_deno_doctor() {
         sh_dd_bin=deno
     fi
     [ -n "$sh_dd_bin" ] || return 1
-    "$sh_dd_bin" eval 'const r = new Deno.Command(Deno.execPath(), {args:["eval","0"]}); r.spawnSync();' >/dev/null 2>&1
+    # Deno.Command has outputSync()/output()/spawn(); there is no spawnSync, so
+    # the old check threw a TypeError and reported a deno that re-executes fine
+    # as broken (issue #151). Run the child and propagate its own exit code.
+    "$sh_dd_bin" eval 'const r = new Deno.Command(Deno.execPath(), {args:["eval","0"]}); Deno.exit(r.outputSync().code);' >/dev/null 2>&1
 }
 
 tc_deno_probe() {

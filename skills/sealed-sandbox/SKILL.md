@@ -90,13 +90,85 @@ cannot reach is a STATICALLY LINKED program, which carries its own libc.
 
 ## No listen
 
-A local dev server, `npm run dev`, `python3 -m http.server`, or any process
-that calls `bind(2)` on TCP cannot start here: no TCP listener starts. Do not
-retry TCP bind variants. Either dial out to a relay both ends connect to (per
-the no-bind row
-above) or emit static output instead of serving it. `AF_UNIX` binds are the
-exception: they succeed here (see the no-bind row), so a local socket path is
-a transport and a TCP port is not.
+A process that creates its **own TCP listener** cannot start here: `bind(2)` on
+`AF_INET` is refused (`EACCES`). Do not retry TCP bind variants. Either dial out
+to a relay both ends connect to (per the no-bind row above) or emit static
+output instead of serving it.
+
+**A program that can adopt an already-listening descriptor can serve.** `AF_UNIX`
+bind succeeds here (see the no-bind row), so bind an `AF_UNIX` socket outside the
+program, hand it the descriptor, and let it listen on that. Worked example,
+measured on workerd (the Cloudflare Workers runtime):
+
+```sh
+# bind-then-exec: the descriptor must land on a chosen fd and survive exec,
+# and the launcher must EXEC, not spawn. node:child_process cannot pass a
+# chosen descriptor (a listener that was fd 18 in the parent arrives as fd 3),
+# and without clearing FD_CLOEXEC the kernel closes it at exec, which workerd
+# reports as an unbound socket rather than a descriptor error.
+./prebind ./entry.sock 4 workerd serve --experimental --socket-fd=http=4 minimal.capnp &
+curl -sS --unix-socket ./entry.sock http://x/
+```
+
+Three levers are in `workerd serve --help` and `workerd.capnp`: a `unix:/path`
+address in the config (workerd binds a filesystem socket), `-S/--socket-fd
+<name>=<fd>` (adopt an inherited listener when the config's address is TCP and
+cannot be edited), and `-e/--external-addr <name>=<addr>` (repoint an external
+service at a unix path). Two constraints are workerd's own error text: the
+fd must already be **listening** (`--socket-fd=entry=3: Socket for entry is not
+listening.`), and a socket must not be given both `--socket-addr` and
+`--socket-fd`, so a launcher has to **replace** the generated `--socket-addr`.
+Also: `node_modules/.bin/workerd` is a Node wrapper that drops descriptors; use
+the native binary at
+`node_modules/@cloudflare/workerd-linux-64/bin/workerd`.
+
+A bound `AF_UNIX` socket file **outlives the process that made it**: the kernel
+never unlinks it, so the next run at the same path fails `EADDRINUSE`
+with nothing listening. Always `rm -f "$SOCK"` before binding. `ss`/`lsof` show
+nothing bound. And killed processes linger as unreapable `<defunct>` zombies
+here (there is no init to reap them), so `pgrep`/`pkill` matching a zombie is
+**not** evidence that something is running. `sandhome gc` does not remove
+socket inodes a crash left; only `rm -f` makes the path bindable again.
+
+The launcher that makes the listener, in full:
+
+```c
+/* prebind.c: prebind SOCK FD CMD... - bind an AF_UNIX listener on FD and exec CMD.
+ * cc -O2 -o prebind prebind.c */
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdio.h>
+int main(int argc, char **argv) {
+    if (argc < 4) { fprintf(stderr, "usage: prebind SOCK FD CMD...\n"); return 2; }
+    if (strlen(argv[1]) >= sizeof((struct sockaddr_un *)0)->sun_path) {
+        fprintf(stderr, "prebind: socket path too long\n"); return 2;
+    }
+    unlink(argv[1]);
+    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd < 0) { perror("socket"); return 1; }
+    struct sockaddr_un a; memset(&a, 0, sizeof a);
+    a.sun_family = AF_UNIX; strncpy(a.sun_path, argv[1], sizeof a.sun_path - 1);
+    if (bind(fd, (struct sockaddr *)&a, sizeof a) < 0) { perror("bind"); return 1; }
+    if (listen(fd, 511) < 0) { perror("listen"); return 1; }
+    int slot = atoi(argv[2]);
+    if (fd != slot) { dup2(fd, slot); close(fd); }
+    fcntl(slot, F_SETFD, fcntl(slot, F_GETFD) & ~FD_CLOEXEC);
+    execvp(argv[3], &argv[3]);
+    perror("execvp");
+    return 1;
+}
+```
+
+Scope, stated honestly: this runs **workerd itself** over a unix socket.
+`wrangler dev` does not work, because miniflare hard-codes TCP in many places;
+reaching it needs a `--socket-fd`/`--external-addr` seam or running the generated
+config directly the way `prebind` does. A raw-TCP client still needs a path, not
+a port: `net.connect({ path })` and `curl --unix-socket` work, a client that only
+speaks TCP port numbers does not, on both ends, without a relay.
 
 ## No /etc/passwd
 
@@ -140,7 +212,7 @@ repository needs them.
 | the cage denies | the answer |
 | --- | --- |
 | `execve` on a writable mount | `sandhome space --probe`, then `sandhome install <name>` |
-| `bind(2)` | any transport where both ends dial out; nothing here listens |
+| `bind(2)` | any transport where both ends dial out; a listener can also be bound here as `AF_UNIX` and handed to the program by descriptor (see the no-listen row) |
 | `/dev/ptmx` | `sandhome shell`, and `SANDHOME_SHIMS=1` for non-shells |
 | `/etc/passwd` | `sandhome shims` with `SANDHOME_PASSWD_USERS` |
 | `chroot` and a privilege-separation user | a dynamic `dropbear` that tolerates a denied `setgroups(2)` |

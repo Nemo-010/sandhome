@@ -55,6 +55,7 @@ usage: sandhome COMMAND [args]
                          and sets up the venv and npm project inside
   pty CMD...             run CMD with a userspace pty (no /dev/ptmx needed)
   exec CMD...            run CMD with the sandhome environment loaded
+  exec-dir               print the exec-capable root (where build output runs)
   report [--json]        the full report
   gc [DAYS] [--dry-run]   remove staging and caches older than DAYS (default 7).
                          DAYS=0 (or --now) removes everything sandhome owns
@@ -235,7 +236,7 @@ usage: sh bootstrap.sh [options]
 | `SANDHOME_GO_DL_JSON_URL` | sandhome go.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_GO_VERSION_URL` | sandhome go.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_HERE` | profile.sh | `unset, and the feature is off until it is set` |
-| `SANDHOME_HOME` | env.sh profile.sh space.sh bootstrap.sh sandhome go.sh node.sh python.sh rust.sh | `''` |
+| `SANDHOME_HOME` | env.sh profile.sh space.sh bootstrap.sh sandhome go.sh node.sh python.sh rust.sh | `$SH_BAKED_HOME` |
 | `SANDHOME_LLVM_TAG` | clang.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_LOW_EXEC_MB` | space.sh sandhome | `unset, and the feature is off until it is set` |
 | `SANDHOME_LOW_EXEC_PCT` | space.sh sandhome | `unset, and the feature is off until it is set` |
@@ -259,7 +260,7 @@ usage: sh bootstrap.sh [options]
 | `SANDHOME_REPO` | env.sh profile.sh bootstrap.sh sandhome | `unset, and the feature is off until it is set` |
 | `SANDHOME_REPO_DIR` | env.sh profile.sh bootstrap.sh sandhome | `unset, and the feature is off until it is set` |
 | `SANDHOME_REQUIRE_DIGEST` | fetch.sh sandhome | `unset, and the feature is off until it is set` |
-| `SANDHOME_RUST_TARGETS` | sandhome rust.sh | `unset, and the feature is off until it is set` |
+| `SANDHOME_RUST_TARGETS` | env.sh report.sh sandhome rust.sh | `*)` |
 | `SANDHOME_SHA256` | fetch.sh bootstrap.sh sandhome | `unset, and the feature is off until it is set` |
 | `SANDHOME_SHA256_BUN` | fetch.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_SHA256_CLANG` | fetch.sh | `unset, and the feature is off until it is set` |
@@ -287,7 +288,7 @@ usage: sh bootstrap.sh [options]
 | `SANDHOME_SHFMT_VERSION` | shfmt.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_SHIMS` | env.sh shim.sh sandhome | `unset, and the feature is off until it is set` |
 | `SANDHOME_VIEW_MODE` | env.sh memexec.sh report.sh space.sh bootstrap.sh sandhome | `unset, and the feature is off until it is set` |
-| `SANDHOME_WANTED_TOOLCHAINS` | env.sh profile.sh report.sh sandhome | `*)` |
+| `SANDHOME_WANTED_TOOLCHAINS` | env.sh report.sh sandhome | `*)` |
 | `SANDHOME_WORKSPACE` | space.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_ZIG_INDEX_URL` | sandhome zig.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_ZIG_VERSION` | sandhome zig.sh | `unset, and the feature is off until it is set` |

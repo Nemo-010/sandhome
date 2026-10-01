@@ -607,27 +607,7 @@ sh_bootstrap_install_command() {
     # then PATH, and fails loudly naming the home it read. Paths are quoted
     # with sh_sq_quote so a home with a space or quote survives sourcing.
     if [ -d "$SH_HOME" ] && [ -n "$SH_EXEC_BIN" ]; then
-        sh_bic_entry="$SH_HOME/entry.sh"
-        sh_bic_qhome=$(sh_sq_quote "$SH_HOME")
-        sh_bic_qexec=$(sh_sq_quote "$SH_EXEC")
-        sh_bic_qbin=$(sh_sq_quote "$SH_EXEC_BIN/sandhome")
-        {
-            printf '%s\n' '# sandhome entry point. Generated; sourced, not executed.'
-            printf '%s\n' "# Written because a non-login shell has no PATH (issue #122)."
-            printf '%s\n' "SANDHOME_HOME=\${SANDHOME_HOME:-$sh_bic_qhome}"
-            printf '%s\n' "SANDHOME_EXEC=\${SANDHOME_EXEC:-$sh_bic_qexec}"
-            printf '%s\n' 'export SANDHOME_HOME SANDHOME_EXEC'
-            printf '%s\n' "_sandhome_baked=$sh_bic_qbin"
-            printf '%s\n' 'sandhome() {'
-            printf '%s\n' '  if [ -x "$_sandhome_baked" ]; then "$_sandhome_baked" "$@"; return $?; fi'
-            printf '%s\n' '  if [ -n "${SANDHOME_EXEC:-}" ] && [ -x "$SANDHOME_EXEC/bin/sandhome" ]; then "$SANDHOME_EXEC/bin/sandhome" "$@"; return $?; fi'
-            printf '%s\n' '  if [ -n "${SANDHOME_HOME:-}" ] && [ -x "$SANDHOME_HOME/repo/bin/sandhome" ]; then "$SANDHOME_HOME/repo/bin/sandhome" "$@"; return $?; fi'
-            printf '%s\n' '  if command -v sandhome >/dev/null 2>&1; then command sandhome "$@"; return $?; fi'
-            printf '%s\n' '  printf "%s\n" "sandhome: no working copy (baked $_sandhome_baked missing, SANDHOME_EXEC/bin/sandhome missing, repo/bin/sandhome missing, nothing on PATH; re-run the setup)" >&2; return 127'
-            printf '%s\n' '}'
-            printf '%s\n' "[ -r \"\$SANDHOME_HOME/env.sh\" ] && . \"\$SANDHOME_HOME/env.sh\""
-        } > "$sh_bic_entry" 2>/dev/null && \
-            sh_step "wrote $sh_bic_entry (source it from a shell with no PATH)"
+        sh_entry_write && sh_step "wrote $SH_HOME/entry.sh (source it from a shell with no PATH)"
     fi
     return 0
 }

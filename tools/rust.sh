@@ -635,6 +635,45 @@ tc_rust_ensure_targets() {
     done
     return 0
 }
+# tc_rust_writable_rustup ADOPTED_HOME -> sets SH_RUST_WRITABLE_RUSTUP to a
+# RUSTUP_HOME rustup can write, or to the adopted home when it already can.
+#
+# `rustup target add` stages under $RUSTUP_HOME/tmp and unpacks into
+# $RUSTUP_HOME/toolchains/<tc>/lib/rustlib, so an adopted home on the
+# read-only mount answers every target with "Read-only file system ... (os
+# error 30)" and STILL exits 0: `rustup target add X && cargo build` proceeds
+# and later dies with a missing-std error that names nothing (issue #159). The
+# existing detection only asks whether the home has a default toolchain, which
+# a read-only home answers perfectly. This asks whether it takes a write, by
+# writing one, and when it does not it builds a home on the exec root with the
+# adopted toolchains symlinked in and the settings copied, so every target has
+# a writable root. No step output here: the caller is a command substitution's
+# sibling, and a status line on stdout would become part of the value.
+tc_rust_writable_rustup() {
+    sh_rw_adopted=$1
+    SH_RUST_WRITABLE_RUSTUP=''
+    [ -n "$sh_rw_adopted" ] || return 1
+    mkdir -p "$sh_rw_adopted/tmp" 2>/dev/null
+    sh_rw_probe="$sh_rw_adopted/tmp/.sandhome-write.$$"
+    if ( : > "$sh_rw_probe" ) 2>/dev/null; then
+        rm -f "$sh_rw_probe" 2>/dev/null
+        SH_RUST_WRITABLE_RUSTUP=$sh_rw_adopted
+        return 0
+    fi
+    sh_rw_exec=${SANDHOME_EXEC:-${SH_EXEC:-}}/rustup
+    case "${SANDHOME_EXEC:-${SH_EXEC:-}}" in '') return 1 ;; esac
+    mkdir -p "$sh_rw_exec/toolchains" "$sh_rw_exec/tmp" 2>/dev/null || return 1
+    for sh_rw_tc in "$sh_rw_adopted"/toolchains/*; do
+        [ -e "$sh_rw_tc" ] || continue
+        ln -sfn "$sh_rw_tc" "$sh_rw_exec/toolchains/${sh_rw_tc##*/}" 2>/dev/null || true
+    done
+    if [ -r "$sh_rw_adopted/settings.toml" ]; then
+        cp -f "$sh_rw_adopted/settings.toml" "$sh_rw_exec/settings.toml" 2>/dev/null || true
+    fi
+    SH_RUST_WRITABLE_RUSTUP=$sh_rw_exec
+    return 0
+}
+
 tc_rust_env() {
     : "${SH_RUST_TARGETS:=${SANDHOME_RUST_TARGETS:-}}"
     sh_re_root=$(sh_toolchain_root rust)
@@ -704,13 +743,29 @@ EOF
             done
         fi
         if [ "$sh_re_rh_ok" != no ]; then
+            # A home that resolves a default toolchain can still refuse every
+            # write, and rustup exits 0 while failing (issue #159). Point
+            # RUSTUP_HOME at a root rustup can write before it is recorded.
+            sh_re_rh_use=$sh_re_rh_ok
+            if tc_rust_writable_rustup "$sh_re_rh_ok"; then
+                sh_re_rh_use=$SH_RUST_WRITABLE_RUSTUP
+            fi
+            [ -n "$sh_re_rh_use" ] || sh_re_rh_use=$sh_re_rh_ok
+            RUSTUP_HOME=$sh_re_rh_use
+            export RUSTUP_HOME
             cat >> "$(sh_env_fragment rust)" <<SHIMEOF
 # The rustc beside this rustup is a shim to it, and a shim needs a RUSTUP_HOME
 # with a default toolchain: without one, "rustc --version" and a link both fail
-# with "rustup could not choose a version of rustc to run".
-export RUSTUP_HOME="$sh_re_rh_ok"
+# with "rustup could not choose a version of rustc to run". A home that cannot
+# take a write is replaced by one on the exec root with the toolchains linked
+# in, so `rustup target add` has somewhere to unpack (issue #159).
+export RUSTUP_HOME="$sh_re_rh_use"
 SHIMEOF
-            sh_step "the adopted rustc is a rustup shim; RUSTUP_HOME=$sh_re_rh_ok"
+            if [ "$sh_re_rh_use" != "$sh_re_rh_ok" ]; then
+                sh_step "the adopted RUSTUP_HOME $sh_re_rh_ok cannot take a write; using $sh_re_rh_use with the toolchains symlinked"
+            else
+                sh_step "the adopted rustc is a rustup shim; RUSTUP_HOME=$sh_re_rh_use"
+            fi
         fi
         # # STOP: A BORROWED TOOLCHAIN THAT CANNOT LINK GETS A WORKING ONE
         # INSTALLED, NOT A LINKER FLAG. This branch used to write
@@ -935,6 +990,18 @@ export RUSTC="$sh_re_bin/rustc"
 export RUSTDOC="$sh_re_bin/rustdoc"
 EOF
     fi
+    # # STOP: ADDING A TARGET IS NECESSARY BUT NOT ALWAYS SUFFICIENT. For most
+    # cross targets a zig wrapper below is enough, because zig cc is the linker.
+    # `wasm32-unknown-emscripten` is the exception: its linker is `emcc`, a
+    # separate toolchain with its own LLVM/Binaryen and its own EM_CONFIG, so
+    # `rustup target add` completes and `cargo build --target
+    # wasm32-unknown-emscripten` then dies with `linker 'emcc' not found`
+    # (issue #163). No wrapper here can supply it, and the error reads like a
+    # broken PATH, so the fix is a real toolchain plus
+    # CARGO_TARGET_WASM32_UNKNOWN_EMSCRIPTEN_LINKER=emcc, not a flag on this
+    # one. The rust target list is therefore not a promise that the link works:
+    # `sandhome doctor` prints `emscripten_linker` when a recorded target needs
+    # emcc and there is none.
     # Zig cross wrappers, one per requested target, placed on the exec view.
     if sh_have zig 2>/dev/null || [ -x "$SH_EXEC_BIN/zig" ]; then
         for sh_re_t in $(sh_split_on ',' "${SH_RUST_TARGETS:-}"); do

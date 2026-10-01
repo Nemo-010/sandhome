@@ -302,6 +302,7 @@ usage: sandhome COMMAND [args]
                          and sets up the venv and npm project inside
   pty CMD...             run CMD with a userspace pty (no /dev/ptmx needed)
   exec CMD...            run CMD with the sandhome environment loaded
+  exec-dir               print the exec-capable root (where build output runs)
   report [--json]        the full report
   gc [DAYS] [--dry-run]   remove staging and caches older than DAYS (default 7).
                          DAYS=0 (or --now) removes everything sandhome owns
@@ -382,6 +383,16 @@ usage: sandhome status [--json]
 The one-command readiness answer: exit 0/1 like doctor, but one line naming
 the roots, the view, the toolchains present, and the next command. --json
 carries the same plus workdir and build fields.
+HELP
+            return 0 ;;
+        exec-dir)
+            cat <<'HELP'
+usage: sandhome exec-dir
+Print the exec-capable root on one line. This is where build output must land
+on a host whose work tree or home refuses execve, and it is the value ROUTE's
+"build under $SANDHOME_EXEC" means. It exists because a global-hook shell has
+no exported SANDHOME_EXEC: use `cd "$(sandhome exec-dir)"` or
+`sandhome exec --shell '...'`, which applies the whole environment instead.
 HELP
             return 0 ;;
         resume)
@@ -549,6 +560,22 @@ HELP
 }
 cmd_env()    { sh_env_print; }
 cmd_path()   { printf '%s\n' "$SH_EXEC_BIN"; }
+# cmd_exec_dir -> the exec-capable root on one line.
+#
+# A global-hook shell has no exported SANDHOME_EXEC: the hook sources env.sh in
+# its own process and execs the tool, which cannot export to the caller. ROUTE
+# nevertheless tells a consumer to "build under $SANDHOME_EXEC", and in the
+# shell it produces that variable is empty, so `mkdir -p "$SANDHOME_EXEC/build"`
+# creates /build and fails (issue #156). This command resolves the root where
+# build output can run, from either the ambient variable or the plan.
+cmd_exec_dir() {
+    case "${1:-}" in
+        -h|--help) cmd_help exec-dir; return 0 ;;
+        '') : ;;
+        *) sh_die "exec-dir takes no arguments; run 'sandhome help exec-dir'" ;;
+    esac
+    printf '%s\n' "${SH_EXEC:-${SANDHOME_EXEC:-}}"
+}
 
 # cmd_global [--status|--remove] -> install, report or remove the global hook
 # (issue #127). The bootstrap installs it by default; this command exists for a
@@ -1513,6 +1540,16 @@ cmd_resume() {
     if [ ! -r "$SH_HOME/env.sh" ]; then
         sh_die 'no recorded environment here; run the setup instead of resuming it'
     fi
+    # # STOP: A RESUME MUST NOT DISARM THE READINESS GATE. sh_env_load sources
+    # env.d/ but not env.sh, so this process holds no wanted list; a plan or a
+    # routine write that resolves its own default would record the developer set
+    # and drop every toolchain a later `install` added from doctor's gate, while
+    # the payloads those names describe are gone or half-rebuilt (issue #153).
+    # Seed the recorded request from the file before anything can rewrite it.
+    SH_WANTED_TOOLCHAINS=$(sh_wanted_from_file)
+    if [ -n "$SH_WANTED_TOOLCHAINS" ]; then
+        export SH_WANTED_TOOLCHAINS
+    fi
     sh_space_plan || return 2
     : "${SANDHOME_HOME:=$SH_HOME}"
     : "${SANDHOME_EXEC:=$SH_EXEC}"
@@ -1521,30 +1558,9 @@ cmd_resume() {
     sh_exec_install_launchers
     # Refresh the stable entry point after a tmpfs restart moved the exec root:
     # the snippet bakes the exec-bin path, and the restart is exactly when a cold
-    # non-login shell needs it (issue #122). Three roots, not one baked path:
-    # the baked bin, then the recorded SANDHOME_EXEC, then PATH, so a snippet
-    # read before this rewrite still finds the moved view.
-    if [ -d "$SH_HOME" ] && [ -n "$SH_EXEC_BIN" ]; then
-        sh_rs_qhome=$(sh_sq_quote "$SH_HOME")
-        sh_rs_qexec=$(sh_sq_quote "$SH_EXEC")
-        sh_rs_qbin=$(sh_sq_quote "$SH_EXEC_BIN/sandhome")
-        {
-            printf '%s\n' '# sandhome entry point. Generated; sourced, not executed.'
-            printf '%s\n' "# Written because a non-login shell has no PATH (issue #122)."
-            printf '%s\n' "SANDHOME_HOME=\${SANDHOME_HOME:-$sh_rs_qhome}"
-            printf '%s\n' "SANDHOME_EXEC=\${SANDHOME_EXEC:-$sh_rs_qexec}"
-            printf '%s\n' 'export SANDHOME_HOME SANDHOME_EXEC'
-            printf '%s\n' "_sandhome_baked=$sh_rs_qbin"
-            printf '%s\n' 'sandhome() {'
-            printf '%s\n' '  if [ -x "$_sandhome_baked" ]; then "$_sandhome_baked" "$@"; return $?; fi'
-            printf '%s\n' '  if [ -n "${SANDHOME_EXEC:-}" ] && [ -x "$SANDHOME_EXEC/bin/sandhome" ]; then "$SANDHOME_EXEC/bin/sandhome" "$@"; return $?; fi'
-            printf '%s\n' '  if [ -n "${SANDHOME_HOME:-}" ] && [ -x "$SANDHOME_HOME/repo/bin/sandhome" ]; then "$SANDHOME_HOME/repo/bin/sandhome" "$@"; return $?; fi'
-            printf '%s\n' '  if command -v sandhome >/dev/null 2>&1; then command sandhome "$@"; return $?; fi'
-            printf '%s\n' '  printf "%s\n" "sandhome: no working copy (baked $_sandhome_baked missing, SANDHOME_EXEC/bin/sandhome missing, repo/bin/sandhome missing, nothing on PATH; re-run the setup)" >&2; return 127'
-            printf '%s\n' '}'
-            printf '%s\n' "[ -r \"\$SANDHOME_HOME/env.sh\" ] && . \"\$SANDHOME_HOME/env.sh\""
-        } > "$SH_HOME/entry.sh" 2>/dev/null
-    fi
+    # non-login shell needs it (issue #122). The writer is shared with the
+    # bootstrap so the two cannot drift (issues #154, #122).
+    sh_entry_write && sh_step "wrote $SH_HOME/entry.sh (source it from a shell with no PATH)"
     # Repair, not install: payloads that survived rebuild their views with
     # no download, and genuinely missing toolchains fail loudly in doctor.
     cmd_repair || sh_warn 'resume could not rebuild every view; doctor names what is missing'
@@ -1963,6 +1979,7 @@ case "${1:-help}" in
     shell)       if [ "$#" -gt 0 ]; then shift; fi; cmd_shell "$@" ;;
     pty)         if [ "$#" -gt 0 ]; then shift; fi; cmd_pty "$@" ;;
     exec)        if [ "$#" -gt 0 ]; then shift; fi; cmd_exec "$@" ;;
+    exec-dir)    if [ "$#" -gt 0 ]; then shift; fi; cmd_exec_dir "$@" ;;
     report)      if [ "$#" -gt 0 ]; then shift; fi; cmd_report "$@" ;;
     gc) case "${2:-}" in -h|--help) if [ "$#" -gt 0 ]; then shift; fi; cmd_gc "$@" ;; *) sh_cmd_needs_roots_recover; if [ "$#" -gt 0 ]; then shift; fi; cmd_gc "$@" ;; esac ;;
     prune) case "${2:-}" in -h|--help) if [ "$#" -gt 0 ]; then shift; fi; cmd_prune "$@" ;; *) sh_cmd_needs_roots_recover; if [ "$#" -gt 0 ]; then shift; fi; cmd_prune "$@" ;; esac ;;

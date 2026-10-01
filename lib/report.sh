@@ -117,6 +117,15 @@ sh_report_text() {
     printf 'passwd=%s\n'      "${SH_PASSWD:-unknown}"
     printf 'ptrace=%s\n'      "${SH_PTRACE:-unknown}"
     printf 'bind=%s\n'        "${SH_BIND:-unknown}"
+    # The per-file cap an agent will hit either downloading or writing one big
+    # file. `ulimit -f` is in 512-byte blocks; a number an agent can plan around
+    # is more useful than one discovered by killing a build (issue #164).
+    sh_rt_fsize=$(ulimit -f 2>/dev/null)
+    case "$sh_rt_fsize" in
+        ''|unlimited|*[!0-9]*) sh_rt_fsize=unlimited ;;
+        *) sh_rt_fsize=$((sh_rt_fsize * 512)) ;;
+    esac
+    printf 'file_size_limit=%s\n' "$sh_rt_fsize"
     printf 'home=%s\n'        "${SH_HOME:-unknown}"
     printf 'home_exec=%s\n'   "${SH_HOME_EXEC:-unknown}"
     printf 'exec=%s\n'        "${SH_EXEC:-unknown}"
@@ -308,6 +317,59 @@ sh_doctor() {
     sh_doctor_check exec_runs "$(sh_exec_probe "$SH_EXEC" && printf yes || printf no)" yes
     sh_doctor_check exec_on_path "$(case ":$PATH:" in *":$SH_EXEC_BIN:"*) printf yes ;; *) printf no ;; esac)" yes
     sh_doctor_check env_file "$([ -r "$SH_HOME/env.sh" ] && printf yes || printf no)" yes
+    # # STOP: THE STANDARD CACHE ROOT IS A PLACE EXECUTABLES LAND. env.sh now
+    # points XDG_CACHE_HOME at the exec root when the caller left it unset, so a
+    # tool that downloads and runs something from there (worker-build's emsdk,
+    # wasm-bindgen) works (issue #158). The gate writes a real file under the
+    # effective cache root and EXECS it, because a writable directory that
+    # refuses execve is the whole subject of this tree, and it also requires
+    # env.sh to name the variable so the fragment cannot rot back to the home
+    # default unnoticed. It is written for every root, not only a split one: the
+    # probe answers the same question either way and costs one file.
+    sh_doc_cache=${XDG_CACHE_HOME:-$SH_EXEC/cache}
+    case "$sh_doc_cache" in
+        "$SH_EXEC"/*) : ;;
+        *) sh_doc_cache=$SH_EXEC/cache ;;
+    esac
+    sh_doc_cache_decl=no
+    sh_doc_rust_targets=''
+    if [ -r "$SH_HOME/env.sh" ]; then
+        while IFS= read -r sh_doc_cache_l || [ -n "$sh_doc_cache_l" ]; do
+            case "$sh_doc_cache_l" in
+                *XDG_CACHE_HOME=*) sh_doc_cache_decl=yes ;;
+                SANDHOME_RUST_TARGETS=*)
+                    sh_doc_rust_targets=${sh_doc_cache_l#SANDHOME_RUST_TARGETS=}
+                    sh_doc_rust_targets=${sh_doc_rust_targets#\'}
+                    sh_doc_rust_targets=${sh_doc_rust_targets%\'}
+                    sh_doc_rust_targets=${sh_doc_rust_targets#\"}
+                    sh_doc_rust_targets=${sh_doc_rust_targets%\"}
+                    ;;
+            esac
+        done < "$SH_HOME/env.sh"
+    fi
+    sh_doc_cache_ok=no
+    if [ "$sh_doc_cache_decl" = yes ] && mkdir -p "$sh_doc_cache" 2>/dev/null; then
+        if sh_exec_probe "$sh_doc_cache" 2>/dev/null; then
+            sh_doc_cache_ok=yes
+        fi
+    fi
+    sh_doctor_check cache_dir_exec "$sh_doc_cache_ok" yes
+    # # STOP: SOME TARGETS NEED A LINKER THAT IS NOT rustc'S OWN. Adding
+    # wasm32-unknown-emscripten is necessary but not sufficient: the link runs
+    # `emcc`, from a separate toolchain with its own EM_CONFIG, and without it
+    # cargo dies with `linker 'emcc' not found`, which reads like a broken PATH
+    # rather than a missing toolchain (issue #163). The gate names the state
+    # only when the request actually asks for that target, so no other setup
+    # pays for it.
+    case " $sh_doc_rust_targets " in
+        *wasm32-unknown-emscripten*|*wasm64-unknown-emscripten*)
+            if sh_have emcc; then
+                sh_doctor_check emscripten_linker yes yes
+            else
+                sh_doctor_check emscripten_linker \
+                    "no; this target links with emcc, a separate toolchain with its own EM_CONFIG (install it, then set CARGO_TARGET_WASM32_UNKNOWN_EMSCRIPTEN_LINKER=emcc)" yes
+            fi ;;
+    esac
     # The recorded root must be the root being judged. The plan re-ranks when
     # the recorded root is gone (a wiped tmpfs, a moved tree), which is right
     # for an install and wrong for a gate: doctor then answered about whatever
@@ -532,6 +594,7 @@ sh_doctor() {
         # sh_space_recorded_exec reads the exec root, because the library may not
         # use grep and this is the same question: what does the file say.
         sh_doc_wanted_all=''
+        sh_doc_cache_decl=no
         sh_doc_cr=$(printf '\r')
         if [ -r "$SH_HOME/env.sh" ]; then
             while IFS= read -r sh_doc_wl; do
@@ -544,6 +607,7 @@ sh_doctor() {
                         sh_doc_wanted_all=${sh_doc_wanted_all#\"}
                         sh_doc_wanted_all=${sh_doc_wanted_all%\"}
                         ;;
+                    *XDG_CACHE_HOME=*) sh_doc_cache_decl=yes ;;
                 esac
             done < "$SH_HOME/env.sh"
         fi
@@ -684,6 +748,42 @@ sh_doctor() {
                         sh_doc_fail=$((sh_doc_fail + 1)) ;;
                 esac
             done ;;
+    esac
+    # # STOP: npm MUST STAY RUNNABLE AS JAVASCRIPT. The node view holds
+    # bin/npm as a symlink into lib/node_modules/npm/bin/npm-cli.js, and
+    # `node <dir-of-node>/npm` is a documented invocation a real build script
+    # used. An earlier shell wrapper written at that .js path made it die with
+    # `SyntaxError: Invalid or unexpected token` while `npm` itself worked, and
+    # doctor was green throughout (issue #157). The probe runs the view's npm
+    # through its own node, so the one observable that catches it is a failure.
+    case " ${sh_doc_wanted_all:-} " in
+        *" node "*)
+            sh_doc_npm_js=no
+            sh_doc_node_view=$(sh_toolchain_view node 2>/dev/null)
+            if [ -n "$sh_doc_node_view" ] && [ -x "$sh_doc_node_view/bin/npm" ] && \
+               node "$sh_doc_node_view/bin/npm" --version >/dev/null 2>&1; then
+                sh_doc_npm_js=yes
+            fi
+            sh_doctor_check node_npm_js "$sh_doc_npm_js" yes ;;
+    esac
+    # # STOP: rustup WRITES FOR EVERY TARGET, SO THE HOME MUST TAKE A WRITE.
+    # An adopted RUSTUP_HOME that resolves a default toolchain but sits on the
+    # read-only mount makes `rustup target add` print a filesystem error and
+    # exit 0, so a build script proceeds and dies later on a missing std for a
+    # target it believes it installed (issue #159). The gate writes a real file
+    # under $RUSTUP_HOME/tmp, which is exactly the first thing rustup does; a
+    # check of the variable or of settings.toml does not catch this state.
+    case " ${sh_doc_wanted_all:-} " in
+        *" rust "*)
+            sh_doc_rustup_ok=no
+            if [ -n "${RUSTUP_HOME:-}" ]; then
+                mkdir -p "$RUSTUP_HOME/tmp" 2>/dev/null
+                if ( : > "$RUSTUP_HOME/tmp/.sandhome-write.$$" ) 2>/dev/null; then
+                    rm -f "$RUSTUP_HOME/tmp/.sandhome-write.$$" 2>/dev/null
+                    sh_doc_rustup_ok=yes
+                fi
+            fi
+            sh_doctor_check rustup_writable "$sh_doc_rustup_ok" yes ;;
     esac
     # # STOP: A ROOT THAT IS DRAINING IS A FAILURE, AND IT IS NAMED IN WORDS.
     # `doctor` is the command ROUTE.md step 2 makes a session run to decide

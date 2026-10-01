@@ -1421,7 +1421,16 @@ sh_promote_toolchain() {
     # whose name is no longer promoted is removed here, where the set is
     # known. Only symlinks under the view are touched; adopted roots, host
     # links and real files are never candidates.
-    if [ -n "$sh_ptc_view" ] && [ -d "${SH_EXEC_BIN:-/nonexistent}" ]; then
+    # # STOP: AN EMPTY BIN SET IS NOT A DECLARATION THAT THE VIEW IS EMPTY.
+    # The sweep below removes every exec link into THIS view whose name is not
+    # in "$@", so a promote called with no bins (the framework's promote for a
+    # module whose TC_<name>_BINS is empty, and tc_python_env's own call) swept
+    # away the uv/uvx links tc_python_install had just made. `uv` then vanished
+    # from every fresh shell while the toolchain description still promised it
+    # and the payload was untouched (issue #152). A caller that wants to shrink
+    # the view names the bins it keeps; a caller that names none is asking for
+    # no links, not for all of them to be removed.
+    if [ "$#" -gt 0 ] && [ -n "$sh_ptc_view" ] && [ -d "${SH_EXEC_BIN:-/nonexistent}" ]; then
         for sh_ptc_l in "$SH_EXEC_BIN"/*; do
             [ -L "$sh_ptc_l" ] || continue
             sh_ptc_lb=${sh_ptc_l##*/}
