@@ -233,7 +233,12 @@ what was there before, then verifies the result: every recorded directory is
 run through a fresh `env -i` shell that has to print its marker back.
 `sandhome report` prints `global=on:<dir>` when a recorded directory answers
 that shell, `global=stale:<dir>` when one was recorded and no longer does
-(`doctor` fails on it and names the repair), and
+(`doctor` fails on it and names the repair),
+`global=inside-exec-root:<dir>` when the hook was written into a directory this
+tree uses as indirection (`$SANDHOME_EXEC/views/...` or the exec `bin`), which
+`doctor` fails too - such a directory is on `PATH` only because `env.sh` put it
+there, so a hook in it shadows that view's own tools with another view's names
+(issue #149) - and
 `global=none` when the host had no writable candidate; `sandhome global
 --status` names every directory and its state,
 `sandhome global` installs or repairs them, and `sandhome global --remove`
@@ -250,11 +255,17 @@ dispatcher puts those directories on the `PATH` of the tools it starts, and the
 hook reads them from disk for its name list. One `sandhome global` after an
 install is what teaches it a new CLI; a login shell is covered by the profile
 fragment and a shell with no `PATH` at all by `entry.sh`, and the two together
-cover the shells the dispatcher cannot (issue #138). Two directories are
+cover the shells the dispatcher cannot (issue #138). Two kinds of directory are
 refused outright and never become hook directories, whatever is in them: a
 `bin` directory this tree created for another installer to write into,
 because `npm i -g` writes **relative** links there and a redirect symlink
-strands every one of them.
+strands every one of them; and any directory under `$SANDHOME_EXEC/views`,
+because a view bin is on `PATH` only because `env.sh` put it there, so a shell
+that has sourced nothing cannot be served by it - taking one wrote a second
+view's names into it (measured: `node`, `npm`, `npx` into the python view,
+clashing with `uv`/`uvx`, so a sourced shell answered `command -v node` from the
+python view). A directory on the exec root that this tree did **not** make is
+still an ordinary candidate (issues #138, #149).
 
 ```sh
 sandhome version             # the schema version, and the cheapest way to prove the copy runs

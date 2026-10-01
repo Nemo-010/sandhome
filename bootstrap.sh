@@ -769,8 +769,17 @@ sandhome_bootstrap_main() {
 
     sh_say "$SH_OS_ID on $SH_KERNEL $SH_ARCH, $SH_LIBC, wsl=$SH_WSL, privilege=$SH_PRIVILEGE"
     sh_say "pty=$SH_PTY passwd=$SH_PASSWD"
-    if [ "$SH_HOME_EXEC" = yes ]; then
-        sh_say "home and exec are the same root: $SH_HOME"
+    # # STOP: THE ROOTS LINE MUST NAME THE ROOTS THE RUN WILL USE. This printed
+    # "home and exec are the same root: $SH_HOME" whenever the home happens to
+    # run files, even when `--exec` named a different root -- so the one line a
+    # consumer reads to find out where things will land said the opposite of
+    # what the plan had decided, and read as "--exec was ignored" (issue #149).
+    # The condition is now whether the two roots ARE the same, and a named
+    # root says so.
+    if [ "$SH_EXEC" = "$SH_HOME" ]; then
+        sh_say "home and exec are the same root: $SH_HOME (no separate root named; the home runs binaries)"
+    elif [ "$SH_HOME_EXEC" = yes ]; then
+        sh_say "home $SH_HOME (runs binaries); exec $SH_EXEC (named)"
     else
         sh_say "home $SH_HOME (noexec); exec $SH_EXEC"
     fi

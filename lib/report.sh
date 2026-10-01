@@ -336,10 +336,53 @@ sh_doctor() {
     # host layout (nothing was recorded) and passes; the failure line names the
     # repair command through its `wanted` text.
     sh_doc_global=$(sh_global_report 2>/dev/null)
+    # # EVERY ARM THAT NAMES A DIRECTORY IS CHECKED, NOT ONLY `on:`. A recorded
+    # hook directory under the exec root is wrong whichever answer the probe
+    # gave it: `on:` means it answers a fresh shell (the shadowing case) and
+    # `stale:` means it does not answer any more, and both are a directory this
+    # tree must not be installed into. Keying the check on `on:*` alone missed
+    # the `stale:` half, measured by driving sh_doctor with a recorded view-bin
+    # path whose dispatcher does not answer.
+    sh_doc_hookdir=''
     case "$sh_doc_global" in
-        stale:*) sh_doctor_check global_hook "$sh_doc_global" 'on:<dir> or none (repair: sandhome global)' ;;
-        *)       sh_doctor_check global_hook "$sh_doc_global" "$sh_doc_global" ;;
+        on:*)    sh_doc_hookdir=${sh_doc_global#on:} ;;
+        stale:*) sh_doc_hookdir=${sh_doc_global#stale:} ;;
     esac
+    # # THE HOOK MAY LEGITIMATELY LIVE ON THE EXEC ROOT; IT MUST NOT LIVE IN A
+    # DIRECTORY THIS TREE USES AS INDIRECTION. A `PATH` directory on the exec
+    # root is a normal install target (the bootstrap puts the hook in
+    # `$SH_EXEC/global` when the exec root is itself on PATH), but `views/<n>/bin`
+    # and the exec `bin` are not PATH entries a consumer has: they are
+    # advertised BY env.sh, so a hook there shadows that view's own tools with
+    # another view's names. Measured: node/npm/npx written into the python view,
+    # clashing with uv/uvx, so a sourced shell answered `command -v node` from
+    # the python view (issue #149). The test is the indirection set, not the
+    # exec root, because the exec root is a legitimate target.
+    sh_doc_hook_bad=0
+    if [ -n "$sh_doc_hookdir" ] && [ -n "${SH_EXEC:-}" ]; then
+        case "$sh_doc_hookdir" in
+            "$SH_EXEC"/views|$SH_EXEC/views/*) sh_doc_hook_bad=1 ;;
+        esac
+        if [ -n "${SH_EXEC_BIN:-}" ]; then
+            case "$sh_doc_hookdir" in
+                "$SH_EXEC_BIN"|"$SH_EXEC_BIN"/*) sh_doc_hook_bad=1 ;;
+            esac
+        fi
+    fi
+    if [ "$sh_doc_hook_bad" = 1 ]; then
+        sh_doctor_check global_hook "inside-exec-root:$sh_doc_hookdir" 'a PATH directory outside the tree indirection (repair: sandhome global --remove, then sandhome global)'
+    else
+        # # THE PASS ARM COMPARES THE VALUE WITH ITSELF. `on:<dir>` is a
+        # directory the probe answered, and any such directory outside the
+        # indirection set is healthy; writing a literal want here made every
+        # normal `on:<dir>` a failure, which the suite caught. Only `stale:`
+        # names a wanted value, because there is a wanted value for it
+        # (`on:<dir> or none`).
+        case "$sh_doc_global" in
+            stale:*) sh_doctor_check global_hook "$sh_doc_global" 'on:<dir> or none (repair: sandhome global)' ;;
+            *)       sh_doctor_check global_hook "$sh_doc_global" "$sh_doc_global" ;;
+        esac
+    fi
     # The working tree may itself be noexec (issue #24): build output there
     # fails at run time with Permission denied, which reads as an install bug.
     # This is informational, never a failure: the fix is to build under

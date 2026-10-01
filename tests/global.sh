@@ -429,6 +429,16 @@ t_is "$( sh -c '. "$0/lib/common.sh"; . "$0/lib/env.sh"; SH_HOME=$2; SH_EXEC=$3;
 mkdir -p "$gh_sb/plain-bin" 2>/dev/null
 t_is "$( sh -c '. "$0/lib/common.sh"; . "$0/lib/env.sh"; SH_HOME=$2; SH_EXEC=$3; SH_EXEC_BIN=$3/bin; SANDHOME_GLOBAL=install; export SH_HOME SH_EXEC SH_EXEC_BIN SANDHOME_GLOBAL; sh_global_skip_entry "$1" && echo skip || echo take' "$ROOT" "$gh_sb/plain-bin" "$gh_shome" "$gh_sb" 2>/dev/null )" 'take' \
      'a neutral directory on the exec root is still a hook candidate (issue #138)'
+# A TOOLCHAIN VIEW BIN IS NOT A PATH ENTRY, and it is the same kind of
+# indirection as the exec bin: it is on PATH only because env.sh put it there.
+# Taking one wrote a dispatcher and a second view's names into it -- measured,
+# the hook put node/npm/npx into views/python/bin (clashing with uv/uvx) and a
+# sourced shell then answered `command -v node` from the PYTHON view (#149).
+mkdir -p "$gh_sb/views/node/bin" "$gh_sb/views/python/bin" 2>/dev/null
+for gh_view_bin in "$gh_sb/views/node/bin" "$gh_sb/views/python/bin" "$gh_sb/views"; do
+    t_is "$( sh -c '. "$0/lib/common.sh"; . "$0/lib/env.sh"; SH_HOME=$2; SH_EXEC=$3; SH_EXEC_BIN=$3/bin; SANDHOME_GLOBAL=install; export SH_HOME SH_EXEC SH_EXEC_BIN SANDHOME_GLOBAL; sh_global_skip_entry "$1" && echo skip || echo take' "$ROOT" "$gh_view_bin" "$gh_shome" "$gh_sb" 2>/dev/null )" 'skip' \
+         "a toolchain view directory is never taken as a hook directory (${gh_view_bin##*/}, #149)"
+done
 
 # The dispatcher puts the prefix on PATH itself, so a CLI installed after the
 # setup is reachable from a shell that sourced nothing. The clause installs a

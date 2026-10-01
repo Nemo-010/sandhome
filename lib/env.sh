@@ -1053,6 +1053,36 @@ sh_global_skip_entry() {
             "$SH_EXEC"|"$SH_EXEC/global") return 0 ;;
         esac
     fi
+    # # STOP: A TOOLCHAIN VIEW BIN IS NOT A PATH ENTRY; A NEUTRAL DIRECTORY ON
+    # THE EXEC ROOT STILL IS. The list refused $SH_EXEC_BIN and $SH_EXEC/global
+    # and then everything else under the exec root was a candidate -- including
+    # `$SH_EXEC/views/<name>/bin`, which is the SAME KIND of indirection as
+    # $SH_EXEC_BIN: it is on PATH only because env.sh put it there, so a shell
+    # that has not read the environment cannot be served by it. Measured on a
+    # home that refuses execve, after the bootstrap (whose PATH already carried
+    # the view bins, because sh_env_load ran first):
+    #
+    #   global record:  .../exec/views/node/bin  .../exec/views/python/bin
+    #   clashes:        node npm npx uv uvx
+    #   ls .../exec/views/python/bin/: .sandhome-dispatch, node -> .sandhome-dispatch,
+    #     npm, npx, jq, rg, fd, AND the real uv/uvx ELF binaries beside them
+    #   a sourced shell: command -v node -> .../exec/views/PYTHON/bin/node
+    #
+    # The hook wrote a dispatcher and node/npm/npx links into the python view,
+    # under another view's names, and clashed with uv/uvx. It is the rule
+    # sh_global_view_names already applies to NAMES ("a hit inside this tree is
+    # not PATH will serve it"); this is the same rule for the DIRECTORIES the
+    # hook is written into.
+    #
+    # The pattern is the view ROOT, not the whole exec root: `views` itself is
+    # a directory this tree made to hold views, so nothing a consumer put there
+    # is a PATH entry (tests/global.sh keeps `$SH_EXEC/plain-bin` a candidate,
+    # which is the control that this must not become "everything is a skip").
+    if [ -n "${SH_EXEC:-}" ]; then
+        case "$1" in
+            "$SH_EXEC"/views|"$SH_EXEC"/views/*) return 0 ;;
+        esac
+    fi
     sh_global_is_sandbox "$1" && return 0
     return 1
 }
@@ -1385,6 +1415,35 @@ sh_global_relocate_record() {
         fi
         sh_grr_i=$((sh_grr_i + 1))
     done < "$sh_grr_old/dirs"
+    # # STOP: A HOOK WRITTEN IN PLACE INTO A DIRECTORY THE PLAN NOW REFUSES IS
+    # STILL OURS TO REMOVE. The relocate path only handled a directory that had
+    # been replaced by a SYMLINK (link=yes), so a hook written directly into a
+    # bin directory -- the shape an exec-capable exec root produces, which is
+    # how `$SH_EXEC/views/node/bin` was taken (see sh_global_skip_entry) -- kept
+    # its `.sandhome-dispatch` and its name links after the rule changed, and a
+    # repair refreshed everything around it while leaving the shadow in place.
+    # The test is narrow: the directory is ours only when it sits under
+    # $SH_EXEC AND carries our own dispatcher, so a host directory that happens
+    # to live under the exec root is still never touched.
+    if [ -n "${SH_EXEC:-}" ] && [ -n "$sh_grr_dir" ] && \
+       [ ! -L "$sh_grr_dir" ] && [ -d "$sh_grr_dir" ] && [ -x "$sh_grr_dir/.sandhome-dispatch" ]; then
+        case "$sh_grr_dir" in
+            "$SH_EXEC"/*) ;;
+            *) return 0 ;;
+        esac
+        sh_grr_cleaned=0
+        for sh_grr_f in "$sh_grr_dir"/* "$sh_grr_dir"/.[!.]*; do
+            [ -L "$sh_grr_f" ] || continue
+            sh_grr_b=${sh_grr_f##*/}
+            [ "$sh_grr_b" = '.sandhome-dispatch' ] && continue
+            sh_grr_t=$(readlink "$sh_grr_f" 2>/dev/null) || continue
+            [ "$sh_grr_t" = '.sandhome-dispatch' ] || continue
+            rm -f "$sh_grr_f" 2>/dev/null && sh_grr_cleaned=$((sh_grr_cleaned + 1))
+        done
+        rm -f "$sh_grr_dir/.sandhome-dispatch" 2>/dev/null || true
+        sh_warn "$sh_grr_dir carried an earlier global hook written in place; the dispatcher and its $sh_grr_cleaned link(s) were removed (the directory is inside the exec root, where env.sh already puts it on PATH)"
+        return 0
+    fi
     [ "$sh_grr_link" = yes ] || return 0
     [ -n "${SH_EXEC:-}" ] || return 0
     # Ours, or nothing: the link must be the one this tree writes.

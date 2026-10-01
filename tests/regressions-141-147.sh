@@ -186,6 +186,138 @@ else
     t_ok 1 'the qemu archive is kept for reuse (#146)'
 fi
 
+# --- #149: an explicit --exec is not collapsed into the home ----------------
+# MEASURED END TO END, BECAUSE THE ISOLATED CALL CANNOT SEE THIS. A single
+# `sh_promote_toolchain` on a fresh payload takes the direct-link path before
+# the branch that collapses, so a fixture calling it once passes on the broken
+# tree as well as the fixed one. The defect only appears through a real install:
+# `--exec DIR` was honoured for the ROOT (`exec_reason=explicit`) and then every
+# VIEW was sent into the home, so the caller paid for a second root that stayed
+# empty. Measured on the tree as filed: `bootstrap --toolset minimal --exec $E`
+# with a home that runs files left `$E/views` EMPTY and put jq's view under the
+# home; after the fix `$E/views/jq` exists and the roots line names both.
+# jq is the smallest toolchain in the minimal toolset (2.2MB), so this is a real
+# install and not a shape.
+r149_h="$tmp/r149/h"
+r149_e="$tmp/r149/e"
+mkdir -p "$r149_h/bin" "$r149_e" "$tmp/r149/wb"
+timeout 900 env -i HOME="$r149_h" PATH="$r149_h/bin:$tmp/r149/wb:/usr/bin:/bin" TMPDIR="$tmp" \
+    http_proxy="$http_proxy" https_proxy="$https_proxy" no_proxy="$no_proxy" \
+    sh "$ROOT/bootstrap.sh" --toolset minimal --exec "$r149_e" \
+    --no-shims --no-skills --no-shell --no-profile --no-global \
+    > "$tmp/r149/log" 2>&1
+r149_rc=$?
+if [ "$r149_rc" != 0 ]; then
+    t_skip "the #149 bootstrap could not run here (rc=$r149_rc)"
+else
+    r149_exec=$(sed -n 's/^exec=//p' "$tmp/r149/log" | head -1)
+    t_is "$r149_exec" "$r149_e" 'the explicit exec root is the recorded root (#149)'
+    if [ -d "$r149_e/views/jq" ] || [ -d "$r149_e/views/jq/bin" ]; then
+        t_ok 0 'the named exec root receives the toolchain view (#149)'
+    else
+        t_ok 1 "the named exec root receives the toolchain view (#149; $r149_e/views holds: $(ls "$r149_e/views" 2>/dev/null | tr '\n' ' '))"
+    fi
+    # The control the fix must not break: a home that runs files and NO named
+    # root still collapses, so nothing is copied needlessly.
+    r149_c="$tmp/r149c"
+    mkdir -p "$r149_c/h/bin" "$r149_c/e" "$r149_c/wb"
+    timeout 900 env -i HOME="$r149_c/h" PATH="$r149_c/h/bin:$r149_c/wb:/usr/bin:/bin" TMPDIR="$tmp" \
+        http_proxy="$http_proxy" https_proxy="$https_proxy" no_proxy="$no_proxy" \
+        sh "$ROOT/bootstrap.sh" --toolset minimal \
+        --no-shims --no-skills --no-shell --no-profile --no-global \
+        > "$tmp/r149c/log" 2>&1
+    if [ $? = 0 ]; then
+        r149_chome=$(sed -n 's/^home=//p' "$tmp/r149c/log" | head -1)
+        r149_cexec=$(sed -n 's/^exec=//p' "$tmp/r149c/log" | head -1)
+        t_is "$r149_cexec" "$r149_chome" 'with no named root the home is still chosen (control, #149)'
+    else
+        t_skip "the #149 control bootstrap could not run here"
+    fi
+fi
+
+# --- the hook must never take a directory inside the exec root --------------
+# # THE DOCTOR GATE, NOT ONLY THE INSTALL RULE. A hook written into a view bin
+# answers a fresh shell and therefore read as `on:<dir>` (healthy), while it
+# shadowed that view's tools with another view's names. The install rule below
+# stops it being written; this clause stops it reading as healthy if it exists.
+# Driven through sh_doctor itself, with a recorded hook directory under the
+# exec root and one outside it, so both directions are seen.
+hook_doctor_case() {
+    dh="$tmp/hd/home"; de="$tmp/hd/exec"
+    mkdir -p "$dh" "$de/bin" "$de/views/probe/bin" "$tmp/hd/consumer" 2>/dev/null
+    printf '#!/bin/sh\nexit 0\n' > "$de/bin/sandhome" 2>/dev/null
+    printf 'SANDHOME_HOME=%s\nSANDHOME_EXEC=%s\n' "$dh" "$de" > "$dh/env.sh" 2>/dev/null
+    SH_HOME="$dh" SH_EXEC="$de" SH_EXEC_BIN="$de/bin" SH_HOME_TOOLCHAINS="$dh/toolchains" \
+    SH_EXEC_VIEWS="$de/views" SANDHOME_HOME="$dh" SANDHOME_EXEC="$de" SH_LIB_DIR="$ROOT/lib" SH_REPO_DIR="$ROOT" \
+        sh -c '. "$0/lib/common.sh"; . "$0/lib/detect.sh"; . "$0/lib/space.sh"; . "$0/lib/fetch.sh"; . "$0/lib/env.sh"; . "$0/lib/toolchain.sh"; . "$0/lib/shim.sh"; . "$0/lib/report.sh"
+               st=$(sh_global_state_dir 2>/dev/null); mkdir -p "$st/d" 2>/dev/null
+               printf "%s\n" "$1" > "$st/dirs" 2>/dev/null
+               sh_doctor 2>/dev/null | sed -n "s/^[^ ]*  *global_hook=//p"' \
+        "$ROOT" "$2" 2>/dev/null | head -1
+}
+# A recorded directory under the exec root must be a failure by name.
+hd_inside=$(hook_doctor_case "$tmp/hd" "$tmp/hd/exec/views/probe/bin")
+case "$hd_inside" in
+    inside-exec-root:*) t_ok 0 'doctor fails a hook recorded inside the exec root (#149)' ;;
+    *) t_ok 1 "doctor fails a hook recorded inside the exec root (#149; got: $hd_inside)" ;;
+esac
+# The control: a consumer directory outside the exec root stays healthy.
+hd_outside=$(hook_doctor_case "$tmp/hd" "$tmp/hd/consumer")
+case "$hd_outside" in
+    on:*|stale:*) t_ok 0 'doctor accepts a hook outside the exec root (control, #149)' ;;
+    *) t_ok 1 "doctor accepts a hook outside the exec root (control, #149; got: $hd_outside)" ;;
+esac
+
+# --- the hook must never take a directory inside the exec root --------------
+# A bootstrap whose PATH already carried the view bins (the PATH env.sh
+# writes, which the hook install runs WITH) took `$SH_EXEC/views/node/bin` and
+# `$SH_EXEC/views/python/bin` as hook directories: it wrote .sandhome-dispatch
+# and node/npm/npx links into the python view, so `command -v node` answered
+# from the python view and the hook clashed with uv/uvx. The rule is the one
+# already spelled for NAMES: a hit inside the exec root is this tree's own
+# indirection, never a PATH entry a fresh shell consults.
+skip_case() {
+    SH_EXEC="$tmp/skip/exec" SH_EXEC_BIN="$tmp/skip/exec/bin" SH_HOME="$tmp/skip/home" SH_LIB_DIR="$ROOT/lib" SH_REPO_DIR="$ROOT" \
+        sh -c '. "$0/lib/common.sh"; . "$0/lib/space.sh"; . "$0/lib/env.sh"; sh_global_skip_entry "$1"' "$ROOT" "$1" 2>/dev/null
+}
+for in_tree in "$tmp/skip/exec/views/node/bin" "$tmp/skip/exec/views/python/bin" \
+               "$tmp/skip/exec/npm-global/bin" "$tmp/skip/exec/go-bin" "$tmp/skip/exec/bin" \
+               "$tmp/skip/exec/global"; do
+    mkdir -p "$in_tree" 2>/dev/null
+    if skip_case "$in_tree"; then
+        t_ok 0 "the hook refuses $in_tree (inside the exec root)"
+    else
+        t_ok 1 "the hook refuses $in_tree (inside the exec root)"
+    fi
+done
+mkdir -p "$tmp/skip/consumer-bin"
+if skip_case "$tmp/skip/consumer-bin"; then
+    t_ok 1 'the hook still takes a consumer bin directory (control)'
+else
+    t_ok 0 'the hook still takes a consumer bin directory (control)'
+fi
+
+# --- a hook written in place into a bin dir is cleaned up, not left ---------
+# The repair path only relocated a directory replaced by a SYMLINK, so an
+# in-place hook kept its dispatcher and name links after the rule changed.
+mkdir -p "$tmp/heal/exec/views/node/bin"
+printf '#!/bin/sh\n' > "$tmp/heal/exec/views/node/bin/.sandhome-dispatch"
+chmod 0755 "$tmp/heal/exec/views/node/bin/.sandhome-dispatch"
+ln -sf .sandhome-dispatch "$tmp/heal/exec/views/node/bin/node"
+mkdir -p "$tmp/heal/state"
+printf '%s\n' "$tmp/heal/exec/views/node/bin" > "$tmp/heal/state/dirs"
+mkdir -p "$tmp/heal/state/d/0"
+printf 'no\n' > "$tmp/heal/state/d/0/link"
+SH_EXEC="$tmp/heal/exec" SH_HOME="$tmp/heal/home" SH_LIB_DIR="$ROOT/lib" SH_REPO_DIR="$ROOT" \
+    sh -c '. "$0/lib/common.sh"; . "$0/lib/space.sh"; . "$0/lib/env.sh"; sh_global_relocate_record "$1" "$2"' \
+    "$ROOT" "$tmp/heal/state" "$tmp/heal/exec/views/node/bin" >/dev/null 2>&1
+[ -e "$tmp/heal/exec/views/node/bin/.sandhome-dispatch" ] && \
+    t_ok 1 'a stale in-place hook is cleaned up (#149 follow-up)' || \
+    t_ok 0 'a stale in-place hook is cleaned up (#149 follow-up)'
+[ -e "$tmp/heal/exec/views/node/bin/node" ] && \
+    t_ok 1 'the shadowing name link is removed (#149 follow-up)' || \
+    t_ok 0 'the shadowing name link is removed (#149 follow-up)'
+
 # --- #147: a copy with no environment finds its private mirror ---------------
 # env -i finds the mirror, and the mirror is the directory it names. The
 # `sandhome path` at the end is the proof and not decoration: the bake

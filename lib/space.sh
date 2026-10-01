@@ -1264,7 +1264,24 @@ sh_promote_toolchain() {
     sh_ptc_root=$(sh_toolchain_root "$sh_ptc_name")
     sh_ptc_view=$(sh_toolchain_view "$sh_ptc_name")
     if [ -d "$sh_ptc_root" ]; then
-        if [ "$SH_HOME_EXEC" = yes ]; then
+        # # STOP: THE COLLAPSE IS FOR "NO SEPARATE ROOT", NOT FOR "THE HOME RUNS
+        # FILES". `SH_HOME_EXEC=yes` means the home happens to permit execve,
+        # which on a tmpfs `/tmp` or a normal disk home is ordinary -- so this
+        # branch put every payload, view and launcher in the home even when the
+        # caller named a different, roomier root with `--exec`/`SANDHOME_EXEC`.
+        # Measured: `--exec /workspace/cp/exec` (152GB free) named and recorded
+        # (`exec_reason=explicit`), while `install rust` aimed at the home and
+        # failed "900MB wanted, 172MB free" on the 488MB tmpfs the caller had
+        # named the other root to avoid (issue #149). The plan's own rule is
+        # that an explicitly named root wins ("an operator who named
+        # SANDHOME_EXEC has said where executables must go"); this applies it
+        # to the payload, not only to the root.
+        #
+        # The collapse is kept for the case it was written for: no other root
+        # named, or the named root IS the home, so a needless copy of every
+        # payload is still avoided.
+        if [ "$SH_HOME_EXEC" = yes ] && \
+           { [ -z "${SANDHOME_EXEC:-}" ] || [ "$SH_EXEC" = "$SH_HOME" ]; }; then
             sh_ptc_view=$sh_ptc_root
         else
             # Prune before comparing: a view-only entry (payload deleted
