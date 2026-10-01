@@ -58,11 +58,42 @@ tc_python_install() {
         return 1
     fi
     mkdir -p "$sh_pi_root/python" "$SH_HOME/cache/uv" 2>/dev/null || true
-    if ! UV_PYTHON_INSTALL_DIR="$sh_pi_root/python" UV_CACHE_DIR="$SH_HOME/cache/uv" \
-         "$sh_pi_uv" python install 3.12 >/dev/null 2>&1; then
-        sh_warn 'uv could not install CPython 3.12'
+    # STOP: AN INSTALL-TIME ACTION MUST NOT INHERIT A RUNTIME POLICY THAT
+    # FORBIDS IT (issue #174). The fragment this process has already loaded
+    # exports UV_PYTHON_DOWNLOADS=never so that an ordinary run can never fetch
+    # an interpreter behind the operator's back. `sandhome install` runs in that
+    # SAME process, so `install --force python` inherited never and uv refused
+    # the very CPython it had been explicitly asked to install:
+    #   Python downloads are not allowed (`python-downloads = "never"`).
+    #   Change to `python-downloads = "manual"` to allow explicit installs.
+    # The toolchain root had already been `rm -rf`'d, so the failure left it
+    # EMPTY, and the next shell resolved python3 to the system interpreter
+    # instead, which is a worse outcome than the failure: everything after it
+    # ran on a different python than the one that was installed. Measured live
+    # here: `UV_PYTHON_DOWNLOADS=automatic sandhome install --force python`
+    # succeeds, which is the tell that the inherited default and not the
+    # network is the cause.
+    #
+    # `manual` is the value uv provides for exactly this: it permits an EXPLICIT
+    # `uv python install` and nothing implicit, so the hermetic runtime default
+    # in the fragment is unchanged and an ordinary `python3` still never
+    # downloads.
+    #
+    # AND THE SAYING OF UV IS KEPT. This call was `>/dev/null 2>&1`, so the one
+    # line that explains the failure never reached the operator and the report
+    # was a flat "uv could not install CPython 3.12" naming nothing. It is
+    # captured to a file and the first line is quoted, because a failure whose
+    # message is thrown away costs the reader the entire diagnosis.
+    sh_pi_err=${SH_HOME_TMP:-${TMPDIR:-/tmp}}/.uv-python-install.$$
+    if ! UV_PYTHON_DOWNLOADS=manual UV_PYTHON_INSTALL_DIR="$sh_pi_root/python" \
+         UV_CACHE_DIR="$SH_HOME/cache/uv" \
+         "$sh_pi_uv" python install 3.12 >"$sh_pi_err" 2>&1; then
+        sh_pi_why=$(sh_first_line "$sh_pi_err" 2>/dev/null)
+        rm -f "$sh_pi_err" 2>/dev/null
+        sh_warn "uv could not install CPython 3.12${sh_pi_why:+: $sh_pi_why}"
         return 1
     fi
+    rm -f "$sh_pi_err" 2>/dev/null
     return 0
 }
 

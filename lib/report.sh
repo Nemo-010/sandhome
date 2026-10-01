@@ -785,12 +785,178 @@ sh_doctor() {
     # `SyntaxError: Invalid or unexpected token` while `npm` itself worked, and
     # doctor was green throughout (issue #157). The probe runs the view's npm
     # through its own node, so the one observable that catches it is a failure.
+    #
+    # STOP: AND IT MUST ASK THE SAME QUESTION ON A MACHINE WITH NO NODE VIEW.
+    # This probe asked for $SANDHOME_EXEC/views/node/bin/npm, which is a path
+    # that only exists when node was INSTALLED into the home. An ADOPTED node
+    # (the usual case: mise, nvm, a distro package, anything already on PATH)
+    # has no home root and therefore no view by design - see
+    # sh_toolchain_adopted_root - and the probe answered "no" every time. The
+    # measured consequence on a clean setup here:
+    #   $ sandhome doctor
+    #   FAIL node_npm_js=no (wanted yes)
+    #   doctor_failures=1
+    #   $ sandhome status
+    #   ready=no ... next=run 'sandhome doctor' for the failing invariant
+    # so the setup refused to call itself ready on a machine where npm works
+    # perfectly well (`sandhome exec npm --version` answered 12.2.0 in the same
+    # shell that doctor was failing in). A green gate that lies and a red gate
+    # that lies are the same defect; this one shipped red, and ROUTE.md tells a
+    # consumer to treat a non-zero doctor as "the task not being ready".
+    #
+    # So the probe asks the same question of whatever npm actually is, and
+    # tries three sources in the order that can answer it.
+    #
+    # STOP: IT MUST NOT DEPEND ON LOADING THE node MODULE. The obvious third
+    # source is sh_toolchain_adopted_root, which loads tools/node.sh to ask it
+    # where its working copy is. That is UNAVAILABLE where doctor runs, and
+    # silently so: `doctor` is reached through the private mirror
+    # $SANDHOME_EXEC/.sandhome-lib, and the mirror carries lib/ and bin/ only -
+    # `ls .sandhome-lib` gives exactly those two. So sh_toolchain_load prints
+    # "no module for toolchain node" to stderr and returns empty, and a probe
+    # built on it answers "no" on every machine no matter what is installed.
+    # Measured after the first version of this fix, which used it:
+    #   sh_toolchain_adopted_root node  ->  []
+    #   doctor                            ->  FAIL node_npm_js=no (wanted yes)
+    # with `sandhome exec npm --version` answering 12.2.0 in the same shell.
+    # A fix that reaches for a thing the calling context cannot provide is not
+    # a fix, and the two-line change from a module to sh_path_where is the whole
+    # difference between it working and not.
+    #
+    # The sources, in order:
+    #   1. the installed node's view, which is what #157 was about;
+    #   2. the javascript itself, found from whatever npm is on PATH.
+    #
+    # STOP: THE PROBE SUBJECT MUST BE JAVASCRIPT, NEVER A SHELL WRAPPER. There
+    # were two wrong answers here and both were measured, and the first version
+    # of this fix was the second one:
+    #   (a) measuring $SANDHOME_EXEC/views/node/bin/npm, which does not exist for
+    #       an ADOPTED node at all, so the check was red on every host that
+    #       already had node;
+    #   (b) falling back to $SH_EXEC_BIN/npm, which EXISTS and is a `#!/bin/sh`
+    #       wrapper this tree writes ("the npm beside this node does not run
+    #       here; exec node .../npm-cli.js"). Handing that to node is asking
+    #       node to parse a shell script:
+    #         $ node $SH_EXEC_BIN/npm --version
+    #         /workspace/.sandhome/exec/bin/npm:2
+    #         # written by sandhome: the npm beside this node does not run here
+    #         ^
+    #       so the probe answered no on a machine where `npm --version` printed
+    #       12.2.0 in the same shell. That is the #157 regression reproduced in
+    #       the very check meant to catch it.
+    # The gate is therefore: take a candidate, and KEEP it only if the file it
+    # names is real javascript. sh_is_script is already the tree's reader for
+    # this (lib/common.sh), and a .js file that is not a script is exactly the
+    # "still JavaScript" shape #157 wants, so the check accepts either and
+    # rejects a `#!` that is not node's.
     case " ${sh_doc_wanted_all:-} " in
         *" node "*)
             sh_doc_npm_js=no
+            sh_doc_node_probe=''
             sh_doc_node_view=$(sh_toolchain_view node 2>/dev/null)
-            if [ -n "$sh_doc_node_view" ] && [ -x "$sh_doc_node_view/bin/npm" ] && \
-               node "$sh_doc_node_view/bin/npm" --version >/dev/null 2>&1; then
+            if [ -n "$sh_doc_node_view" ] && [ -e "$sh_doc_node_view/bin/npm" ]; then
+                # `node <path>/npm` is the documented invocation, so the probe
+                # is that invocation rather than the .js underneath it.
+                sh_doc_node_probe=$sh_doc_node_view/bin/npm
+            fi
+            if [ -z "$sh_doc_node_probe" ]; then
+                # The adopted case, and also the case where the view is absent
+                # for any other reason. Find npm the way any shell finds it,
+                # then walk from it to the javascript it is built from. A
+                # wrapper this tree wrote NAMES npm-cli.js, so it is read for
+                # that path rather than guessed at; the directory beside npm is
+                # tried next, which is where mise, nvm, a distro package and
+                # npm's own installer all put it.
+                sh_doc_node_npm=$(sh_path_where npm 2>/dev/null)
+                if [ -n "${SH_EXEC_BIN:-}" ] && [ -e "$SH_EXEC_BIN/npm" ]; then
+                    sh_doc_node_npm=$SH_EXEC_BIN/npm
+                fi
+                if [ -n "$sh_doc_node_npm" ]; then
+                    # The wrapper names its own payload, so read it rather than
+                    # assume a layout. This is a text read of a file this tree
+                    # wrote, and it is what makes the adopted case work at all:
+                    # the wrapper's only content IS the path.
+                    # STOP: THE SHEBANG IS NOT A REASON TO STOP LOOKING. The
+                    # first version guarded the search behind
+                    #   case "$first" in '#!'*) : ;; *) search ;; esac
+                    # which is exactly backwards for this file: the wrapper IS a
+                    # `#!/bin/sh` script, so the guard skipped the search on the
+                    # one file that needs it. Measured on this tree, with the
+                    # probe empty and the wrapper sitting right there naming the
+                    # answer:
+                    #   $ sandhome doctor            ->  FAIL node_npm_js=no (wanted yes)
+                    #   $ sandhome exec npm --version ->  12.2.0
+                    # The guard reads as "a script is already the thing we want",
+                    # which is right for the view case and wrong here, where the
+                    # script is a POINTER. Read every line and take the path.
+                    sh_doc_node_named=''
+                    while IFS= read -r sh_doc_node_l 2>/dev/null; do
+                        case "$sh_doc_node_l" in
+                            *npm-cli.js*)
+                                for sh_doc_node_w in $sh_doc_node_l; do
+                                    case "$sh_doc_node_w" in
+                                        /*npm-cli.js) sh_doc_node_named=$sh_doc_node_w; break ;;
+                                    esac
+                                done
+                                ;;
+                        esac
+                        [ -n "$sh_doc_node_named" ] && break
+                    done < "$sh_doc_node_npm"
+                    if [ -n "$sh_doc_node_named" ] && [ -r "$sh_doc_node_named" ]; then
+                        sh_doc_node_probe=$sh_doc_node_named
+                    else
+                        sh_doc_node_npm_r=''
+                        if sh_have readlink; then
+                            sh_doc_node_npm_r=$(readlink -f "$sh_doc_node_npm" 2>/dev/null) || sh_doc_node_npm_r=''
+                        fi
+                        for sh_doc_node_d in \
+                            "${sh_doc_node_npm%/*}" "${sh_doc_node_npm_r%/*}"; do
+                            [ -n "$sh_doc_node_d" ] || continue
+                            for sh_doc_node_c in \
+                                "$sh_doc_node_d/npm/lib/node_modules/npm" \
+                                "$sh_doc_node_d/npm" \
+                                "$sh_doc_node_d/lib/node_modules/npm" \
+                                "$sh_doc_node_d"; do
+                                [ -r "$sh_doc_node_c/bin/npm-cli.js" ] || continue
+                                sh_doc_node_probe=$sh_doc_node_c/bin/npm-cli.js
+                                break
+                            done
+                            [ -n "$sh_doc_node_probe" ] && break
+                        done
+                    fi
+                fi
+            fi
+            # THE LAST GATE, AND IT IS THE ONE THAT MATTERS: whatever was found
+            # must be javascript node can read. A `#!/bin/sh` wrapper is the one
+            # shape that must never be handed to node, and this check is the
+            # cheap place to refuse it rather than after a SyntaxError.
+            #
+            # STOP: THE SHEBANG PATTERN IS `'#!'*` AND NOT `'#!'`, OR THIS GATE
+            # IS A NO-OP THAT ALWAYS SAYS YES. A shebang line is `#!/bin/sh`,
+            # so a pattern of exactly `#!` matches nothing and the case falls
+            # through to the keep branch for every file the probe will ever be
+            # offered. Measured, with the pattern as `'#!'`:
+            #   /bin/npm          -> no-match-KEPT   <- the shell wrapper kept
+            #   /bin/npm-cli.js   -> no-match-KEPT
+            # and with `'#!'*`:
+            #   /bin/npm          -> REFUSED
+            #   /bin/npm-cli.js   -> no-shebang-KEPT <- javascript is kept
+            # A gate whose failure mode is "passes everything" is worse than no
+            # gate, because it reads as a check that passed. sh_is_script above
+            # gets this right for the same reason: it matches `'#!'*`.
+            if [ -n "$sh_doc_node_probe" ]; then
+                sh_doc_node_head=''
+                IFS= read -r sh_doc_node_head < "$sh_doc_node_probe" 2>/dev/null || :
+                case "$sh_doc_node_head" in
+                    '#!'*)
+                        case "$sh_doc_node_head" in
+                            *node*) : ;;
+                            *) sh_doc_node_probe='' ;;
+                        esac
+                        ;;
+                esac
+            fi
+            if [ -n "$sh_doc_node_probe" ] && node "$sh_doc_node_probe" --version >/dev/null 2>&1; then
                 sh_doc_npm_js=yes
             fi
             sh_doctor_check node_npm_js "$sh_doc_npm_js" yes ;;

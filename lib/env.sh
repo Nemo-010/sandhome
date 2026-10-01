@@ -209,10 +209,111 @@ sh_env_body() {
     # otherwise each project gets its own dir under the exec root named for the
     # work tree, so two checkouts do not share one target dir. The dir is made
     # here so the first build has a target, matching TMPDIR.
+    # # STOP: THE ID MUST BE THE PROJECT'S, AND THE PROJECT IS CARGO'S NOT THE
+    # SHELL'S. Two keys were wrong here and each was measured.
+    #
+    # The basename is wrong: `${PWD##*/}` gives `dup` for both /w/a/dup and
+    # /w/b/dup, cargo treats one target dir as one project's, and the second
+    # crate's build is "fresh" so the stale binary runs. Reproduced live here on
+    # main with two real crates in sibling `dup` directories:
+    #   A in /workspace/consume/a/dup -> CARGO_TARGET_DIR=.../target-consume, prints PROJECT-A
+    #   B in /workspace/consume/b/dup -> CARGO_TARGET_DIR=.../target-consume, prints PROJECT-A
+    # (issue #167).
+    #
+    # The absolute PATH is also wrong, and fixing only that is what a first cut
+    # did: cargo resolves a project by walking UP to the nearest Cargo.toml, so
+    # building the same crate from `proj/` and from `proj/src/` is one build.
+    # Keyed on $PWD those are two target dirs, which means a full rebuild every
+    # time you cd, and a target directory per subdirectory you ever built from.
+    # Measured on that first cut:
+    #   /workspace/consume/a/dup     -> target-dup-2176453656
+    #   /workspace/consume/a/dup/src -> target-src-3462659862   <- same crate, two dirs
+    # cargo's own answer is the authority and it agrees with the walk:
+    #   $ cargo locate-project --workspace     {"root":"/workspace/consume/a/dup/Cargo.toml"}
+    #
+    # So the id is the nearest Cargo.toml ANCESTOR, which is unique per project
+    # and stable across its subdirectories. A path with no manifest anywhere above
+    # it falls back to $PWD, which is the honest answer there: nothing has claimed
+    # the directory yet.
+    #
+    # The readable name is kept in front of a digest of the absolute path, so a
+    # human can still see which project a target dir belongs to. `cksum` is POSIX
+    # and leads; without it a pure-shell encoding walks the path byte by byte and
+    # escapes the two characters that would otherwise collide (`/` and `%`), which
+    # is injective and needs no tool at all.
     printf 'if [ -z "${CARGO_TARGET_DIR:-}" ]; then\n'
-    printf '  _sh_ctd=${PWD##*/}; [ -n "$_sh_ctd" ] || _sh_ctd=work\n'
+    printf '  _sh_ctd_p=$PWD\n'
+    printf '  _sh_ctd_d=$_sh_ctd_p\n'
+    printf '  while [ -n "$_sh_ctd_d" ] && [ "$_sh_ctd_d" != / ] && [ ! -f "$_sh_ctd_d/Cargo.toml" ]; do\n'
+    printf '    case "$_sh_ctd_d" in */*) _sh_ctd_d=${_sh_ctd_d%%/*} ;; *) _sh_ctd_d=/ ;; esac\n'
+    printf '  done\n'
+    printf '  if [ -f "$_sh_ctd_d/Cargo.toml" ]; then _sh_ctd_p=$_sh_ctd_d; fi\n'
+    printf '  _sh_ctd_w=""\n'
+    printf '  _sh_ctd_t=$_sh_ctd_p\n'
+    printf '  while [ -n "$_sh_ctd_t" ] && [ "$_sh_ctd_t" != / ]; do\n'
+    printf '    [ -f "$_sh_ctd_t/Cargo.toml" ] || { case "$_sh_ctd_t" in */*) _sh_ctd_t=${_sh_ctd_t%%/*} ;; *) _sh_ctd_t=/ ;; esac; continue; }\n'
+    printf '    if command -v grep >/dev/null 2>&1 && grep -q "^\\[workspace\\]" "$_sh_ctd_t/Cargo.toml" 2>/dev/null; then\n'
+    printf '      _sh_ctd_w=$_sh_ctd_t; break\n'
+    printf '    fi\n'
+    printf '    case "$_sh_ctd_t" in */*) _sh_ctd_t=${_sh_ctd_t%%/*} ;; *) _sh_ctd_t=/ ;; esac\n'
+    printf '  done\n'
+    printf '  [ -n "$_sh_ctd_w" ] && _sh_ctd_p=$_sh_ctd_w\n'
+    printf '  _sh_ctd=${_sh_ctd_p##*/}; [ -n "$_sh_ctd" ] || _sh_ctd=work\n'
+    printf '  if command -v cksum >/dev/null 2>&1; then\n'
+    printf '    _sh_ctd_s=$(printf "%%s" "$_sh_ctd_p" | cksum)\n'
+    # STOP: THE DIGEST IS THE FIRST FIELD, AND `${v%% *}` IS HOW YOU TAKE IT.
+    # cksum prints `<crc> <bytes>`, so the split has to be on the space BETWEEN
+    # them. The first version wrote `${_sh_ctd%% *}` and looked right; the bug
+    # was in the SECOND version, which used `${_sh_ctd% }` - `%` removes the
+    # SHORTEST trailing match, and the space here is internal, so nothing was
+    # removed and the id kept both fields with a space in it. Measured on this
+    # tree, with two same-basename crates:
+    #   $ printf '/workspace/proof/a/dup' | cksum   ->  3720797075 22
+    #   ${s% }   ->  "3720797075 22"   <- unchanged, and it contains a space
+    #   ${s%% *} ->  "3720797075"      <- the CRC, which is what separates them
+    # The id with a space in it is then word-split by every later use, so BOTH
+    # crates resolved to the same directory again and `cargo run` in the second
+    # printed the first crate's binary - the exact defect this was written to
+    # fix, still present after the fix. The clause in
+    # tests/regressions-167-174.sh builds a real two-crate tree and runs it, and
+    # it is the only thing that caught this: every clause that only inspected
+    # the string passed.
+    # STOP: THIS IS A printf FORMAT, SO EVERY PERCENT IS DOUBLED TWICE. The
+    # generated text has to contain the shell's `${v%% *}`, and `sh_env_body`
+    # emits every line through printf, where `%%` means "one percent". So a
+    # source of `%%` produces `%` in env.sh, and `% *` strips nothing because
+    # the space is internal and `%` removes a TRAILING match:
+    #   printf 'A%%%% *'  ->  A%% *      <- what the shell needs
+    #   printf 'A%% *'    ->  A% *       <- what it used to emit
+    # With `A% *` in env.sh the id keeps BOTH of cksum's fields joined by a
+    # space, so the id contains a space, every later use word-splits it, and
+    # two same-basename crates resolve to one target dir again:
+    #   $ cksum   ->  3720797075 22
+    #   ${v% }   ->  "3720797075 22"  (unchanged)
+    #   ${v%% *} ->  "3720797075"
+    # Measured live with the wrong form, on two real crates:
+    #   A ctd=target-sandhome-443490593 -> PROJECT-A
+    #   B ctd=target-sandhome-443490593 -> PROJECT-A
+    # which is issue #167 unfixed. This is why the clause set has both a
+    # string clause and a two-real-crates clause: the string clause could not
+    # see this, because the string it compared was already correct.
+    printf '    _sh_ctd="${_sh_ctd%%%% *}-${_sh_ctd_s%%%% *}"\n'
+    printf '  else\n'
+    printf '    _sh_ctd_o=$_sh_ctd; _sh_ctd_r=$_sh_ctd_p\n'
+    printf '    while [ -n "$_sh_ctd_r" ]; do\n'
+    printf '      _sh_ctd_c=${_sh_ctd_r%%%%"${_sh_ctd_r#?}"}\n'
+    printf '      _sh_ctd_r=${_sh_ctd_r#?}\n'
+    printf '      case "$_sh_ctd_c" in\n'
+    printf '        /) _sh_ctd_o="${_sh_ctd_o}%%2f" ;;\n'
+    printf '        %%) _sh_ctd_o="${_sh_ctd_o}%%25" ;;\n'
+    printf '        *) _sh_ctd_o="${_sh_ctd_o}$_sh_ctd_c" ;;\n'
+    printf '      esac\n'
+    printf '    done\n'
+    printf '    _sh_ctd=$_sh_ctd_o\n'
+    printf '  fi\n'
     printf '  CARGO_TARGET_DIR="$SANDHOME_EXEC/target-${_sh_ctd}"\n'
     printf '  export CARGO_TARGET_DIR\n'
+    printf '  unset _sh_ctd_p _sh_ctd_d _sh_ctd_s _sh_ctd_o _sh_ctd_r _sh_ctd_c _sh_ctd_w _sh_ctd_t\n'
     printf '  unset _sh_ctd\n'
     printf 'fi\n'
     printf 'if [ -n "${CARGO_TARGET_DIR:-}" ]; then mkdir -p "$CARGO_TARGET_DIR" 2>/dev/null || true; fi\n'

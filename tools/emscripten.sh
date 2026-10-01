@@ -23,6 +23,38 @@ TC_emscripten_DESC='Emscripten SDK (emcc) for wasm32-unknown-emscripten, via ems
 TC_emscripten_BINS='upstream/emscripten/emcc upstream/emscripten/em++'
 TC_emscripten_EXEC_MB=900
 
+# tc_emscripten_copy_bins -> emcc AND em++ MUST BE REAL COPIES IN THE VIEW, IN
+# EVERY VIEW MODE, INCLUDING LAUNCH (issue #169).
+#
+# Both are `#!/bin/sh` wrappers whose final line is
+#   exec "$PYTHON" -E "$0.py" "$@"
+# so the SDK's own JavaScript next to them is located THROUGH $0. A launch-mode
+# view does not put the script there at all: the helper copies the payload into
+# a memfd and execve's /proc/self/fd/N, so the kernel runs
+#   /bin/sh /proc/self/fd/N
+# and the script's $0 is /proc/self/fd/N. `$0.py` then names /proc/self/fd/N.py,
+# which is not a file that exists, and the measured failure is:
+#   /usr/bin/python3: can't open file '/proc/self/fd/3.py': [Errno 2] No such file or directory
+# `sandhome install emscripten` therefore failed its OWN post-install probe and
+# doctor ended `FAIL toolchain_emscripten=no (wanted yes)` while the SDK itself
+# was complete and fine. The install was refusing to hand over a working SDK.
+#
+# Only emcc and em++ are named, and that is not a guess: they are the only two
+# entries in TC_emscripten_BINS, so they are the only two files exec'd by name.
+# A real copy keeps $0 the view path, so $0.py is the view's link to the home's
+# emcc.py, and python only ever READS that file, which a noexec home allows.
+#
+# NOTE THIS IS NOT THE SAME FIX AS THE GENERAL ONE IN lib/space.sh. That one
+# stops the promote from stamping INTERPRETER SOURCE with a launcher (issue
+# #173), which is a correctness fix for data a reader must open. This is the
+# mirror image: a wrapper that a launcher can run perfectly well but that
+# resolves its own neighbours through $0 needs to be SUMMONED BY ITS OWN PATH.
+# Copying is the only shape that keeps that path. See sh_copy_listed.
+
+tc_emscripten_copy_bins() {
+    printf 'upstream/emscripten/emcc upstream/emscripten/em++'
+}
+
 # tc_emscripten_release -> the SDK release to install. Pinned, not latest: a
 # moving default turns a 640MB fetch into a surprise on every reinstall, and
 # the rust lockfile pins its own wasm-bindgen beside it. Override with
@@ -215,11 +247,33 @@ CARGO_TARGET_WASM32_UNKNOWN_EMSCRIPTEN_LINKER="\${CARGO_TARGET_WASM32_UNKNOWN_EM
 export EMSDK EM_CONFIG CARGO_TARGET_WASM32_UNKNOWN_EMSCRIPTEN_LINKER
 case ":\$PATH:" in
   *":$sh_ee_view/emsdk/upstream/emscripten:"*) ;;
-  *) PATH="$sh_ee_view/emsdk/upstream/emscripten:\$PATH" ;;
+  *) PATH="${PATH:+\$PATH:}$sh_ee_view/emsdk/upstream/emscripten" ;;
 esac
+# STOP: THE SDK'S LLVM BIN DIR IS APPENDED, NOT PREPENDED, AND THE EMPTY-PATH
+# FORM MATTERS (issue #171). This used to PREPEND upstream/bin, which holds
+# clang/clang++ beside wasm-ld and the Binaryen tools, so plain clang resolved to
+# the SDK's bundled LLVM and an installed clang toolchain was shadowed by a
+# version the user never asked for. Measured after a plain 'sandhome install
+# emscripten' on a host that also had the clang toolchain:
+#   command -v clang  -> .../views/emscripten/emsdk/upstream/bin/clang
+#   clang --version   -> clang version 20.0.0git (Emscripten's bundled LLVM)
+#   sandhome toolchains -> clang present  clang version 23.1.2
+#   sandhome report      -> toolchain.clang=clang version 20.0.0git
+# so the report named a version that was not the toolchain and doctor stayed
+# green throughout. Appending keeps the installed clang first, and emcc is
+# unaffected because it finds its LLVM through EM_CONFIG (LLVM_ROOT), not PATH.
+#
+# THE EMPTY-PATH FORM IS THE POINT, AND NOT A COSMETIC ONE. An append written
+# as PATH="$PATH:$dir" on a shell whose PATH is EMPTY produces ":$dir", and an
+# empty PATH element means the CURRENT DIRECTORY on every POSIX shell. Measured:
+#   dash -c 'unset PATH; PATH="$PATH:/x"; case ":$PATH:" in *::*) echo HAZARD;; esac'
+#   HAZARD
+# The prepended form had the same shape in reverse but could not produce a
+# LEADING colon, so the change to append would have introduced this hazard
+# rather than removed one. The guard makes an empty PATH a single entry.
 case ":\$PATH:" in
   *":$sh_ee_view/emsdk/upstream/bin:"*) ;;
-  *) PATH="$sh_ee_view/emsdk/upstream/bin:\$PATH" ;;
+  *) PATH="${PATH:+\$PATH:}$sh_ee_view/emsdk/upstream/bin" ;;
 esac
 export PATH
 EOF

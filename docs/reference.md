@@ -241,6 +241,7 @@ usage: sh bootstrap.sh [options]
 | `SANDHOME_LLVM_TAG` | clang.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_LOW_EXEC_MB` | space.sh sandhome | `unset, and the feature is off until it is set` |
 | `SANDHOME_LOW_EXEC_PCT` | space.sh sandhome | `unset, and the feature is off until it is set` |
+| `SANDHOME_MESON_LIB` | meson.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_MIN_EXEC_MB` | space.sh sandhome | `128` |
 | `SANDHOME_MIRROR_GH_URL` | fetch.sh bootstrap.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_MIRROR_LIB` | env.sh | `unset, and the feature is off until it is set` |

@@ -209,6 +209,55 @@ sh_is_script() {
     return 1
 }
 
+# sh_is_elf FILE -> 0 when FILE begins with the ELF magic. Same shape and the
+# same reader as sh_is_script: the shell builtin, no external tool.
+#
+# STOP: THE ELF TEST IS PURE SHELL, AND `dd | od | tr` IS NOT. The first cut of
+# this reader was
+#   sh_ee_magic=$(dd if="$1" bs=4 count=1 2>/dev/null | od -An -tx1 2>/dev/null | tr -d ' \n')
+# which is the exact form AGENTS.md rule 4 forbids the library from growing, and
+# it FAILS OPEN rather than closed when the tools are absent. Measured on a
+# PATH carrying only sh/dash/cat/ls/mkdir/rm/cp/chmod/printf:
+#   /tmp/elfsrc/binary: not-ELF(no)     <- a real ELF, answered FALSE
+#   tr: not found                        <- printed on every single file
+# so the stamp gate read "not ELF" for every executable and launch mode quietly
+# became copy mode, with no warning anywhere. A gate whose failure mode is
+# "silently disables the feature" is worse than no gate.
+#
+# WHY NOT `read -n 4`: dash rejects it. Measured:
+#   dash: 1: read: Illegal option -n
+# and `read -n` is not POSIX, so the tree cannot use it and still pass
+# tests/syntax.sh's dash -n plus its real dash runs.
+#
+# WHY THIS READS THE FIRST FOUR BYTES AND NOT THE FIRST FOUR CHARACTERS OF A
+# LINE: an ELF has no newline in its header, so `read` returns at EOF and STILL
+# sets the variable (the same fact sh_is_script's comment records). The line it
+# yields therefore starts with the magic, and ${v%"${v#????}"} peels exactly
+# the first four characters off it. Measured on this tree:
+#   4 bytes, no newline            -> ELF
+#   11 bytes, binary, no newline   -> ELF
+#   3 bytes (\177EL)               -> not-ELF
+#   17 bytes (#!/bin/sh + exit 0)  -> not-ELF
+#   0 bytes                        -> not-ELF
+#   5 bytes (\177ELFA)             -> ELF
+#   \377\377\001\003 (Mach-O)      -> not-ELF
+#   MZ.. (PE)                      -> not-ELF
+# under both dash and bash --posix. Mach-O and PE answering not-ELF is not a
+# gap: a launcher is an ELF image, so a non-ELF executable must be copied, and
+# a copy runs on every root.
+#
+# A readable ELF answers in one line read; an empty or unreadable file answers
+# not-ELF and is therefore copied. Copying is the fallback shape for the whole
+# tree, so every direction this function can fail in is the safe one.
+sh_is_elf() {
+    [ -f "$1" ] || return 1
+    [ -r "$1" ] || return 1
+    sh_is_elf_magic=$(printf '\177ELF')
+    sh_is_elf_head=
+    IFS= read -r sh_is_elf_head < "$1" 2>/dev/null || :
+    [ "${sh_is_elf_head%"${sh_is_elf_head#????}"}" = "$sh_is_elf_magic" ]
+}
+
 # sh_adopt_view_skip BIN TARGET -> 0 when an adopted TARGET must NOT be linked
 # into the exec view. The view is prepended to PATH, so a symlink there shadows
 # the copy PATH already has; harmless for an ELF binary, but a wrapper script

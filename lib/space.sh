@@ -841,7 +841,21 @@ sh_view_copy_kb() {
             # helper is not there yet, which over-prices rather than
             # under-prices the gate. A copy-listed executable is priced at
             # its real size: it lands as bytes, so the gate must hold room.
-            if [ "${SH_VIEW_MODE:-copy}" = launch ] && ! sh_copy_listed "$sh_vck_rel"; then
+            #
+            # STOP: AND SO IS EVERY EXECUTABLE THE LAUNCHER CANNOT REPLACE, WHICH
+            # MEANS EVERY NON-ELF ONE. This gate must mirror sh_promote_tree's
+            # branch exactly, because it is what decides whether a root can hold
+            # the view (sh_view_need). It did not, and it under-stated the view by
+            # the whole payload. Measured here on a tree of one 10MB executable
+            # .py plus 30 small ELF programs:
+            #   sh_view_copy_kb, launch mode -> 992 KB
+            # while sh_promote_tree in launch mode COPIED the .py (a launcher
+            # cannot hold it, issue #173) and stamped the rest, so the view it
+            # wrote was about 11200KB. The gate passed a root that then ran out
+            # of space part-way through the walk, which is the one outcome the
+            # gate exists to prevent. Pricing a non-ELF executable at its real
+            # size closes it, and the two functions now agree by construction.
+            if [ "${SH_VIEW_MODE:-copy}" = launch ] && ! sh_copy_listed "$sh_vck_rel" && sh_is_elf_exec "$sh_vck_e"; then
                 sh_vck_k=$(sh_memexec_template_kb 2>/dev/null)
                 case "$sh_vck_k" in
                     ''|*[!0-9]*) sh_vck_k=32 ;;
@@ -849,7 +863,7 @@ sh_view_copy_kb() {
                 sh_vck_total=$((sh_vck_total + sh_vck_k))
                 continue
             fi
-            sh_vck_k=$(du -sk "$sh_vck_e" 2>/dev/null | { read -r sh_vck_kb _ || :; printf '%s' "$sh_vck_kb"; })
+            sh_vck_k=$(sh_size_kb "$sh_vck_e" 2>/dev/null)
             case "$sh_vck_k" in
                 ''|*[!0-9]*) continue ;;
             esac
@@ -942,7 +956,16 @@ sh_view_current() {
                             if cmp -s "$sh_vc_help" "$sh_vc_dst/$sh_vc_rel" 2>/dev/null; then
                                 :
                             elif cmp -s "$sh_vc_e" "$sh_vc_dst/$sh_vc_rel" 2>/dev/null; then
-                                sh_vc_ok=1; break
+                                # A real copy of an ELF here is a copy-mode
+                                # leftover and stales the view (issue #113). A
+                                # real copy of a NON-ELF is the current launch
+                                # shape, because a launcher cannot hold one and
+                                # sh_promote_tree copies it (issue #173). Reading
+                                # it as stale instead would rebuild every view on
+                                # every run, forever, for a difference that does
+                                # not exist. So this branch now asks the same
+                                # question sh_promote_tree asks.
+                                if sh_is_elf_exec "$sh_vc_e"; then sh_vc_ok=1; break; fi
                             elif [ ! "$sh_vc_dst/$sh_vc_rel" -nt "$sh_vc_help" ]; then
                                 sh_vc_ok=1; break
                             fi
@@ -1007,6 +1030,59 @@ sh_is_exec_file() {
         *.so|*.so.*|*.dylib|*.dll|*.a|*.rlib|*.rmeta|*.o) return 1 ;;
     esac
     return 0
+}
+
+# sh_size_kb FILE -> the KB a COPY of FILE will occupy on the exec root, or
+# nothing when the size cannot be read. Three readers, in order, because the
+# difference between them is not academic on a compressed root.
+#
+# STOP: `du` REPORTS BLOCKS AND A COPY PAYS APPARENT BYTES. Measured here on the
+# zfs root this tree runs on, a 10MB file of repeated digits:
+#   du -sk                                ->   341 KB
+#   du -sk --apparent-size                -> 10250 KB
+#   the copy sh_promote_tree then writes  -> 10250 KB
+# so the old reader under-priced a file this gate exists to protect by a factor
+# of thirty, and the gate passed roots that ran out of space part-way through the
+# walk. `wc -c` is the apparent size, is POSIX, and is already the reader this
+# tree uses elsewhere (sh_file_bytes), so it leads. `du -sk` stays as the
+# fallback for a host without wc, and over-stating is the safe direction there:
+# it refuses a root it could have used, which the operator can widen with
+# --exec, while under-stating writes to a root that is already full.
+sh_size_kb() {
+    sh_sk_f=$1
+    [ -f "$sh_sk_f" ] || return 1
+    sh_sk_b=$(sh_file_bytes "$sh_sk_f" 2>/dev/null)
+    case "$sh_sk_b" in
+        ''|*[!0-9]*) ;;
+        *) printf '%s' "$((sh_sk_b / 1024))"; return 0 ;;
+    esac
+    if sh_have du; then
+        sh_sk_k=$(du -sk "$sh_sk_f" 2>/dev/null | { read -r sh_sk_kb _ || :; printf '%s' "$sh_sk_kb"; })
+        case "$sh_sk_k" in
+            ''|*[!0-9]*) return 1 ;;
+            *) printf '%s' "$sh_sk_k"; return 0 ;;
+        esac
+    fi
+    return 1
+}
+
+# sh_is_elf_exec PATH -> 0 when PATH is a real ELF program, the only kind of
+# file a memexec launcher may legally replace. A launcher copy is a BINARY, so
+# replacing a script with one makes it unreadable to the interpreter that would
+# have read it (issue #173).
+#
+# THE READER IS PURE SHELL, AND `dd | od | tr` IS NOT. That form is what AGENTS.md
+# rule 4 forbids the library from growing, and it fails OPEN when the tools are
+# absent: measured on a PATH carrying only sh/dash/cat/ls/mkdir/rm/cp/chmod/
+# printf, `dd ... | od ... | tr -d ' \n'` printed "tr: not found" per file and
+# answered "not ELF" for a real ELF binary, so this gate read false for every
+# executable and launch mode degraded into copy mode with nothing said. The
+# shell-only reader in lib/common.sh (sh_is_elf) was measured on the same
+# stripped PATH and answers correctly for ELF, shebang, Mach-O, PE, empty and
+# sub-four-byte files under both dash and bash --posix.
+sh_is_elf_exec() {
+    [ -x "$1" ] || return 1
+    sh_is_elf "$1"
 }
 
 # sh_promote_tree SRC DEST -> mirror SRC into DEST. Directories are recreated,
@@ -1132,13 +1208,25 @@ sh_promote_tree() {
                 sh_pt_rel=${sh_pt_e#"$sh_pt_src"/}
                 # Launch mode: a launcher copy maps itself back to this file
                 # at runtime and runs it from memory, so the exec root holds
-                # kilobytes per entry. A copy-listed executable lands as real
-                # bytes instead: it is spawned by path and locates its
-                # siblings exe-relative, which a memfd image cannot do (see
+                # kilobytes per entry. ONLY AN ELF MAY BE STAMPED: the launcher
+                # is itself a binary, so stamping a script replaces readable
+                # interpreter source with 20KB of ELF and the interpreter then
+                # dies on it. Measured on this tree after a `sandhome repair
+                # python` in launch mode: CPython ships ~14 stdlib modules with
+                # the executable bit set (platform.py among them), every one of
+                # them was a launcher copy, and `import platform` died with
+                # "source code string cannot contain null bytes" (issue #173).
+                # It was worse than a crash, because a stamped .py is byte-
+                # identical to the helper, so sh_view_current read the broken
+                # view as CURRENT and repair never fixed it again. A script now
+                # takes the copy branch below, which is both readable and
+                # runnable. A copy-listed executable lands as real bytes for the
+                # other reason: it is spawned by path and locates its siblings
+                # exe-relative, which a memfd image cannot do (see
                 # sh_copy_listed). A stamp that fails falls back to the copy
                 # below, which is the old behavior and always works where
                 # the view itself is writable.
-                if [ "${SH_VIEW_MODE:-copy}" = launch ] && ! sh_copy_listed "$sh_pt_rel" && sh_memexec_stamp "$sh_pt_e" "$sh_pt_d/$sh_pt_b"; then
+                if [ "${SH_VIEW_MODE:-copy}" = launch ] && ! sh_copy_listed "$sh_pt_rel" && sh_is_elf_exec "$sh_pt_e" && sh_memexec_stamp "$sh_pt_e" "$sh_pt_d/$sh_pt_b"; then
                     :
                 else
                     # The destination is removed first: it may be a symlink
@@ -1967,6 +2055,52 @@ sh_free_kb() {
 # NOT assumed: a report that guesses a size is worse than one that prints
 # nothing beside it, so this answers the empty string and the caller says
 # "size unavailable" rather than a number.
+# sh_dir_apparent_kb DIR -> the KB DIR's contents would occupy if copied, or
+# nothing when the size cannot be read. This is the same ruler as
+# sh_size_kb/sh_view_copy_kb, and it exists because the two are otherwise not
+# comparable: sh_dir_size reports allocated blocks, and on a root that
+# compresses or deduplicates those are far smaller than the bytes a copy writes.
+# Measured here on zfs, seven copies of /bin/sh:
+#   sh_dir_size      ->    4 KB
+#   apparent         ->  888 KB
+# so a gate that prices copies correctly looks wrong beside a block count. It
+# walks the same way sh_view_copy_kb does (a queue, not recursion, rule 5) and
+# counts every regular file, which is what "if this tree were copied" means.
+sh_dir_apparent_kb() {
+    sh_da_src=$1
+    if [ ! -d "$sh_da_src" ]; then
+        printf ''
+        return 0
+    fi
+    sh_da_total=0
+    sh_da_queue=$(sh_tmp_file "${SH_HOME_TMP:-${TMPDIR:-/tmp}}" dirapparent)
+    printf '%s\n' "$sh_da_src" > "$sh_da_queue" 2>/dev/null || {
+        printf ''
+        return 0
+    }
+    while IFS= read -r sh_da_d; do
+        [ -n "$sh_da_d" ] || continue
+        for sh_da_e in "$sh_da_d"/* "$sh_da_d"/.[!.]* "$sh_da_d"/..?*; do
+            [ -e "$sh_da_e" ] || [ -L "$sh_da_e" ] || continue
+            if [ -d "$sh_da_e" ] && [ ! -L "$sh_da_e" ]; then
+                printf '%s\n' "$sh_da_e" >> "$sh_da_queue"
+                continue
+            fi
+            # A symlink costs its own target string, not the target's bytes: the
+            # view writes links, so counting the target here would overstate
+            # exactly what this function exists to measure.
+            [ -L "$sh_da_e" ] && continue
+            sh_da_k=$(sh_size_kb "$sh_da_e" 2>/dev/null)
+            case "$sh_da_k" in
+                ''|*[!0-9]*) continue ;;
+            esac
+            sh_da_total=$((sh_da_total + sh_da_k))
+        done
+    done < "$sh_da_queue"
+    rm -f "$sh_da_queue" 2>/dev/null
+    printf '%s' "$sh_da_total"
+}
+
 sh_dir_size() {
     if sh_have du; then
         sh_ds_out=$(du -sk "$1" 2>/dev/null | { read -r sh_ds_k _ || :; printf '%s' "$sh_ds_k"; })

@@ -187,6 +187,202 @@ sh_toolchain_rust_proxies() {
     return 0
 }
 
+# sh_toolchain_rust_target_wrapper EXEC_BIN REAL_CARGO -> put a `cargo` on the
+# exec bin that resolves CARGO_TARGET_DIR for the directory it is run in.
+#
+# THE RULE IT ENFORCES, IN ORDER:
+#   1. a caller who set CARGO_TARGET_DIR keeps it, always. env.sh only ever
+#      GUARDS the variable for the same reason, and a wrapper that overrode it
+#      would break every build script that points cargo somewhere on purpose;
+#   2. otherwise the id is the nearest Cargo.toml ancestor of $PWD, which is
+#      cargo's own rule for what a project is (`cargo locate-project` answers
+#      the same path), plus a digest so two projects with the same basename do
+#      not share a directory;
+#   3. and it is re-derived on EVERY invocation, which is the part the static
+#      fragment could not do.
+#
+# It is written next to the real cargo rather than in its place, so the real
+# binary keeps its own path: it is reached through the view link
+# <view>/cargo/bin/cargo, which is a link to the toolchain binary.
+#
+# The walker is a loop, not recursion (rule 5), and reads no tool beyond `cksum`
+# with a pure-shell fallback, because this script runs on a machine that may not
+# have installed any.
+sh_toolchain_rust_target_wrapper() {
+    sh_rw2_bin=$1
+    sh_rw2_real=$2
+    [ -n "$sh_rw2_bin" ] || return 0
+    [ -x "$sh_rw2_real" ] || return 0
+    mkdir -p "$sh_rw2_bin" 2>/dev/null || return 0
+    sh_rw2_out=$sh_rw2_bin/cargo
+    sh_rw2_real_q=$(sh_sq_quote "$sh_rw2_real")
+    {
+        printf '#!/bin/sh\n'
+        printf '# written by sandhome: resolve CARGO_TARGET_DIR for the directory\n'
+        printf '# cargo is run in, then run the real cargo (issue #167).\n'
+        printf 'if [ -z "${CARGO_TARGET_DIR:-}" ] && [ -n "${SANDHOME_EXEC:-}" ]; then\n'
+        printf '  _sh_cw_d=$PWD\n'
+        printf '  while [ -n "$_sh_cw_d" ] && [ "$_sh_cw_d" != / ] && [ ! -f "$_sh_cw_d/Cargo.toml" ]; do\n'
+        printf '    case "$_sh_cw_d" in */*) _sh_cw_d=${_sh_cw_d%%/*} ;; *) _sh_cw_d=/ ;; esac\n'
+        printf '  done\n'
+        printf '  [ -f "$_sh_cw_d/Cargo.toml" ] || _sh_cw_d=$PWD\n'
+        printf '  _sh_cw_w=""\n'
+        printf '  _sh_cw_t=$_sh_cw_d\n'
+        printf '  while [ -n "$_sh_cw_t" ] && [ "$_sh_cw_t" != / ]; do\n'
+        printf '    [ -f "$_sh_cw_t/Cargo.toml" ] || { case "$_sh_cw_t" in */*) _sh_cw_t=${_sh_cw_t%%/*} ;; *) _sh_cw_t=/ ;; esac; continue; }\n'
+        printf '    if command -v grep >/dev/null 2>&1 && grep -q "^\\\\[workspace\\\\]" "$_sh_cw_t/Cargo.toml" 2>/dev/null; then\n'
+        printf '      _sh_cw_w=$_sh_cw_t; break\n'
+        printf '    fi\n'
+        printf '    case "$_sh_cw_t" in */*) _sh_cw_t=${_sh_cw_t%%/*} ;; *) _sh_cw_t=/ ;; esac\n'
+        printf '  done\n'
+        printf '  [ -n "$_sh_cw_w" ] && _sh_cw_d=$_sh_cw_w\n'
+        printf '  _sh_cw_b=${_sh_cw_d##*/}; [ -n "$_sh_cw_b" ] || _sh_cw_b=work\n'
+        printf '  if command -v cksum >/dev/null 2>&1; then\n'
+        printf '    _sh_cw_s=$(printf "%%s" "$_sh_cw_d" | cksum)\n'
+        printf '    _sh_cw_b="${_sh_cw_b}-${_sh_cw_s%%%% *}"\n'
+        printf '  else\n'
+        printf '    _sh_cw_o=$_sh_cw_b; _sh_cw_r=$_sh_cw_d\n'
+        printf '    while [ -n "$_sh_cw_r" ]; do\n'
+        printf '      _sh_cw_c=${_sh_cw_r%%%%"${_sh_cw_r#?}"}\n'
+        printf '      _sh_cw_r=${_sh_cw_r#?}\n'
+        printf '      case "$_sh_cw_c" in\n'
+        printf '        /) _sh_cw_o="${_sh_cw_o}%%2f" ;;\n'
+        printf '        %%) _sh_cw_o="${_sh_cw_o}%%25" ;;\n'
+        printf '        *) _sh_cw_o="${_sh_cw_o}$_sh_cw_c" ;;\n'
+        printf '      esac\n'
+        printf '    done\n'
+        printf '    _sh_cw_b=$_sh_cw_o\n'
+        printf '  fi\n'
+        printf '  CARGO_TARGET_DIR="$SANDHOME_EXEC/target-${_sh_cw_b}"\n'
+        printf '  export CARGO_TARGET_DIR\n'
+        printf '  unset _sh_cw_d _sh_cw_b _sh_cw_s _sh_cw_o _sh_cw_r _sh_cw_c _sh_cw_w _sh_cw_t\n'
+        printf 'fi\n'
+        printf 'exec %s "$@"\n' "$sh_rw2_real_q"
+    } > "$sh_rw2_out" 2>/dev/null || return 0
+    chmod 0755 "$sh_rw2_out" 2>/dev/null || true
+    [ -x "$sh_rw2_out" ] || { rm -f "$sh_rw2_out" 2>/dev/null; return 0; }
+    return 0
+}
+
+# sh_rust_target_resolver -> print the fragment that resolves
+# CARGO_TARGET_DIR for the directory the shell is in when cargo runs.
+#
+# WHY A FRAGMENT CANNOT DO IT AND THIS STILL CAN: the static part of env.sh sets
+# CARGO_TARGET_DIR once, at shell start, from the $PWD at that moment. A login
+# shell sources env.sh and the consumer cds afterwards, so the variable names
+# whichever directory the shell started in. Measured on a real login shell:
+#   bash -lc 'cd .../a/dup && cargo run -q'  ->  PROJECT-A
+#   bash -lc 'cd .../b/dup && cargo run -q'  ->  PROJECT-A
+# both at ctd=target-workspace-306203429, one target dir for two crates, so the
+# second was "fresh" and ran the first's binary (issue #167).
+#
+# A trap or a prompt command could re-run code on cd, and both are ruled out:
+# AGENTS.md rule 6 forbids a prompt and an alias in this profile, and neither
+# exists in POSIX sh for every consumer that sources env.sh. So the correction
+# is made where the variable is USED rather than where it is set, and it is
+# written as a FUNCTION the consumer calls, not as a hook that fires by itself.
+# That keeps the shell's start-up free of anything that can fail, which is what
+# rule 6 is protecting.
+#
+# THE FUNCTION IS OPT-IN AND SAFE TO CALL ON EVERY BUILD. It yields to a caller
+# who set CARGO_TARGET_DIR themselves, and it is the same walk and digest
+# sh_env_body uses, so the two cannot disagree about what a project is.
+sh_rust_target_resolver() {
+    cat <<'RESOLVEREOF'
+# sandhome: re-derive CARGO_TARGET_DIR for the current project. Provided as a
+# function, not run automatically: nothing here fires at shell start (rule 6).
+# Call it after a cd into a project, or from a build script:
+#   . /path/to/env.d/rust.sh   # already done by env.sh
+#   sandhome_cargo_target      # then cargo build
+sandhome_cargo_target() {
+    [ -n "${CARGO_TARGET_DIR:-}" ] && return 0
+    [ -n "${SANDHOME_EXEC:-}" ] || return 0
+    _sh_ctr_d=$PWD
+    _sh_ctr_r=$PWD
+    while [ -n "$_sh_ctr_d" ] && [ "$_sh_ctr_d" != / ] && [ ! -f "$_sh_ctr_d/Cargo.toml" ]; do
+        case "$_sh_ctr_d" in */*) _sh_ctr_d=${_sh_ctr_d%/*} ;; *) _sh_ctr_d=/ ;; esac
+    done
+    [ -f "$_sh_ctr_d/Cargo.toml" ] || _sh_ctr_d=$PWD
+    # STOP: KEEP WALKING UP PAST A MEMBER MANIFEST TO THE WORKSPACE ROOT, OR A
+    # WORKSPACE BUILDS ITSELF SEVERAL TIMES. A member's Cargo.toml is found
+    # first, so stopping there named the member the project, while cargo builds
+    # every member into the WORKSPACE root's target directory. Measured here on a
+    # two-crate workspace:
+    #   bash -lc 'cd ws && sandhome_cargo_target'          ->  target-ws-2829255314
+    #   bash -lc 'cd ws/crates/one && sandhome_cargo_target' ->  target-one-514637701
+    # two target dirs for one build, so building from the root and then from a
+    # member rebuilt every crate twice. cargo's own answer is the authority and
+    # it names the workspace root:
+    #   $ cargo locate-project --workspace
+    #   {"root":"/workspace/proof2/ws/Cargo.toml"}
+    # A manifest that declares [workspace] is the root: keep walking while the
+    # one found does not, and stop at the first that does. A single crate's
+    # manifest has no [workspace] section, so the walk stops at it exactly as
+    # before, and a member reached from outside its own manifest still finds the
+    # root on the way up.
+    _sh_ctr_w=''
+    _sh_ctr_t=$_sh_ctr_d
+    # STOP: A DIRECTORY WITHOUT A MANIFEST IS SKIPPED, NOT A STOPPING POINT.
+    # `break` here ended the walk one level too early: from
+    # ws/crates/one, the member manifest has no [workspace], the walk moved to
+    # ws/crates, that directory has no Cargo.toml of its own, and `break` left
+    # the loop before it ever reached ws/Cargo.toml - which IS the workspace
+    # root. Measured with the trace on:
+    #   + '[' -f /workspace/proof2/ws/crates/one/Cargo.toml ']'
+    #   + grep -q '^\[workspace\]' .../one/Cargo.toml      -> no match
+    #   + _sh_ctr_t=/workspace/proof2/ws/crates
+    #   + '[' -f /workspace/proof2/ws/crates/Cargo.toml ']'  -> false, so break
+    #   (never reached ws, so ctd stayed target-one-514637701)
+    # A project tree has directories with no manifest between the member and
+    # the root all the time, and cargo walks straight through them. Only the
+    # filesystem root ends the search.
+    while [ -n "$_sh_ctr_t" ] && [ "$_sh_ctr_t" != / ]; do
+        [ -f "$_sh_ctr_t/Cargo.toml" ] || { case "$_sh_ctr_t" in */*) _sh_ctr_t=${_sh_ctr_t%/*} ;; *) _sh_ctr_t=/ ;; esac; continue; }
+        # STOP: THE PATTERN IS `^\[workspace\]` AND NOT `[workspace]`, WHICH IS
+        # A CHARACTER CLASS. `[workspace]` matches any ONE of the letters
+        # w,o,r,k,s,p,a,c,e between brackets, so it matches `[package]` - every
+        # manifest in the tree - and the walk stopped at the nearest one, which
+        # is the member, which is the case the walk exists to get past.
+        # Measured here:
+        #   $ grep -q '[workspace]' ws/crates/one/Cargo.toml   ->  rc=0 (wrong)
+        #   $ grep -q '^[workspace]' ws/crates/one/Cargo.toml ->  rc=1 (right)
+        #   $ grep -q '^[workspace]' ws/Cargo.toml            ->  rc=0 (right)
+        # The backslash is what makes the brackets literal; the anchor is what
+        # makes it a section header rather than a mention of the word.
+        if grep -q '^\[workspace\]' "$_sh_ctr_t/Cargo.toml" 2>/dev/null; then
+            _sh_ctr_w=$_sh_ctr_t
+            break
+        fi
+        case "$_sh_ctr_t" in */*) _sh_ctr_t=${_sh_ctr_t%/*} ;; *) _sh_ctr_t=/ ;; esac
+    done
+    [ -n "$_sh_ctr_w" ] && _sh_ctr_d=$_sh_ctr_w
+    _sh_ctr_b=${_sh_ctr_d##*/}
+    [ -n "$_sh_ctr_b" ] || _sh_ctr_b=work
+    if command -v cksum >/dev/null 2>&1; then
+        _sh_ctr_s=$(printf "%s" "$_sh_ctr_d" | cksum)
+        _sh_ctr_b="${_sh_ctr_b}-${_sh_ctr_s%% *}"
+    else
+        _sh_ctr_o=$_sh_ctr_b
+        _sh_ctr_r=$_sh_ctr_d
+        while [ -n "$_sh_ctr_r" ]; do
+            _sh_ctr_c=${_sh_ctr_r%"${_sh_ctr_r#?}"}
+            _sh_ctr_r=${_sh_ctr_r#?}
+            case "$_sh_ctr_c" in
+                /) _sh_ctr_o="${_sh_ctr_o}%2f" ;;
+                %) _sh_ctr_o="${_sh_ctr_o}%25" ;;
+                *) _sh_ctr_o="${_sh_ctr_o}$_sh_ctr_c" ;;
+            esac
+        done
+        _sh_ctr_b=$_sh_ctr_o
+    fi
+    CARGO_TARGET_DIR="$SANDHOME_EXEC/target-${_sh_ctr_b}"
+    export CARGO_TARGET_DIR
+    unset _sh_ctr_d _sh_ctr_b _sh_ctr_s _sh_ctr_o _sh_ctr_r _sh_ctr_c _sh_ctr_w _sh_ctr_t
+    return 0
+}
+RESOLVEREOF
+}
+
 tc_rust_install() {
     : "${SH_RUST_TARGETS:=${SANDHOME_RUST_TARGETS:-}}"
     sh_ri_root=$(sh_toolchain_root rust)
@@ -709,6 +905,7 @@ case ":\$PATH:" in
   *) PATH="$sh_re_dir:\$PATH" ;;
 esac
 export PATH
+$(sh_rust_target_resolver)
 EOF
         # # STOP: A BORROWED rustup IS USUALLY A SHIM, AND A SHIM NEEDS A
         # RUSTUP_HOME THAT HAS A DEFAULT TOOLCHAIN. A host that installs rust
@@ -895,6 +1092,27 @@ SHIMEOF
             mkdir -p "$SH_EXEC_BIN" 2>/dev/null || true
             ln -sfn "$sh_re_view/cargo/bin/$sh_re_p" "$SH_EXEC_BIN/$sh_re_p" 2>/dev/null || true
         done
+        # STOP: cargo GETS A WRAPPER ON THE EXEC BIN, NOT A LINK, AND THIS IS
+        # THE WHOLE OF THE REMAINING #167 DEFECT.
+        #
+        # env.sh sets CARGO_TARGET_DIR once, when the shell starts, from the
+        # $PWD at that moment. A login shell sources env.sh and THEN the
+        # consumer cds into their project, so the variable names whichever
+        # directory the shell happened to start in. Measured here, on main and
+        # on this branch alike, through a real login shell:
+        #   bash -lc 'cd /workspace/proof/a/dup && cargo run -q'  ->  PROJECT-A
+        #   bash -lc 'cd /workspace/proof/b/dup && cargo run -q'  ->  PROJECT-A
+        # with both reporting ctd=target-workspace-306203429: one target dir for
+        # two crates, so the second is "fresh" and runs the first's binary.
+        #
+        # It cannot be fixed in the fragment. POSIX sh has no way to re-run code
+        # on cd without a trap or a prompt command, and AGENTS.md rule 6 forbids
+        # both in this profile ("defines no alias and no prompt"). A shell hook
+        # would also break every consumer that is not interactive. So the
+        # resolution moves to the one place that runs per COMMAND: the wrapper
+        # below recomputes the id from the directory cargo is actually run in,
+        # and only when the caller has not set the variable themselves.
+        sh_toolchain_rust_target_wrapper "$SH_EXEC_BIN" "$sh_re_view/cargo/bin/cargo"
     fi
     # Requested targets are owed here too, against this tree's own rustup
     # with its home scoped: probe-green skips tc_rust_install on the managed
@@ -976,6 +1194,7 @@ case ":\$PATH:" in
   *) PATH="$sh_re_bin:\$PATH" ;;
 esac
 export PATH
+$(sh_rust_target_resolver)
 EOF
     tc_rust_ld_fragment "$(sh_env_fragment rust)" "$sh_re_ld"
     if [ "${SH_HOME_EXEC:-unknown}" != yes ]; then
@@ -1006,6 +1225,26 @@ EOF
     if sh_have zig 2>/dev/null || [ -x "$SH_EXEC_BIN/zig" ]; then
         for sh_re_t in $(sh_split_on ',' "${SH_RUST_TARGETS:-}"); do
             [ -n "$sh_re_t" ] || continue
+            # STOP: EMSCRIPTEN IS NOT A ZIG TARGET, SO IT GETS NO ZIG WRAPPER
+            # (issue #170). The paragraph above already says emcc is this
+            # target's linker and that the fix is the variable, but the loop
+            # wrote a wrapper for EVERY requested target and exported the
+            # variable unconditionally, so the comment and the code disagreed.
+            # Because env.d/rust.sh loads after env.d/emscripten.sh, the zig
+            # wrapper won, and rustc handed emcc's -s settings to clang (zig
+            # cc), which does not know them:
+            #   error: linking with `.../rust-link-wasm32-unknown-emscripten` failed
+            #   = note: error: Unknown Clang option: '-sABORTING_MALLOC=0'
+            # Forcing the linker back proves the rest of the path is sound:
+            #   CARGO_TARGET_WASM32_UNKNOWN_EMSCRIPTEN_LINKER=emcc cargo build --target wasm32-unknown-emscripten
+            #     Finished dev profile, and node runs the output.
+            # So the exclusion is by target name, and it covers wasm64 as well
+            # as wasm32 because both are emscripten's linker and neither is
+            # clang's. Leaving the emscripten fragment's emcc in place is the
+            # fix; there is no wrapper here that could replace it.
+            case "$sh_re_t" in
+                *emscripten*) continue ;;
+            esac
             sh_re_wrap="$SH_EXEC_BIN/rust-link-$sh_re_t"
             # # STOP: THE WRAPPER REWRITES THE TRIPLE AND DROPS RUSTC'S OWN
             # LINKER FLAGS. The previous one-line wrapper was

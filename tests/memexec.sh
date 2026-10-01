@@ -116,12 +116,61 @@ if [ -x "$work/exec/bin/sandhome-memexec" ] && sh_memexec_probe >/dev/null 2>&1;
     mkdir -p "$work/home/toolchains/big/bin"
     printf '#!/bin/sh\necho big-ok\n' > "$work/home/toolchains/big/bin/big"
     chmod 0755 "$work/home/toolchains/big/bin/big"
-    # A megabyte of executable payload beside it, so the gate has something
-    # real to price: the point is kilobytes per entry versus megabytes of
-    # payload, and a 30-byte fixture is smaller than the helper itself.
-    # From urandom, not zero: this filesystem compresses zero runs, so a
-    # zero-filled megabyte reports 1KB under du and prices nothing.
-    dd if=/dev/urandom of="$work/home/toolchains/big/bin/blob" bs=1k count=1024 2>/dev/null
+    # A megabyte of ELF payload beside it, so the gate has something real to
+    # price: the point is kilobytes per entry versus megabytes of payload, and
+    # a 30-byte fixture is smaller than the helper itself. From urandom, not
+    # zero: this filesystem compresses zero runs, so a zero-filled megabyte
+    # reports 1KB under du and prices nothing.
+    #
+    # STOP: THE BIG PAYLOAD MUST BE A REAL ELF THAT IS ACTUALLY BIG, OR THE
+    # CLAUSE BELOW PROVES NOTHING - AND A COPY OF THE HELPER IS NOT THAT.
+    # Three fixtures were wrong here in a row, each caught by CI or by the
+    # measurement, and the shape of the mistake is worth recording:
+    #
+    #   1. `dd if=/dev/urandom` with the executable bit set is a NON-ELF
+    #      executable, exactly the kind a launcher may not replace (#173), so
+    #      launch and copy price it identically and the clause failed while
+    #      asserting the OLD behaviour.
+    #   2. Making it `cp` of the real helper fixed that and broke it the other
+    #      way. The helper is ~21KB, so the "megabyte" payload was 21KB and the
+    #      gate priced it at the helper's own apparent size:
+    #        launch mode -> 20 KB      copy mode -> 16 KB
+    #      which is BACKWARDS, because in copy mode a real file is mirrored in
+    #      full while in launch mode it is replaced by the helper. CI caught it:
+    #        FAIL the size gate prices launch mode below copy mode (20 vs 16)
+    #      A fixture that is the same object as the thing it is compared against
+    #      cannot test the comparison.
+    #   3. So the payload is a real ELF that is much larger than the helper,
+    #      built by appending inert bytes to a genuine binary: it keeps the ELF
+    #      magic at offset 0 (which is the only thing sh_is_elf_exec reads) and
+    #      its size is then a fact rather than an accident.
+    #
+    # The megabyte of urandom is kept for the size itself, and the magic is
+    # prepended afterwards so the file is an ELF AND is large.
+    sh_mx_real=no
+    if [ -f "$work/exec/bin/sandhome-memexec" ]; then
+        dd if=/dev/urandom of="$work/home/toolchains/big/bin/blob.body" bs=1k count=1024 2>/dev/null
+        # ELF magic at the front, inert payload behind it. The magic is four
+        # bytes, so the header of a real binary is replaced and the rest is the
+        # megabyte; nothing here is executed, the clause only reads bytes.
+        printf '\177ELF' > "$work/home/toolchains/big/bin/blob" 2>/dev/null
+        if [ -s "$work/home/toolchains/big/bin/blob.body" ]; then
+            cat "$work/home/toolchains/big/bin/blob.body" >> "$work/home/toolchains/big/bin/blob" 2>/dev/null
+        fi
+        rm -f "$work/home/toolchains/big/bin/blob.body" 2>/dev/null
+        chmod 0755 "$work/home/toolchains/big/bin/blob"
+        sh_is_elf_exec "$work/home/toolchains/big/bin/blob" 2>/dev/null && sh_mx_real=yes
+    fi
+    if [ "$sh_mx_real" != yes ]; then
+        # No ELF to hand (a host whose helper did not build): fall back to the
+        # random payload and mark the case, so the clause below can say plainly
+        # that it had nothing to measure rather than assert a comparison it
+        # cannot make.
+        dd if=/dev/urandom of="$work/home/toolchains/big/bin/blob" bs=1k count=1024 2>/dev/null
+        SH_MX_ELF_PAYLOAD=no
+    else
+        SH_MX_ELF_PAYLOAD=yes
+    fi
     chmod 0755 "$work/home/toolchains/big/bin/blob"
     # The filesystem delays block accounting for fresh files (a just-written
     # megabyte reports 1 block until seconds pass), and the gate reads du.
@@ -147,7 +196,10 @@ if [ -x "$work/exec/bin/sandhome-memexec" ] && sh_memexec_probe >/dev/null 2>&1;
         "$work/exec/views/big/bin/big" > "$work/biggot" 2>&1
     t_is "$(cat "$work/biggot" 2>/dev/null)" 'big-ok' \
         'a launch-mode view entry runs its home payload'
-    # The gate prices kilobytes per entry, not the payload size.
+    # The gate prices kilobytes per entry, not the payload size. This only
+    # holds for a payload the launcher can replace, which is why the fixture
+    # above is an ELF: a non-ELF executable is copied in BOTH modes, so both
+    # modes price it identically and the comparison below would be meaningless.
     SH_VIEW_MODE=copy
     export SH_VIEW_MODE
     kb_copy=$(sh_view_copy_kb "$work/home/toolchains/big" 2>/dev/null)
@@ -157,7 +209,9 @@ if [ -x "$work/exec/bin/sandhome-memexec" ] && sh_memexec_probe >/dev/null 2>&1;
     case "$kb_copy:$kb_launch" in
         ''|*:|'') t_ok 1 'the size gate answers in both modes' ;;
         *)
-            if [ "$kb_launch" -lt "$kb_copy" ]; then
+            if [ "${SH_MX_ELF_PAYLOAD:-no}" != yes ]; then
+                t_skip 'the fixture had no ELF payload to price, so the launch-vs-copy comparison was not exercised'
+            elif [ "$kb_launch" -lt "$kb_copy" ]; then
                 t_ok 0 'the size gate prices launch mode below copy mode'
             else
                 t_ok 1 "the size gate prices launch mode below copy mode ($kb_launch vs $kb_copy)"

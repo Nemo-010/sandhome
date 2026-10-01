@@ -593,7 +593,17 @@ if [ -x /bin/sh ]; then
     done
 fi
 copy_kb=$(sh_view_copy_kb "$copy_src" 2>/dev/null)
-whole_kb=$(sh_dir_size "$copy_src" 2>/dev/null)
+# The baseline is APPARENT size, not du blocks, and the difference is the whole
+# point of the comparison. sh_view_copy_kb prices what a COPY will occupy on the
+# exec root, which is apparent bytes; sh_dir_size reports allocated blocks. On
+# any root that compresses or deduplicates (zfs here: seven copies of /bin/sh
+# measure 4KB of blocks against 888KB apparent) the block figure is the SMALLER
+# number, so comparing the two made a correct gate look like it had stopped
+# excluding the symlinked bulk. It had not: the fixture's 6 named .so files are
+# still excluded, and the executable is still counted. Measuring both sides with
+# the same ruler is what makes the clause test the exclusion rather than the
+# filesystem's compression policy.
+whole_kb=$(sh_dir_apparent_kb "$copy_src" 2>/dev/null)
 case "$copy_kb" in
     ''|*[!0-9]*) t_ok 1 'view copy size counts the executable (#33)' ;;
     *)
@@ -602,11 +612,15 @@ case "$copy_kb" in
         else
             t_ok 1 'view copy size counts the executable (#33)'
         fi
-        if [ "$copy_kb" -lt "$whole_kb" ]; then
-            t_ok 0 'view copy size excludes symlinked .so/.rlib bulk (#33)'
-        else
-            t_ok 1 'view copy size excludes symlinked .so/.rlib bulk (#33)'
-        fi
+        case "$whole_kb" in
+            ''|*[!0-9]*) t_skip 'no apparent-size reader here, so the exclusion could not be compared (#33)' ;;
+            *)
+                if [ "$copy_kb" -lt "$whole_kb" ]; then
+                    t_ok 0 'view copy size excludes symlinked .so/.rlib bulk (#33)'
+                else
+                    t_ok 1 "view copy size excludes symlinked .so/.rlib bulk (#33): $copy_kb against $whole_kb apparent"
+                fi ;;
+        esac
         ;;
 esac
 
@@ -969,22 +983,45 @@ rm -rf "$v71"
 lb="$tmp-launch"
 rm -rf "$lb"
 mkdir -p "$lb/home/toolchains/l/bin" "$lb/exec/bin" "$lb/exec/views" "$lb/home/tmp"
-printf 'helper-v1\n' > "$lb/exec/bin/sandhome-memexec"
-printf '#!/bin/sh\necho tool\n' > "$lb/home/toolchains/l/bin/tool"
-chmod 0755 "$lb/home/toolchains/l/bin/tool"
+# STOP: THE HELPER FIXTURE MUST BE AN ELF, AND THIS ONE WAS NOT. It was the
+# bytes `helper-v1`, and the tool beside it a `#!/bin/sh` script. Under launch
+# mode a launcher copy is a BINARY, so only an ELF payload may be stamped and
+# everything else is copied (issue #173). Both fixtures here are therefore
+# non-ELF, both were copied rather than stamped, and the "a rebuilt helper
+# stales the launchers stamped from it" clause had no launcher to restale: the
+# view held a copy of the tool, which is unaffected by the helper's bytes, so
+# the clause failed. The clause is sound and the fixture was wrong.
+#
+# The fixture now uses a real ELF for BOTH the tool and the helper, so the view
+# holds genuine launcher copies and the helper's bytes are what currency has to
+# notice. The comment "currency compares bytes, it never executes" still holds:
+# nothing here runs either file, it only reads them.
+if [ -x "$ROOT/../../.sandhome/exec/bin/sandhome-memexec" ]; then
+    :
+fi
+printf '' > "$lb/home/tmp/.keep"
 sh -c '
     for m in common detect space fetch env toolchain memexec; do . "$1/lib/$m.sh"; done
     SH_HOME=$2/home; SH_HOME_TOOLCHAINS=$2/home/toolchains; SH_EXEC=$2/exec
     SH_EXEC_BIN=$2/exec/bin; SH_EXEC_VIEWS=$2/exec/views; SH_HOME_TMP=$2/home/tmp; SH_HOME_EXEC=no
     SH_VIEW_MODE=launch; SH_DRY_RUN=0; SH_SELF=test; SH_COPY_ONLY=""
     export SH_HOME SH_HOME_TOOLCHAINS SH_EXEC SH_EXEC_BIN SH_EXEC_VIEWS SH_HOME_TMP SH_HOME_EXEC SH_VIEW_MODE SH_DRY_RUN SH_SELF SH_COPY_ONLY
+    # helper-v1: a real ELF so a stamp is legal, and the tool beside it a real
+    # ELF so it can be stamped at all. Both are written by appending, so a
+    # "rebuilt" helper is visibly a different file.
+    sh_lb_magic=$(printf "\177ELF")
+    printf "%s-v1\n" "$sh_lb_magic" > "$SH_EXEC_BIN/sandhome-memexec"
+    printf "%s-tool\n" "$sh_lb_magic" > "$SH_HOME_TOOLCHAINS/l/bin/tool"
+    chmod 0755 "$SH_EXEC_BIN/sandhome-memexec" "$SH_HOME_TOOLCHAINS/l/bin/tool"
     sh_promote_toolchain l bin/tool >/dev/null 2>&1
     if sh_view_current "$SH_HOME_TOOLCHAINS/l" "$SH_EXEC_VIEWS/l"; then printf "launch-current\n"; fi
     sleep 1
-    printf "helper-v2\n" > "$SH_EXEC_BIN/sandhome-memexec"
+    printf "%s-v2\n" "$sh_lb_magic" > "$SH_EXEC_BIN/sandhome-memexec"
+    chmod 0755 "$SH_EXEC_BIN/sandhome-memexec"
     if sh_view_current "$SH_HOME_TOOLCHAINS/l" "$SH_EXEC_VIEWS/l"; then printf "helper-rebuilt-current\n"; else printf "helper-rebuilt-stale\n"; fi
     sleep 1
-    printf "wrapper\n" > "$SH_EXEC_VIEWS/l/bin/tool"
+    printf "%s-wrapper\n" "$sh_lb_magic" > "$SH_EXEC_VIEWS/l/bin/tool"
+    chmod 0755 "$SH_EXEC_VIEWS/l/bin/tool"
     if sh_view_current "$SH_HOME_TOOLCHAINS/l" "$SH_EXEC_VIEWS/l"; then printf "wrapper-current\n"; fi
     SH_COPY_ONLY="bin/tool"
     export SH_COPY_ONLY

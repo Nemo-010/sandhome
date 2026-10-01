@@ -78,7 +78,19 @@ sh_bootstrap_refetch() {
         exit 2
     }
     sh_fr_ok=0
-    for sh_fr_owner in "$SH_REPO_OWNER" talaria0101/sandhome; do
+    # STOP: EACH DISTINCT OWNER IS ATTEMPTED ONCE (issue #168). This iterated
+    # `"$SH_REPO_OWNER" talaria0101/sandhome` and the DEFAULT owner IS
+    # talaria0101/sandhome, so on the default run the whole failure was printed
+    # twice: every "curl could not fetch ..." line and every "[-] no curl, wget
+    # or fetch on PATH" line appeared twice, and a reader counting downloader
+    # attempts could not tell one failing host from two. The default is added
+    # only when it is not already the owner.
+    sh_fr_owners=$SH_REPO_OWNER
+    case " $sh_fr_owners " in
+        *' talaria0101/sandhome '*) ;;
+        *) sh_fr_owners="$sh_fr_owners talaria0101/sandhome" ;;
+    esac
+    for sh_fr_owner in $sh_fr_owners; do
         # STOP: THE TARBALL URL IS /tar.gz/<ref> AND NOT
         # /tar.gz/refs/heads/<ref>. Measured against the real codeload:
         #   codeload.github.com/OWNER/tar.gz/refs/heads/main  -> 404
@@ -152,33 +164,54 @@ sh_fr_which() {
 # fails never tried wget, and the self-fetch died where a fallback would
 # have succeeded. Each failure names its tool; success names its route.
 sh_fr_fetch() {
+    sh_ff_url=$1
+    sh_ff_out=$2
+    sh_ff_tried=0
     if sh_fr_runs curl --version; then
-        if curl -fSL --retry 3 --retry-delay 2 -o "$2" "$1" 2>/dev/null && [ -s "$2" ]; then
+        sh_ff_tried=1
+        if curl -fSL --retry 3 --retry-delay 2 -o "$sh_ff_out" "$sh_ff_url" 2>/dev/null && [ -s "$sh_ff_out" ]; then
             sh_fr_tool=curl
-            printf 'bootstrap: fetched with curl from %s\n' "$1" >&2
+            printf 'bootstrap: fetched with curl from %s\n' "$sh_ff_url" >&2
             return 0
         fi
-        printf 'bootstrap: curl could not fetch %s; trying the next downloader\n' "$1" >&2
+        printf 'bootstrap: curl could not fetch %s; trying the next downloader\n' "$sh_ff_url" >&2
     fi
     if sh_fr_runs wget --help; then
-        if wget -q -O "$2" "$1" 2>/dev/null && [ -s "$2" ]; then
+        sh_ff_tried=1
+        if wget -q -O "$sh_ff_out" "$sh_ff_url" 2>/dev/null && [ -s "$sh_ff_out" ]; then
             sh_fr_tool=wget
-            printf 'bootstrap: fetched with wget from %s\n' "$1" >&2
+            printf 'bootstrap: fetched with wget from %s\n' "$sh_ff_url" >&2
             return 0
         fi
-        printf 'bootstrap: wget could not fetch %s; trying the next downloader\n' "$1" >&2
+        printf 'bootstrap: wget could not fetch %s; trying the next downloader\n' "$sh_ff_url" >&2
     fi
     if command -v fetch >/dev/null 2>&1; then
-        if fetch -q -o "$2" "$1" 2>/dev/null && [ -s "$2" ]; then
+        sh_ff_tried=1
+        if fetch -q -o "$sh_ff_out" "$sh_ff_url" 2>/dev/null && [ -s "$sh_ff_out" ]; then
             sh_fr_tool=fetch
-            printf 'bootstrap: fetched with fetch from %s\n' "$1" >&2
+            printf 'bootstrap: fetched with fetch from %s\n' "$sh_ff_url" >&2
             return 0
         fi
-        printf 'bootstrap: fetch could not fetch %s\n' "$1" >&2
+        printf 'bootstrap: fetch could not fetch %s\n' "$sh_ff_url" >&2
     fi
-    printf 'bootstrap: [-] no curl, wget or fetch on PATH, so nothing can be downloaded\n' >&2
-    printf 'bootstrap:     install one of them first: apt-get install curl, apk add curl,\n' >&2
-    printf 'bootstrap:     dnf install curl, or pacman -S curl\n' >&2
+    # STOP: "NOTHING ON PATH" AND "EVERYTHING ON PATH FAILED" ARE DIFFERENT
+    # SENTENCES, AND THE OLD ONE PRINTED THE WRONG ONE (issue #168). This block
+    # used to run unconditionally, so a host carrying curl AND wget, both of
+    # which had just been tried and had just failed on a bad ref or a 404, was
+    # told "no curl, wget or fetch on PATH, so nothing can be downloaded" and
+    # then handed an install command for a tool it already had. The message
+    # pointed at the wrong cause, and the two attempts printed just above it
+    # named the real one. Which of the two it is is now recorded while the loop
+    # runs, so the sentence matches the machine.
+    if [ "$sh_ff_tried" = 0 ]; then
+        printf 'bootstrap: [-] no curl, wget or fetch on PATH, so nothing can be downloaded\n' >&2
+        printf 'bootstrap:     install one of them first: apt-get install curl, apk add curl,\n' >&2
+        printf 'bootstrap:     dnf install curl, or pacman -S curl\n' >&2
+    else
+        printf 'bootstrap: [-] every downloader present failed to fetch %s\n' "$sh_ff_url" >&2
+        printf 'bootstrap:     the ref/URL or the network is the problem, not a missing tool;\n' >&2
+        printf 'bootstrap:     check the ref, then try the URL above directly to see why\n' >&2
+    fi
     return 1
 }
 
