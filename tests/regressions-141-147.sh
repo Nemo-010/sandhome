@@ -151,14 +151,26 @@ t_is "$term_over" 'vt100' 'faketty honours SANDHOME_FAKEPTY_TERM (#145)'
 # qemuuser could hold the host emulator and be asked for --extra aarch64; the
 # ensure path then printed "rebuilding the view without downloading" and,
 # after the probe, "downloading a fresh copy". The predicate is asked first.
+# # THE PAYLOAD DIR IS <toolchains>/qemuuser/bin, NOT <toolchains>/bin. The
+# first fixture here put the host emulator one level too high, so every clause
+# below answered "missing" for the wrong reason and the positive clause passed
+# while the predicate was blind to the directory it was asked about. `tc_qemuuser_root`
+# is `sh_toolchain_root qemuuser`; the layout is asserted beside the behaviour.
 mkdir -p "$tmp/qemu/toolchains/qemuuser/bin"
 : > "$tmp/qemu/toolchains/qemuuser/bin/qemu-x86_64"
 qemu_sat() {
     SANDHOME_QEMUUSER_EXTRA="$1" SH_HOME_TOOLCHAINS="$tmp/qemu/toolchains" \
-        sh -c '. "$0/lib/common.sh"; . "$0/lib/toolchain.sh"; . "$0/tools/qemuuser.sh"; tc_qemuuser_payload_satisfies' "$ROOT" >/dev/null 2>&1
+        sh -c '. "$0/lib/common.sh"; . "$0/lib/space.sh"; . "$0/lib/toolchain.sh"; . "$0/tools/qemuuser.sh"; tc_qemuuser_payload_satisfies' "$ROOT" >/dev/null 2>&1
 }
+qemu_root=$(SH_HOME_TOOLCHAINS="$tmp/qemu/toolchains" sh -c '. "$0/lib/common.sh"; . "$0/lib/space.sh"; . "$0/lib/toolchain.sh"; . "$0/tools/qemuuser.sh"; tc_qemuuser_root' "$ROOT" 2>/dev/null)
+t_is "$qemu_root" "$tmp/qemu/toolchains/qemuuser" 'the qemu payload root is <toolchains>/qemuuser (#146)'
 qemu_sat '' && t_ok 0 'a host-only qemu payload satisfies a host-only request (#146)' || t_ok 1 'a host-only qemu payload satisfies a host-only request (#146)'
 qemu_sat aarch64 && t_ok 1 'a payload without the guest does not satisfy --extra (#146)' || t_ok 0 'a payload without the guest does not satisfy --extra (#146)'
+# The positive control: with the guest on disk the predicate must say yes, or
+# the clause above is satisfied by a function that only ever answers no.
+: > "$tmp/qemu/toolchains/qemuuser/bin/qemu-aarch64"
+qemu_sat aarch64 && t_ok 0 'a payload with the guest satisfies --extra (#146)' || t_ok 1 'a payload with the guest satisfies --extra (#146)'
+qemu_sat arm && t_ok 1 'a payload without a different guest does not satisfy --extra (#146)' || t_ok 0 'a payload without a different guest does not satisfy --extra (#146)'
 
 # --- #146: the archive is kept so a second --extra does not re-download ------
 # Callers may reuse the bytes for the next guest; the install must not delete
@@ -175,21 +187,50 @@ else
 fi
 
 # --- #147: a copy with no environment finds its private mirror ---------------
-# bin/sandhome tested the mirror and then set the repo to the directory BESIDE
-# it, so the mirror was checked and discarded and `env -i <exec>/bin/sandhome`
-# exited 2. The mirror-only tree here has no bake and no home pointer to rescue
-# it. The bootstrap half is checked beside it: only the bootstrap writes the
-# mirror on a fresh pipe setup.
+# env -i finds the mirror, and the mirror is the directory it names. The
+# `sandhome path` at the end is the proof and not decoration: the bake
+# deliberately disagrees with the home, so the only way `env -i` can reach the
+# mirror is through `$0`, and the path it reports is either the exec root (the
+# defect, which discarded the mirror it had just read) or the mirror itself.
 mkdir -p "$tmp/mir/bin" "$tmp/mir/.sandhome-lib"
 cp -R "$ROOT/lib" "$tmp/mir/.sandhome-lib/lib" 2>/dev/null
 cp "$ROOT/bin/sandhome" "$tmp/mir/bin/sandhome" 2>/dev/null
 chmod 0755 "$tmp/mir/bin/sandhome" 2>/dev/null
-mir_out=$(env -i "$tmp/mir/bin/sandhome" version 2>/dev/null); mir_rc=$?
+sed "s|^SH_BAKED_REPO_DIR=''|SH_BAKED_REPO_DIR='/nonexistent-repo'|" \
+    "$tmp/mir/bin/sandhome" > "$tmp/mir/bin/sandhome.baked" 2>/dev/null && \
+    mv -f "$tmp/mir/bin/sandhome.baked" "$tmp/mir/bin/sandhome" 2>/dev/null
+chmod 0755 "$tmp/mir/bin/sandhome" 2>/dev/null
+# # SANDHOME_EXEC IS NAMED FOR THE CHILD, BECAUSE THE ROOT IS A SECOND INPUT.
+# `env -i ... path` prints the exec ROOT, and the root is planned even when the
+# library came from the mirror: the candidate list names $PWD/.sandhome/exec and
+# /workspace/.sandhome/exec ahead of anything scratch, and on a machine whose
+# checkout runs binaries one of those wins. Without the variable the clause
+# would be about the box, not about the mirror, so the fixture names the root
+# beside itself and the answer it asserts is the mirror home the copy resolved.
+# The REPO, not the root, is what this clause is about; `env -i` still supplies
+# no library path (`sh_repo` is unreachable except through the mirror) and the
+# bake is deliberately wrong.
+mkdir -p "$tmp/mir-exec"
+mir_res=$(env -i SANDHOME_EXEC="$tmp/mir-exec" "$tmp/mir/bin/sandhome" path 2>/dev/null); mir_rc=$?
 t_is "$mir_rc" 0 'env -i finds the private mirror (#147)'
-case "$mir_out" in
-    sandhome/*) t_ok 0 'the mirror-only copy answers version (#147)' ;;
-    *) t_ok 1 "the mirror-only copy answers version (#147; got: $mir_out)" ;;
+case "$mir_res" in
+    "$tmp/mir-exec/bin") t_ok 0 'the mirror copy resolves the repo to the mirror itself (#147)' ;;
+    *) t_ok 1 "the mirror copy resolves the repo to the mirror itself (#147; got: $mir_res)" ;;
 esac
+# # THE NEGATIVE HALF, BECAUSE THE CLAUSE ABOVE CANNOT SEE THE BUG ALONE. The
+# defect was that sh_repo became the exec ROOT (the directory above the mirror)
+# and the next readability check threw the mirror away, so `sandhome` could not
+# start at all. The broken parse names $tmp/mir as the repo, and /nonexistent as
+# the root; run the unpatched line on purpose and the same command must fail.
+sed "s|sh_priv/.sandhome-lib\" 2>/dev/null|sh_priv\" 2>/dev/null|" \
+    "$tmp/mir/bin/sandhome" > "$tmp/mir/bin/sandhome.broken" 2>/dev/null
+if cmp -s "$tmp/mir/bin/sandhome" "$tmp/mir/bin/sandhome.broken"; then
+    t_ok 1 'the repro fixture patched the mirror line (it did not match)'
+else
+    chmod 0755 "$tmp/mir/bin/sandhome.broken" 2>/dev/null
+    env -i SANDHOME_EXEC="$tmp/mir-exec" "$tmp/mir/bin/sandhome.broken" path >/dev/null 2>&1
+    t_ok "$([ $? -ne 0 ]; echo $?)" 'the unpatched mirror line cannot start, so the clause above is not vacuous (#147)'
+fi
 case "$(cat "$ROOT/bootstrap.sh" 2>/dev/null)" in
     *'sh_exec_mirror_library || true'*) t_ok 0 'the bootstrap writes the private mirror (#147)' ;;
     *) t_ok 1 'the bootstrap writes the private mirror (#147)' ;;

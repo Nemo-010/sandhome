@@ -1255,6 +1255,20 @@ case "$(cat "$ROOT/tools/qemuuser.sh")" in
     *'LOADING IS SILENT'*) t_ok 0 'loading the module warns about nothing' ;;
     *) t_ok 1 'loading the module warns about nothing' ;;
 esac
+# # STOP: THE MODULE ANSWERS THE REUSE QUESTION ITSELF. `payload already in ...;
+# rebuilding the view without downloading` is a claim about the REQUEST, and a
+# host-only payload asked for --extra aarch64 made it falsely and then paid a
+# second 63MB download (issue #146). The predicate is what the ensure path
+# consults; the archive is kept and verified against the pin so the second
+# install is a local extract.
+case "$(cat "$ROOT/tools/qemuuser.sh")" in
+    *'tc_qemuuser_payload_satisfies'*) t_ok 0 'the module answers whether the payload serves the request (#146)' ;;
+    *) t_ok 1 'the module answers whether the payload serves the request (#146)' ;;
+esac
+case "$(cat "$ROOT/tools/qemuuser.sh")" in
+    *'sh_qu_pin'*'reusing the kept qemu-static archive'*) t_ok 0 'a kept qemu archive is reused against its pin (#146)' ;;
+    *) t_ok 1 'a kept qemu archive is reused against its pin (#146)' ;;
+esac
 case "$(cat "$ROOT/tools/qemuuser.sh")" in
     *'sh_have wget'*) t_ok 0 'the tag resolve falls back to wget' ;;
     *) t_ok 1 'the tag resolve falls back to wget' ;;

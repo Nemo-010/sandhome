@@ -37,11 +37,12 @@ else
     # `.sandhome-home` pointer are absolute paths, and a checkout that a tmpfs
     # restart or a cleanup took away makes both of them wrong; a directory
     # BESIDE this copy cannot be, because it moves with the copy. The bootstrap
-    # mirrors lib/ and bin/ into $SANDHOME_EXEC/.sandhome-lib and `repair`
-    # re-mirrors it, so `env -i <exec>/bin/sandhome doctor` still works on a
-    # host whose checkout is gone and whose home pointer is stale. That is the
-    # case issue #133 left behind: the fix made the bake durable, and this
-    # makes the thing the bake points at optional.
+    # and `sh_exec_install_launchers` (which install and repair go through)
+    # mirror lib/ and bin/ into $SANDHOME_EXEC/.sandhome-lib, so `env -i
+    # <exec>/bin/sandhome doctor` still works on a host whose checkout is gone
+    # and whose home pointer is stale. That is the case issue #133 left behind:
+    # the fix made the bake durable, and this makes the thing the bake points
+    # at optional.
     sh_priv=''
     case "$0" in
         */*) sh_priv=${0%/*}/.. ;;
