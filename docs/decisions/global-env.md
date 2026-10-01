@@ -67,19 +67,20 @@ directories is repaired rather than merely refused in future: our own link is
 removed, the directory is restored, and the stranded relative links are moved
 back.
 
-**3. The CLIs installed afterwards have to be on the `PATH` a fresh shell
-searches (issue #138 again).** Restoring the prefix directory makes `npm i -g`
+**3. The CLIs installed afterwards stay reachable with no manual step
+(issues #138, #142).** Restoring the prefix directory makes `npm i -g`
 write a good link, and the CLI is then reachable from a sourced shell and from
-any tool the hook starts - but a shell that has not run a hooked command and is
-not a login shell still does not search the prefix, and a fresh shell is
-exactly the case this whole decision is about. Two things close it, and neither
-is enough alone: the dispatcher prepends the sandbox bin directories to the
-`PATH` of the tools it starts, in `env.sh`'s order so the result is identical;
-and the hook's name list reads those directories **from disk** rather than from
-a record, because they change every time an operator installs something and a
-recorded list would be stale the moment it was written. A login shell is covered
-separately by the profile fragment, and a shell with no `PATH` at all by
-`entry.sh`.
+any tool the hook starts. For a shell that sourced nothing, the dispatcher
+runs installer names (`npm`, `go`, `cargo`, `uv` and the rest) as a child
+and links every new executable from the sandbox bins into the hook before
+returning the installer's status, so the next fresh shell finds the CLI with
+no `sandhome global`. A CLI installed from a sourced shell (where the exec
+bin shadows the hook) or copied in by other means still needs one
+`sandhome global`, which re-reads the prefixes from disk. The sandbox-bin
+lists the dispatcher links, resolves and looks up are all generated from the
+one `sh_global_sandbox_dirs`, so a new sandbox cannot be added to one and
+missed in another. A login shell is covered separately by the profile
+fragment, and a shell with no `PATH` at all by `entry.sh`.
 
 ## The decision
 
@@ -108,13 +109,15 @@ looked up by its path in the record, never by its position, because `PATH`
 order moves between runs.
 
 The dispatcher is one file keyed on `$0`. Its shape, abbreviated (the real
-one also carries the prefixed-bin loop, the `env -i` probe marker and a
-last-resort search of the prefix):
+one also carries the installer child-path that links post-setup CLIs into
+the hook, the `env -i` probe marker and the fallback sandbox lookup, all
+generated from `sh_global_sandbox_dirs` so the four lists cannot disagree):
 
 ```sh
 _sandhome_name=${0##*/}
 . "$_sandhome_home/env.sh"
-for _sandhome_sb in "$SANDHOME_EXEC/npm-global/bin" "$SANDHOME_EXEC/uv-bin"; do
+for _sandhome_sb in "$SANDHOME_EXEC/cargo-install/bin" "$SANDHOME_EXEC/go-bin" \
+    "$SANDHOME_EXEC/npm-global/bin" "$SANDHOME_EXEC/uv-bin"; do
     [ -d "$_sandhome_sb" ] || continue
     case ":$PATH:" in *":$_sandhome_sb:"*) continue ;; esac
     PATH="$_sandhome_sb:$PATH"

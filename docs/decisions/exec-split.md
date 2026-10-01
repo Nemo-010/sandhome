@@ -40,8 +40,12 @@ Two roots, detected by running a real file rather than by reading mount options:
 - `SANDHOME_EXEC`  -  must run a binary. Chosen by `sh_exec_probe`, which writes a
   `#!/bin/sh` file, chmods it, and runs it.
 
-A toolchain installs into the home. When the home runs binaries the two roots
-collapse and nothing is copied. When it does not, `sh_promote_tree` mirrors the
+A toolchain installs into the home. When the home runs binaries and no
+separate root was named or recorded, the two roots collapse and nothing is
+copied. An operator who named `--exec`/`SANDHOME_EXEC` has said where
+executables must go, and the recorded root is sticky across runs, so the
+collapse applies only when the plan chose the home itself (issue #149).
+When the roots do not collapse, `sh_promote_tree` mirrors the
 tree onto the exec root: **executable regular files are copied**, everything
 else is symlinked back. Shared objects are explicitly excluded from the copy set
 by `sh_is_exec_file`, because copying a 144MB `librustc_driver` or a 191MB

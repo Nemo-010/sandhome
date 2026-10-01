@@ -17,8 +17,8 @@ because of one measured asymmetry:
 So `sh_exec_probe` writes a `#!/bin/sh` file, chmods it, and **runs it**. Every
 decision about a root comes from that, never from parsing mount options.
 
-When the home runs binaries, the two roots collapse and nothing is copied. When
-it does not, each toolchain installs into the home and an exec view is mirrored
+When the home runs binaries and no separate root was named or recorded, the two roots collapse and nothing is copied. An explicit `--exec` (or the recorded root from one) wins, and `space` reports `payloads=` off disk. When
+the roots do not collapse, each toolchain installs into the home and an exec view is mirrored
 onto the exec root.
 
 ### The mirror's three rules
@@ -348,6 +348,14 @@ dropped off this shell's `PATH` instead of forgetting it, and a recorded
 directory is looked up by its path, never by its slot (the record order follows
 `PATH` order, which moves).
 
+The hook's names would go stale the moment an installer writes a new CLI, so
+the dispatcher runs installer names (`npm`, `go`, `cargo`, `uv` and the rest)
+as a child and links every new executable from the sandbox bins into the hook
+before returning the installer's status. The sandbox-bin lists it links,
+prepends and falls back to are all generated from the one
+`sh_global_sandbox_dirs`, so they cannot disagree the way hand-written copies
+did (a `cargo install` CLI was once linked and then unresolvable).
+
 The install verifies rather than asserts: after the commit, every recorded
 directory is run under `env -i` with a bounded timeout, and the dispatcher has
 to print `sandhome-dispatch loaded=yes exec=<root>` back. `sh_global_report`
@@ -355,7 +363,10 @@ reads that probe, so `sandhome report` prints `global=stale:<dir>` when a
 recorded hook no longer answers a fresh shell, and `sandhome doctor` fails on
 it and names `sandhome global` as the repair. `global=none` still passes: a
 host's layout is not an install error, and a wedge is bounded rather than a
-hang. `sh_global_remove` restores what install found, per directory: an empty
+hang. A hook recorded inside the tree's own indirection (an exec-root view bin
+or the exec `bin`, which are on `PATH` only because `env.sh` put them there)
+reads `global=inside-exec-root:<dir>` and fails too, because it shadows that
+view's tools with another view's names. `sh_global_remove` restores what install found, per directory: an empty
 directory comes back as a directory, a dangling symlink comes back as that
 symlink, an absent entry stays absent, and only symlinks still pointing into
 `$SH_EXEC` are removed. A host file that already answers a view name is never

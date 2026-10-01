@@ -634,10 +634,21 @@ sh_doctor() {
     fi
     for sh_doc_var in GOBIN GOCACHE CARGO_INSTALL_ROOT NPM_CONFIG_PREFIX; do
         sh_doc_want_exec=''
-        case " $(sh_lead "$ADOPTED") $(sh_lead "$INSTALLED") " in
-            *" go "*)      sh_doc_want_exec=yes ;;
-            *" rust "*)    sh_doc_want_exec=yes ;;
-            *" node "*)    sh_doc_want_exec=yes ;;
+        # # THE WANTED LIST, NOT THIS RUN'S VARIABLES. INSTALLED and ADOPTED
+        # are this process's and are empty in a fresh doctor, so this gate
+        # never fired outside the install run itself: a fragment deleted
+        # afterwards left GOBIN pointing at the noexec home while doctor
+        # stayed green. The env.sh record the toolchain loop above already
+        # reads is the same list this gate must use. Each variable belongs to
+        # the toolchain that writes it: checking CARGO_INSTALL_ROOT on a tree
+        # that never wanted rust is a false failure, not vigilance.
+        case "$sh_doc_var" in
+            GOBIN|GOCACHE) sh_doc_want_match=' go ' ;;
+            CARGO_INSTALL_ROOT) sh_doc_want_match=' rust ' ;;
+            NPM_CONFIG_PREFIX) sh_doc_want_match=' node ' ;;
+        esac
+        case " $(sh_lead "$ADOPTED") $(sh_lead "$INSTALLED") ${sh_doc_wanted_all:-} " in
+            *"$sh_doc_want_match"*) sh_doc_want_exec=yes ;;
         esac
         [ -n "$sh_doc_want_exec" ] || continue
         sh_doc_got=$(eval "printf '%s' \"\${$sh_doc_var:-}\"")

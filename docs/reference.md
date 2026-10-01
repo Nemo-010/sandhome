@@ -58,8 +58,9 @@ usage: sandhome COMMAND [args]
   report [--json]        the full report
   gc [DAYS] [--dry-run]   remove staging and caches older than DAYS (default 7).
                          DAYS=0 (or --now) removes everything sandhome owns
-                         in its caches, however fresh, except what a live
-                         install holds (SANDHOME_GC_FORCE=1 overrides).
+                         in its caches however old, except what a live
+                         install holds and what changed in the last 30 minutes
+                         (SANDHOME_GC_FORCE=1 overrides both).
                          Views are never removed; `repair` rebuilds them.
                          Prints the entry count and the bytes reclaimed.
   prune [NAME...]        drop exec-view entries whose payload is gone.

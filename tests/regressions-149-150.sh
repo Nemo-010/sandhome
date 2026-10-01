@@ -153,12 +153,20 @@ for dgsb_rel in uv-bin npm-global/bin go-bin cargo-install/bin; do
         t_ok 1 "a CLI in $dgsb_rel resolves through the hook (#142; got: $dgsb_out)"
     fi
 done
-# The installer literal inside the dispatcher must name the same directories
-# the function names, or the next sandbox directory repeats this defect.
 for dgsb_rel in $(sh -c '. "$0/lib/common.sh"; . "$0/lib/env.sh"; sh_global_sandbox_dirs' "$ROOT" 2>/dev/null); do
     case "$(cat "$tmp/dgsb/hook/.sandhome-dispatch" 2>/dev/null)" in
         *"$dgsb_rel"*) t_ok 0 "the generated dispatcher names $dgsb_rel (#142)" ;;
         *) t_ok 1 "the generated dispatcher names $dgsb_rel (#142)" ;;
+    esac
+done
+# The installer literal inside the dispatcher must name the same directories
+# the function names, or the next sandbox directory repeats this defect.
+# Checked at the source, not only in generated output: the literal is a
+# hand-written line inside a heredoc that generation cannot keeps in sync.
+for dgsb_rel in $(sh -c '. "$0/lib/common.sh"; . "$0/lib/env.sh"; sh_global_sandbox_dirs' "$ROOT" 2>/dev/null); do
+    case "$(grep -h '_sandhome_sb in uv-bin' "$ROOT/lib/env.sh" 2>/dev/null)" in
+        *"$dgsb_rel"*) t_ok 0 "the installer link loop names $dgsb_rel at the source (#142)" ;;
+        *) t_ok 1 "the installer link loop names $dgsb_rel at the source (#142)" ;;
     esac
 done
 
@@ -399,5 +407,56 @@ case "$(browser_doctor_case 'jq' '' '')" in
     *PUPPETEER_CACHE_DIR*) t_ok 1 'doctor ignores browser caches when node is not wanted (control, #143)' ;;
     *) t_ok 0 'doctor ignores browser caches when node is not wanted (control, #143)' ;;
 esac
+
+# --- the exec-root variable gate reads the wanted list, not the run --------
+# The GOBIN/GOCACHE/CARGO_INSTALL_ROOT/NPM_CONFIG_PREFIX gate keyed on the
+# install run's own variables, which are empty in a fresh doctor, so a deleted
+# fragment left the variables unset while doctor stayed green. It now reads
+# the same env.sh wanted list as the toolchain loop. Each variable belongs to
+# its toolchain: NPM_CONFIG_PREFIX is not checked for a tree without node.
+var_doctor_case() {
+    dh="$tmp/vd/home"; de="$tmp/vd/exec"
+    mkdir -p "$dh" "$de/bin" "$de/views" "$dh/tmp" 2>/dev/null
+    printf 'SANDHOME_HOME=%s\nSANDHOME_EXEC=%s\nSANDHOME_WANTED_TOOLCHAINS=%s\n' "$dh" "$de" "$1" > "$dh/env.sh" 2>/dev/null
+    SH_HOME="$dh" SH_EXEC="$de" SH_EXEC_BIN="$de/bin" SH_HOME_TOOLCHAINS="$dh/toolchains" \
+    SH_EXEC_VIEWS="$de/views" SH_HOME_TMP="$dh/tmp" SH_HOME_EXEC=no \
+    SANDHOME_HOME="$dh" SANDHOME_EXEC="$de" SH_LIB_DIR="$ROOT/lib" SH_REPO_DIR="$ROOT" \
+        sh -c 'unset NPM_CONFIG_PREFIX GOBIN GOCACHE CARGO_INSTALL_ROOT; . "$0/lib/common.sh"; . "$0/lib/detect.sh"; . "$0/lib/space.sh"; . "$0/lib/fetch.sh"; . "$0/lib/env.sh"; . "$0/lib/toolchain.sh"; . "$0/lib/shim.sh"; . "$0/lib/report.sh"
+               sh_doctor 2>/dev/null | grep -E "NPM_CONFIG_PREFIX|GOBIN="' \
+        "$ROOT" 2>/dev/null | head -2
+}
+case "$(var_doctor_case 'node')" in
+    *NPM_CONFIG_PREFIX*) t_ok 0 'doctor fails an unset NPM_CONFIG_PREFIX when node is wanted' ;;
+    *) t_ok 1 'doctor fails an unset NPM_CONFIG_PREFIX when node is wanted' ;;
+esac
+case "$(var_doctor_case 'jq')" in
+    *NPM_CONFIG_PREFIX*|*GOBIN*) t_ok 1 'doctor ignores toolchain variables none of its toolchains write (control)' ;;
+    *) t_ok 0 'doctor ignores toolchain variables none of its toolchains write (control)' ;;
+esac
+
+# --- #146: a shrunk view drops its stale exec links on promote ----------------
+# A reinstall asking for different guests wipes the payload bin and rebuilds
+# the view, but the exec-bin link for a dropped guest survived: doctor failed
+# exec_link_qemu-aarch64=broken while every install had exited 0 (measured on
+# a --extra aarch64 then --extra arm consumer run). The promote that knows the
+# new set removes links into its own view that are no longer promoted; links
+# elsewhere and real files are never touched.
+mkdir -p "$tmp/sl/home/toolchains/sltool/bin" "$tmp/sl/exec/views/sltool/bin" \
+         "$tmp/sl/exec/bin" "$tmp/sl/home/tmp"
+printf 'x\n' > "$tmp/sl/home/toolchains/sltool/bin/tool-a" 2>/dev/null
+printf 'x\n' > "$tmp/sl/exec/views/sltool/bin/tool-a" 2>/dev/null
+ln -sf "$tmp/sl/exec/views/sltool/bin/tool-a" "$tmp/sl/exec/bin/tool-a" 2>/dev/null
+ln -sf "$tmp/sl/exec/views/sltool/bin/tool-old" "$tmp/sl/exec/bin/tool-old" 2>/dev/null
+ln -sf /usr/bin/env "$tmp/sl/exec/bin/adopted-link" 2>/dev/null
+printf 'real\n' > "$tmp/sl/exec/bin/real-file" 2>/dev/null
+SH_HOME="$tmp/sl/home" SH_EXEC="$tmp/sl/exec" SH_EXEC_BIN="$tmp/sl/exec/bin" \
+SH_HOME_TOOLCHAINS="$tmp/sl/home/toolchains" SH_EXEC_VIEWS="$tmp/sl/exec/views" \
+SH_HOME_TMP="$tmp/sl/home/tmp" SH_HOME_EXEC=no SH_VIEW_MODE=copy SH_REPO_DIR="$ROOT" \
+    sh -c '. "$0/lib/common.sh"; . "$0/lib/space.sh"; . "$0/lib/toolchain.sh"; sh_promote_toolchain sltool bin/tool-a' \
+    "$ROOT" >/dev/null 2>&1
+[ -L "$tmp/sl/exec/bin/tool-old" ] && t_ok 1 'promote removes a stale exec link into its own view (#146)' || t_ok 0 'promote removes a stale exec link into its own view (#146)'
+[ -L "$tmp/sl/exec/bin/tool-a" ] && t_ok 0 'promote keeps the current view link (#146)' || t_ok 1 'promote keeps the current view link (#146)'
+[ -L "$tmp/sl/exec/bin/adopted-link" ] && t_ok 0 'promote keeps links pointing outside the view (#146)' || t_ok 1 'promote keeps links pointing outside the view (#146)'
+[ -f "$tmp/sl/exec/bin/real-file" ] && t_ok 0 'promote keeps real files in the exec bin (#146)' || t_ok 1 'promote keeps real files in the exec bin (#146)'
 
 t_end

@@ -1412,6 +1412,35 @@ sh_promote_toolchain() {
             ln -sfn "$sh_ptc_src" "$SH_EXEC_BIN/$sh_ptc_bin" 2>/dev/null || true
         fi
     done
+    # # STOP: A SHRUNK BIN SET MUST NOT LEAVE DANGLING EXEC LINKS. A qemu
+    # reinstall asking for different guests wipes the payload bin and rebuilds
+    # the view, but the exec-bin link for a dropped guest survived: the next
+    # doctor failed exec_link_qemu-aarch64=broken while every install had
+    # exited 0 (measured on a --extra aarch64 then --extra arm run). A link
+    # whose target sits under THIS view belongs to this toolchain, so one
+    # whose name is no longer promoted is removed here, where the set is
+    # known. Only symlinks under the view are touched; adopted roots, host
+    # links and real files are never candidates.
+    if [ -n "$sh_ptc_view" ] && [ -d "${SH_EXEC_BIN:-/nonexistent}" ]; then
+        for sh_ptc_l in "$SH_EXEC_BIN"/*; do
+            [ -L "$sh_ptc_l" ] || continue
+            sh_ptc_lb=${sh_ptc_l##*/}
+            sh_ptc_lt=$(readlink "$sh_ptc_l" 2>/dev/null) || continue
+            case "$sh_ptc_lt" in
+                "$sh_ptc_view"/*) ;;
+                *) continue ;;
+            esac
+            sh_ptc_keep=no
+            for sh_ptc_rel in "$@"; do
+                [ "${sh_ptc_rel##*/}" = "$sh_ptc_lb" ] && sh_ptc_keep=yes
+            done
+            if [ "$sh_ptc_keep" = no ]; then
+                rm -f "$sh_ptc_l" 2>/dev/null || true
+                sh_step "removed stale exec link $sh_ptc_lb (no longer in the $sh_ptc_name view)"
+            fi
+        done
+        unset sh_ptc_l sh_ptc_lb sh_ptc_lt sh_ptc_keep
+    fi
     SH_TOOLCHAIN_VIEW=$sh_ptc_view
     export SH_TOOLCHAIN_VIEW
     return 0

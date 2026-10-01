@@ -240,7 +240,7 @@ More than one row can apply and then both are read.
 | `env -i $SANDHOME_EXEC/bin/sandhome doctor` answers `cannot find the sandhome library` | the bake and the `.sandhome-home` pointer both point at a checkout or a home that is gone. The installed copy keeps its own copy of the library in `$SANDHOME_EXEC/.sandhome-lib`, so re-run the setup (or `sandhome repair`) once to write it; after that the command works with no HOME, no PATH and no environment |
 | the detected exec root is too small to hold the toolset, or the setup names `--exec` with no roomier candidate to point at | `sandhome space --probe` lists every candidate with free space; `sandhome space` names the ceiling (`max_exec_free_mb`, `exec_ceiling`). The plan picks the roomiest working candidate, and the choice is then stable; `--exec DIR` moves it deliberately. A small ceiling restricts the *view*, not the toolchain: payloads live on the home, so installs that fit proceed and ones that cannot name their measured need against the measured free space. `gc` reclaims caches only, not views (`docs/guide.md` sections 1 and 7) |
 | the session died with a scratch-quota kill (tmpSize, shmSize, fileMax, diskTmp) while `doctor` was green | quota kills bypass the df-based space gate: `doctor`, `space` and `report` read `df`, and no quota signal is readable from inside, so nothing warns first. `docs/guide.md` section 7 names what counts against scratch and what `gc` reclaims |
-| a CLI installed after the setup (`npm install -g`, `uv tool install`, `go install`, `cargo install`) is not found by a shell that sourced nothing | the hook directory is on `PATH` and the prefix bin was not: the dispatcher now puts the prefix on `PATH` itself, so run `sandhome global` once to rewrite it. `sandhome exec --shell 'npm install -g <pkg>'` always works, because that is the one form that applies the environment |
+| a CLI installed after the setup (`npm install -g`, `uv tool install`, `go install`, `cargo install`) is not found by a shell that sourced nothing | run the installer through the hook, which is what a fresh shell does when it names the tool: the dispatcher runs the installer as a child and links every new executable into the hook on return, so the next fresh shell finds it with no manual step. A CLI installed from a sourced shell (where the exec bin shadows the hook) or copied in by other means still needs one `sandhome global`. `sandhome exec --shell 'npm install -g <pkg>'` always works, because that is the one form that applies the environment |
 | the exact spelling of a flag, a variable or a command | `docs/reference.md` and nothing else; without a clone use `sandhome help` and `sandhome <cmd> --help` (per-command help, and `sandhome help <cmd>`) |
 | change this repository: a lib file, a toolchain, a shim, the line discipline | `AGENTS.md`, which is the maintainer router |
 
@@ -276,7 +276,11 @@ which loads `env.sh` and execs the real tool, so any one of them is enough.
 On a host whose home refuses `execve` the hook directory is a symlink into the
 exec root, which runs, so the noexec mount is not a wall. `sandhome report`
 prints `global=on:<dir>` when a recorded directory answers a fresh `env -i`
-shell, `global=stale:<dir>` when one was recorded and no longer does, and
+shell, `global=stale:<dir>` when one was recorded and no longer does,
+`global=inside-exec-root:<dir>` when the hook was written into a directory
+this tree uses as indirection (an exec-root view bin or the exec `bin`,
+which `doctor` fails; repair with `sandhome global --remove`, then
+`sandhome global`), and
 `global=none` when the host had no writable candidate; `sandhome global
 --status` names every directory and its state, and `sandhome global` repairs
 them. `sandhome global --remove` puts each entry back the way install found it.

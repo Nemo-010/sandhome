@@ -1065,6 +1065,28 @@ t_ok "$([ ! -d "$gb/home/.staging/live" ]; echo $?)" 'SANDHOME_GC_FORCE=1 overri
 unset SANDHOME_GC_FORCE
 rm -rf "$gb"
 
+# --- gc 0 spares entries changed in the last 30 minutes ------------------------
+# The usage used to promise gc 0 removes caches "however fresh", but a gc 0
+# that kills a running install destroys a working toolchain to fix a full
+# root: entries modified within 30 minutes survive unless SANDHOME_GC_FORCE=1.
+# This clause pins the exception so neither side can drift silently.
+fr="$tmp/gc-fresh"
+rm -rf "$fr"
+mkdir -p "$fr/home" "$fr/exec/cache" "$fr/home/tmp"
+printf 'fresh\n' > "$fr/exec/cache/fresh-blob"
+printf 'old\n' > "$fr/exec/cache/old-blob"
+touch -d '2 hours ago' "$fr/exec/cache/old-blob" 2>/dev/null || true
+SH_HOME="$fr/home"; SH_EXEC="$fr/exec"; SH_HOME_TMP="$fr/home/tmp"
+SH_EXEC_BIN="$fr/exec/bin"; SH_HOME_TOOLCHAINS="$fr/home/toolchains"
+export SH_HOME SH_EXEC SH_HOME_TMP SH_EXEC_BIN SH_HOME_TOOLCHAINS
+sh_space_gc 0 >/dev/null 2>&1
+t_ok "$([ -f "$fr/exec/cache/fresh-blob" ]; echo $?)" 'gc 0 keeps a cache entry changed in the last 30 minutes'
+t_ok "$([ ! -f "$fr/exec/cache/old-blob" ]; echo $?)" 'gc 0 still clears a cache entry older than 30 minutes'
+SANDHOME_GC_FORCE=1 sh_space_gc 0 >/dev/null 2>&1
+t_ok "$([ ! -f "$fr/exec/cache/fresh-blob" ]; echo $?)" 'SANDHOME_GC_FORCE=1 overrides the freshness guard'
+unset SANDHOME_GC_FORCE
+rm -rf "$fr"
+
 # --- the exec view is pruned of entries whose payload is gone --------------
 # The mirror only adds and the current-check compares home-to-view, so a
 # view-only entry is invisible to both and stays on PATH pointing at nothing
