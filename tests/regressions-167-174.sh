@@ -75,16 +75,39 @@ mkdir -p "$sh173/home/toolchains/t/lib" "$sh173/exec/bin" "$sh173/exec/views" \
 # An executable .py, exactly as CPython ships platform.py.
 printf 'import platform\nprint("PY-READABLE")\n' > "$sh173/home/toolchains/t/lib/platform.py"
 chmod 0755 "$sh173/home/toolchains/t/lib/platform.py"
+sh173_head=$(head -c 4 "$sh173/home/toolchains/t/lib/platform.py" 2>/dev/null)
 # A real ELF beside it, so the copy branch is not the only thing under test.
 if [ -x /bin/sh ]; then
     cp /bin/sh "$sh173/home/toolchains/t/lib/binary" 2>/dev/null
     chmod 0755 "$sh173/home/toolchains/t/lib/binary"
 fi
+# STOP: THE STAMP TARGET MUST BE A REAL ELF, OR BOTH CLAUSES BELOW ARE
+# TRIVIAL. The helper was written as the TEXT `ELFSTAMPEDPLACEHOLDER`, and the
+# promote only stamps when sh_is_elf_exec says the PAYLOAD is an ELF - so with a
+# text helper nothing was ever stamped and the .py was copied for the wrong
+# reason. Planted check, because this is the shape of mistake a guard must catch:
+# with `sh_is_elf_exec` forced to `return 1` (the exact pre-#173 behaviour) the
+# whole file still passed, 76 run 0 failed, exit 0. Both clauses were answering
+# "nothing was stamped" and reading it as "the script was copied". The helper is
+# now a real ELF - the memexec helper when the tree built one, a copy of a system
+# binary otherwise - and the clause below asserts that, so the next version of
+# this mistake fails here instead of passing silently.
+sh173_helper=$sh173/exec/bin/sandhome-memexec
+if [ -f "${SH_EXEC_BIN:-}/sandhome-memexec" ]; then
+    cp -f "${SH_EXEC_BIN:-}/sandhome-memexec" "$sh173_helper" 2>/dev/null
+fi
+if ! sh_is_elf_exec "$sh173_helper" 2>/dev/null; then
+    if [ -x /bin/sh ]; then
+        cp /bin/sh "$sh173_helper" 2>/dev/null
+        chmod 0755 "$sh173_helper" 2>/dev/null
+    fi
+fi
+chmod 0755 "$sh173_helper" 2>/dev/null || true
+t_ok "$(sh_is_elf_exec "$sh173_helper" 2>/dev/null && echo 0 || echo 1)" \
+    'the #173 stamp target really is an ELF, so stamping is possible at all (#173)'
 # A stamp target that is recognisably NOT the payload, so "was it stamped" is a
 # question with an answer.
-sh173_head=$(head -c 4 "$sh173/home/toolchains/t/lib/platform.py" 2>/dev/null)
-printf '\177ELFSTAMPEDPLACEHOLDER\n' > "$sh173/exec/bin/sandhome-memexec"
-chmod 0755 "$sh173/exec/bin/sandhome-memexec"
+printf '\177ELFSTAMPEDPLACEHOLDER\n' > "$sh173/exec/bin/marker.txt"
 t_ok "$([ "$sh173_head" = "$(printf '\177ELF' | od -An -tx1 2>/dev/null | tr -d ' \n' | head -c 8)" ] && echo 1 || echo 0)" \
     'the #173 fixture really is a readable script, not a binary (#173)'
 
