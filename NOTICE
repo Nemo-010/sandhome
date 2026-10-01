@@ -11,6 +11,7 @@ cannot be added without recording it.
 | clang | `https://github.com/llvm/llvm-project/releases/download/` | latest-release redirect tag (`llvmorg-*`) | caller pin only (`SANDHOME_SHA256_CLANG*`); hashed and printed otherwise |
 | cmake | `https://github.com/Kitware/CMake/releases/download/` | latest-release redirect tag | caller pin only (`SANDHOME_SHA256_CMAKE*`); hashed and printed otherwise |
 | deno | `https://github.com/denoland/deno/releases/download/` | latest-release redirect tag | `<asset>.sha256sum` sidecar published beside the zip, shape-validated hex64 |
+| emscripten | `https://github.com/emscripten-core/emsdk.git` (git clone first, tarball second); SDK payloads via `emsdk.py` | pinned `SANDHOME_EMSDK_VERSION` (default 3.1.73) | caller pin only (`SANDHOME_SHA256_EMSCRIPTEN*`); emsdk verifies its own SDK hashes at install time |
 | fd | `https://github.com/sharkdp/fd/releases/download/` | latest-release redirect tag | caller pin only (`SANDHOME_SHA256_FD*`); hashed and printed otherwise |
 | gh | `https://github.com/cli/cli/releases/download/` | latest-release redirect tag | caller pin only (`SANDHOME_SHA256_GH*`); hashed and printed otherwise |
 | go | `https://go.dev/dl/` | `https://go.dev/VERSION?m=text`, first line | `https://go.dev/dl/?mode=json`, `filename` entry, shape-validated hex64 |

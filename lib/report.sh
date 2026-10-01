@@ -327,10 +327,12 @@ sh_doctor() {
     # default unnoticed. It is written for every root, not only a split one: the
     # probe answers the same question either way and costs one file.
     sh_doc_cache=${XDG_CACHE_HOME:-$SH_EXEC/cache}
-    case "$sh_doc_cache" in
-        "$SH_EXEC"/*) : ;;
-        *) sh_doc_cache=$SH_EXEC/cache ;;
-    esac
+    # A caller-set cache that refuses execve is the failure, not a reason to
+    # check a different directory: the tools read the caller's value, so the
+    # gate probes the effective root and fails loudly when it cannot run a
+    # file there (issue #158). env.sh only defaults the variable when unset,
+    # so a set-but-noexec value stays red until the caller unsets it or points
+    # it at an exec-capable root.
     sh_doc_cache_decl=no
     sh_doc_rust_targets=''
     if [ -r "$SH_HOME/env.sh" ]; then
@@ -354,6 +356,33 @@ sh_doctor() {
         fi
     fi
     sh_doctor_check cache_dir_exec "$sh_doc_cache_ok" yes
+    # # STOP: GNU tar READS TAR_OPTIONS, AND THE TREE SETS IT. A third-party
+    # installer that shells out to `tar -xf` on an archive with a foreign uid
+    # aborts with exit 2 when run as uid 0 without CAP_CHOWN (issue #162);
+    # env.sh now exports TAR_OPTIONS=--no-same-owner as a guarded default so
+    # those installers unpack as the caller without being patched. The gate
+    # reads the declaration out of env.sh, not the live variable: doctor
+    # itself runs without sourcing env.sh (the baked launcher carries only the
+    # roots), while every installer the gate protects runs through the hook,
+    # exec or a sourced shell, all of which apply env.sh. Gating the live
+    # variable would red every sound home whose doctor was invoked directly.
+    # A GNU tar is the only one that reads the variable; other tars are
+    # exempt, and the tree's own fetches go through sh_tar either way.
+    sh_doc_tar_decl=no
+    if [ -r "$SH_HOME/env.sh" ]; then
+        while IFS= read -r sh_doc_tar_l || [ -n "$sh_doc_tar_l" ]; do
+            case "$sh_doc_tar_l" in
+                *TAR_OPTIONS=*) sh_doc_tar_decl=yes ;;
+            esac
+        done < "$SH_HOME/env.sh"
+    fi
+    if tar --version 2>/dev/null | head -n 1 | grep -qi 'gnu'; then
+        if [ "$sh_doc_tar_decl" = yes ]; then
+            sh_doctor_check tar_no_same_owner yes yes
+        else
+            sh_doctor_check tar_no_same_owner "no; env.sh does not default TAR_OPTIONS to --no-same-owner, so a third-party tar -xf on a foreign-uid archive aborts with exit 2 (re-run the setup or repair to rewrite env.sh)" yes
+        fi
+    fi
     # # STOP: SOME TARGETS NEED A LINKER THAT IS NOT rustc'S OWN. Adding
     # wasm32-unknown-emscripten is necessary but not sufficient: the link runs
     # `emcc`, from a separate toolchain with its own EM_CONFIG, and without it
@@ -367,7 +396,7 @@ sh_doctor() {
                 sh_doctor_check emscripten_linker yes yes
             else
                 sh_doctor_check emscripten_linker \
-                    "no; this target links with emcc, a separate toolchain with its own EM_CONFIG (install it, then set CARGO_TARGET_WASM32_UNKNOWN_EMSCRIPTEN_LINKER=emcc)" yes
+                    "no; this target links with emcc: run sandhome install emscripten, then CARGO_TARGET_WASM32_UNKNOWN_EMSCRIPTEN_LINKER=emcc is set for you" yes
             fi ;;
     esac
     # The recorded root must be the root being judged. The plan re-ranks when

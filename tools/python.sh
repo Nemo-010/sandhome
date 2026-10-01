@@ -137,7 +137,13 @@ EOF
         return 0
     fi
     sh_pe_root=$(sh_toolchain_root python)
-    sh_promote_toolchain python >/dev/null 2>&1
+    # The uv links are named, not swept and not skipped: TC_python_BINS is
+    # empty (the interpreter lives behind the fragment's PATH entry), so a
+    # bare promote links nothing into the exec bin and the hook never serves
+    # uv/uvx, while the description promises uv is always left on PATH. Naming
+    # bin/uv bin/uvx here creates the links the hook reads; the promote sweep
+    # keeps exactly this set on later installs instead of removing it.
+    sh_promote_toolchain python bin/uv bin/uvx >/dev/null 2>&1
     sh_pe_view=$(sh_toolchain_view python)
     sh_pe_bin=''
     for sh_pe_d in "$sh_pe_view"/python/*/bin "$sh_pe_root"/python/*/bin; do
@@ -158,7 +164,14 @@ UV_PYTHON_INSTALL_DIR="$sh_pe_root/python"
 UV_CACHE_DIR="\$SANDHOME_HOME/cache/uv"
 UV_TOOL_DIR="\$SANDHOME_EXEC/uv-tools"
 UV_TOOL_BIN_DIR="\$SANDHOME_EXEC/uv-bin"
-UV_PYTHON_DOWNLOADS=never
+# Guarded, not pinned: an installed CPython is hermetic by default (never
+# auto-downloads), but the fragment is also loaded inside the install
+# process itself, so a literal never here defeats an operator's explicit
+# per-command override and install --force python can never fetch the
+# CPython it is reinstalling. Every other policy default in this tree
+# (ASAN_OPTIONS, TAR_OPTIONS, XDG_CACHE_HOME) yields to the caller; this
+# one does too.
+UV_PYTHON_DOWNLOADS="\${UV_PYTHON_DOWNLOADS:-never}"
 PIP_DISABLE_PIP_VERSION_CHECK=1
 export UV_PYTHON_INSTALL_DIR UV_CACHE_DIR UV_TOOL_DIR UV_TOOL_BIN_DIR UV_PYTHON_DOWNLOADS PIP_DISABLE_PIP_VERSION_CHECK
 case ":\$PATH:" in

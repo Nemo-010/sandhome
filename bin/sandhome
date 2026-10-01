@@ -574,7 +574,35 @@ cmd_exec_dir() {
         '') : ;;
         *) sh_die "exec-dir takes no arguments; run 'sandhome help exec-dir'" ;;
     esac
-    printf '%s\n' "${SH_EXEC:-${SANDHOME_EXEC:-}}"
+    # # STOP: NEVER PRINT AN EMPTY LINE. The hook shell that needs this command
+    # has no exported SANDHOME_EXEC, and SH_EXEC is set only inside a process
+    # that loaded the roots. When both are present they win; otherwise the
+    # recorded file is read (first this home, then the conventional homes a
+    # login fragment would try), because a shell with no environment still has
+    # a home. Only when nothing names a root does this fail, and then it says
+    # where it looked instead of printing a blank line that makes
+    # `mkdir -p "$SANDHOME_EXEC/build"` create /build (issue #156).
+    if [ -n "${SH_EXEC:-}" ]; then
+        printf '%s\n' "$SH_EXEC"
+        return 0
+    fi
+    if [ -n "${SANDHOME_EXEC:-}" ]; then
+        printf '%s\n' "$SANDHOME_EXEC"
+        return 0
+    fi
+    sh_ed_home=${SH_HOME:-${SANDHOME_HOME:-}}
+    for sh_ed_cand in "$sh_ed_home/env.sh" "$HOME/.local/share/sandhome/env.sh" "$HOME/.sandhome/env.sh"; do
+        [ -n "$sh_ed_cand" ] && [ "$sh_ed_cand" != "/env.sh" ] || continue
+        [ -r "$sh_ed_cand" ] || continue
+        sh_ed_exec=$(sh_bake_value "$sh_ed_cand" SANDHOME_EXEC)
+        if [ -n "$sh_ed_exec" ]; then
+            printf '%s\n' "$sh_ed_exec"
+            unset sh_ed_home sh_ed_cand sh_ed_exec
+            return 0
+        fi
+    done
+    unset sh_ed_home sh_ed_cand sh_ed_exec
+    sh_die 'no exec root is recorded here; run the setup first, then sandhome exec-dir names where build output runs'
 }
 
 # cmd_global [--status|--remove] -> install, report or remove the global hook
@@ -1549,6 +1577,17 @@ cmd_resume() {
     SH_WANTED_TOOLCHAINS=$(sh_wanted_from_file)
     if [ -n "$SH_WANTED_TOOLCHAINS" ]; then
         export SH_WANTED_TOOLCHAINS
+    fi
+    # Same class as the wanted list above: a requested cross target is recorded
+    # in env.sh (SANDHOME_RUST_TARGETS) so doctor can name the linker it needs,
+    # and a resume that plans without it would rewrite the file without the row
+    # and silence the emscripten_linker gate (issue #163). Seed it before the
+    # plan for the same reason.
+    if [ -z "${SH_RUST_TARGETS:-}" ]; then
+        SH_RUST_TARGETS=$(sh_rust_targets_from_file)
+        if [ -n "$SH_RUST_TARGETS" ]; then
+            export SH_RUST_TARGETS
+        fi
     fi
     sh_space_plan || return 2
     : "${SANDHOME_HOME:=$SH_HOME}"

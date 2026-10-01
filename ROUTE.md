@@ -266,7 +266,8 @@ home itself, so `go build -o hello`, `cargo build`, `cc -o`, `make`, downloaded
 runtimes, and `npm i -g` output placed on the home fail with Permission denied
 or bad interpreter. Tool output that must execute lives on the exec root (`go
 build`'s default output, cargo's `target/`, a downloaded runtime): `GOBIN`,
-`NPM_CONFIG_PREFIX`, `GOCACHE`, and `CARGO_INSTALL_ROOT` already point there;
+`NPM_CONFIG_PREFIX`, `GOCACHE`, `CARGO_INSTALL_ROOT`, and `CARGO_TARGET_DIR`
+(a per-project dir under the exec root when unset) already point there;
 for anything else build there or copy the artifact before running it. **The
 global hook does not export `SANDHOME_EXEC` into the shell** -- the hook applies
 `env.sh` to the process of the tool it dispatches, and a child cannot change its

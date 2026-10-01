@@ -224,7 +224,8 @@ usage: sh bootstrap.sh [options]
 | `SANDHOME_CRIT_MB` | space.sh sandhome | `unset, and the feature is off until it is set` |
 | `SANDHOME_DOH_CANARY` | fetch.sh | `https://github.com` |
 | `SANDHOME_DOH_URL` | fetch.sh bootstrap.sh sandhome | `unset, and the feature is off until it is set` |
-| `SANDHOME_EXEC` | common.sh env.sh profile.sh report.sh space.sh bootstrap.sh sandhome bun.sh cmake.sh deno.sh fd.sh go.sh jq.sh meson.sh node.sh python.sh ripgrep.sh rust.sh zig.sh | `*)` |
+| `SANDHOME_EMSDK_VERSION` | emscripten.sh | `unset, and the feature is off until it is set` |
+| `SANDHOME_EXEC` | common.sh env.sh profile.sh report.sh space.sh bootstrap.sh sandhome bun.sh cmake.sh deno.sh emscripten.sh fd.sh go.sh jq.sh meson.sh node.sh python.sh ripgrep.sh rust.sh zig.sh | `*)` |
 | `SANDHOME_FAKEPTY` | env.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_FAKEPTY_ID` | env.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_FETCH_CHUNK_MB` | fetch.sh | `256` |
@@ -236,7 +237,7 @@ usage: sh bootstrap.sh [options]
 | `SANDHOME_GO_DL_JSON_URL` | sandhome go.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_GO_VERSION_URL` | sandhome go.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_HERE` | profile.sh | `unset, and the feature is off until it is set` |
-| `SANDHOME_HOME` | env.sh profile.sh space.sh bootstrap.sh sandhome go.sh node.sh python.sh rust.sh | `$SH_BAKED_HOME` |
+| `SANDHOME_HOME` | env.sh profile.sh space.sh bootstrap.sh sandhome emscripten.sh go.sh node.sh python.sh rust.sh | `$SH_BAKED_HOME` |
 | `SANDHOME_LLVM_TAG` | clang.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_LOW_EXEC_MB` | space.sh sandhome | `unset, and the feature is off until it is set` |
 | `SANDHOME_LOW_EXEC_PCT` | space.sh sandhome | `unset, and the feature is off until it is set` |
@@ -266,6 +267,7 @@ usage: sh bootstrap.sh [options]
 | `SANDHOME_SHA256_CLANG` | fetch.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_SHA256_CMAKE` | fetch.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_SHA256_DENO` | fetch.sh | `unset, and the feature is off until it is set` |
+| `SANDHOME_SHA256_EMSCRIPTEN` | fetch.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_SHA256_FD` | fetch.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_SHA256_GO` | fetch.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_SHA256_JQ` | fetch.sh bootstrap.sh | `unset, and the feature is off until it is set` |
@@ -320,6 +322,7 @@ usage: sh bootstrap.sh [options]
 | `clang` | `bin/clang bin/clang++` | Clang/LLVM, from the official LLVM release tarball (a >1GB download) |
 | `cmake` | `bin/cmake bin/ctest bin/cpack` | CMake, the build system for C/C++/Fortran projects |
 | `deno` | `deno` | Deno, a TypeScript/JavaScript runtime (single binary, from GitHub) |
+| `emscripten` | `upstream/emscripten/emcc upstream/emscripten/em++` | Emscripten SDK (emcc) for wasm32-unknown-emscripten, via emsdk |
 | `fd` | `bin/fd` | fd, a fast and user-friendly find replacement |
 | `gh` | `bin/gh` | gh, the GitHub command-line tool (single binary from its tarball) |
 | `go` | `go/bin/go go/bin/gofmt` | Go, from the official go.dev tarball (GOROOT stays in the home root) |

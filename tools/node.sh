@@ -218,6 +218,8 @@ tc_node_repair_cli_js() {
     sh_nr_view=$1
     sh_nr_root=$2
     [ -n "$sh_nr_view" ] && [ -d "$sh_nr_view/lib/node_modules/npm/bin" ] || return 0
+    sh_nr_fixed=0
+    sh_nr_broken=0
     for sh_nr_name in npm npx; do
         sh_nr_dest="$sh_nr_view/lib/node_modules/npm/bin/${sh_nr_name}-cli.js"
         [ -e "$sh_nr_dest" ] || continue
@@ -226,6 +228,10 @@ tc_node_repair_cli_js() {
         case "$sh_nr_first" in
             '#!'*node*|'#!'*env*) continue ;;
         esac
+        # The target is not JavaScript. Count it before attempting the restore
+        # so an unrestorable view is reported, not silently kept: a view whose
+        # payload is gone cannot be healed from here and doctor must say so.
+        sh_nr_broken=$((sh_nr_broken + 1))
         sh_nr_src=''
         for sh_nr_c in "$sh_nr_root/lib/node_modules/npm/bin/${sh_nr_name}-cli.js" \
                        "$sh_nr_root/npm/lib/node_modules/npm/bin/${sh_nr_name}-cli.js" \
@@ -233,9 +239,24 @@ tc_node_repair_cli_js() {
             [ -r "$sh_nr_c" ] && { sh_nr_src=$sh_nr_c; break; }
         done
         [ -n "$sh_nr_src" ] || continue
-        cp -f "$sh_nr_src" "$sh_nr_dest" 2>/dev/null && chmod 0755 "$sh_nr_dest" 2>/dev/null
+        # Verify the source IS JavaScript before copying: restoring shell text
+        # over shell text is a no-op that reports a repair.
+        sh_nr_sfirst=''
+        read -r sh_nr_sfirst < "$sh_nr_src" 2>/dev/null || sh_nr_sfirst=''
+        case "$sh_nr_sfirst" in
+            '#!'*node*|'#!'*env*) ;;
+            *) continue ;;
+        esac
+        if cp -f "$sh_nr_src" "$sh_nr_dest" 2>/dev/null && chmod 0755 "$sh_nr_dest" 2>/dev/null; then
+            sh_nr_fixed=$((sh_nr_fixed + 1))
+        fi
     done
-    unset sh_nr_dest sh_nr_first sh_nr_src sh_nr_c sh_nr_name
+    if [ "$sh_nr_broken" -gt "$sh_nr_fixed" ]; then
+        sh_warn "the $sh_nr_view npm-cli.js/npx-cli.js is shell text and no JavaScript payload was found to restore it; node <view>/npm cannot run until the view is rebuilt"
+    elif [ "$sh_nr_fixed" -gt 0 ]; then
+        sh_step "restored $sh_nr_fixed JavaScript cli.js file(s) in the node view"
+    fi
+    unset sh_nr_dest sh_nr_first sh_nr_src sh_nr_c sh_nr_name sh_nr_sfirst sh_nr_fixed sh_nr_broken
     return 0
 }
 

@@ -1,0 +1,82 @@
+# consumer proof: beyond PR #166 (issues #151-#165, taken past the easy win)
+
+Host: Linux x86_64, uid 0, 2026-10-01. /workspace exec (20GB free, chosen),
+/tmp + /dev/shm + /state noexec here (space --probe says noexec for all
+three), so the plan picks the roomy exec-capable root. memfd_create blocked
+by seccomp, views fall back to copies, same as the last round.
+ISO: HOME=/workspace/.sandhome-proof/home, exec=/workspace/.sandhome-proof/exec.
+
+## setup
+
+sh bootstrap.sh --toolset developer --exec /workspace/.sandhome-proof/exec
+  8.6s, failures=0. doctor_failures=0 with cache_dir_exec, tar_no_same_owner,
+  node_npm_js live.
+sandhome install deno meson rust -> doctor_failures=0
+  (deno_spawn, rustup_writable, node_npm_js all yes)
+
+## builds that run
+
+- cargo new hello; cargo build (CARGO_TARGET_DIR defaulted to
+  $SANDHOME_EXEC/target-workspace); artifact runs. (beyond #156)
+- rustup target add wasm32-unknown-unknown + wasm32-unknown-emscripten,
+  both rc=0 and listed installed. (beyond #159)
+- emcc hello.c -o hello.js; node hello.js prints wasm-ok. (beyond #163)
+- cargo build --target wasm32-unknown-emscripten with the fragment's
+  CARGO_TARGET_WASM32_UNKNOWN_EMSCRIPTEN_LINKER=emcc:
+  target-workspace/wasm32-unknown-emscripten/debug/emhello.wasm, 4.5MB.
+  (beyond #163, the exact scenario the issue measured)
+- meson setup + ninja + ./build/hello prints meson-ok (CC=clang; host
+  sccache wraps the default cc and fails Permission denied, environmental).
+- go mod init + go build + run prints go-ok; install go writes the
+  GOBIN/GOCACHE fragment. (environmental note only)
+- node script ok; node $(dirname $(node -p process.execPath))/npm
+  --version prints 11.19.1 (the #157 invocation); npm works.
+- deno eval prints deno-ok; both doctor probe spellings rc=0 live.
+- ASan binary: bash -lc prints asan-ok with ASAN_OPTIONS=[detect_leaks=0]
+  (profile loads whole env.sh, beyond #155); sandhome exec prints asan-ok;
+  plain sh -c dies with the LSan fatal error as documented (no init reads
+  profile there).
+
+## mechanisms, with controls
+
+- TAR_OPTIONS=--no-same-owner live: foreign-uid (1000) tarball extracts
+  rc=0; env -u TAR_OPTIONS tar -xf fails rc=2 Cannot change ownership.
+  (beyond #162, exact failure reproduced without the default)
+- XDG_CACHE_HOME=$SANDHOME_EXEC/cache: write+exec file runs rc=0.
+  (beyond #158)
+- uv/uvx: install python creates exec/bin links; install meson keeps them;
+  hook serves 28 commands; fresh env -i shell resolves uv and uvx.
+  (beyond #152, created AND kept)
+- resume after mv exec away, via entry.sh from env -i: wanted list
+  preserved incl. deno/meson/ninja; doctor FAIL toolchain_meson (payload
+  was on the wiped root, honestly red, not silently green); install meson
+  heals to doctor_failures=0. (beyond #153/#154)
+- prebind: builds; serves HTTP over a unix socket through an inherited fd
+  twice; stale path property shown via python rebind traceback.
+  (beyond #160)
+- report file_size_limit=1000000000; 1.2GB single write raises;
+  stream | head -c works. (beyond #164)
+
+## installed, not documented
+
+- sandhome install emscripten: emsdk clone + SDK 3.1.73 in 47s; emcc
+  --version 3.1.73; EM_CONFIG on the exec view; doctor emscripten_linker
+  yes once SANDHOME_RUST_TARGETS records the target. (beyond #163)
+
+## defects found while proving (fixed in this round)
+
+- python fragment pinned UV_PYTHON_DOWNLOADS=never unconditionally, and the
+  fragment loads inside the installer, so install --force python could never
+  fetch CPython. Guarded now; override flows through; reinstall rc=0.
+- backticks inside an unquoted heredoc body execute: one instance of mine
+  (python fragment note) and one of the round's (rust adopted fragment
+  note about rustup target add). Both reworded; a sweep clause guards all
+  unquoted heredoc bodies in tools/, lib/, bin/sandhome, bootstrap.sh.
+- installed python never promoted bin/uv bin/uvx, so the hook never served
+  them although the description promises uv on PATH. Named now.
+
+## suite
+
+sh tests/run.sh: every file passed (syntax, memexec skipped, same as the
+pr166 baseline). regressions-beyond-166.sh: 39 clauses, 30 of which fail
+against pr166 (the rest are two-way controls).

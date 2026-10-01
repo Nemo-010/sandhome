@@ -585,6 +585,7 @@ sh_pin_for() {
             pkgconf) [ -n "${SANDHOME_SHA256_PKGCONF:-}" ] && { printf '%s' "$SANDHOME_SHA256_PKGCONF"; return 0; } ;;
             perl) [ -n "${SANDHOME_SHA256_PERL:-}" ] && { printf '%s' "$SANDHOME_SHA256_PERL"; return 0; } ;;
             shellcheck) [ -n "${SANDHOME_SHA256_SHELLCHECK:-}" ] && { printf '%s' "$SANDHOME_SHA256_SHELLCHECK"; return 0; } ;;
+            emscripten) [ -n "${SANDHOME_SHA256_EMSCRIPTEN:-}" ] && { printf '%s' "$SANDHOME_SHA256_EMSCRIPTEN"; return 0; } ;;
         esac
     fi
     case "$(sh_pin_key "$sh_pf_url")" in
@@ -676,7 +677,7 @@ sh_pin_for() {
 # sh_pin_names -> every toolchain name a `SANDHOME_SHA256_<NAME>` pin answers to.
 # Printed so tests/unit.sh can require one entry per module in tools/, which is
 # what keeps the closed `case` above from going stale when a module is added.
-sh_pin_names() { printf ' fd go jq node python ripgrep rust zig mold clang deno bun qemuuser shellcheck shfmt yq ninja gh cmake meson pkgconf perl\n'; }
+sh_pin_names() { printf ' fd go jq node python ripgrep rust zig mold clang deno bun qemuuser shellcheck shfmt yq ninja gh cmake meson pkgconf perl emscripten\n'; }
 
 # sh_pin_from URL [NAME] [PUBLISHED] -> the NAME of the pin that answered for
 # this URL, or nothing. The provenance line in the report names it, because a

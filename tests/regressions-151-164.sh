@@ -51,9 +51,12 @@ printf '#!/bin/sh\ncase "$*" in *spawnSync*) exit 1 ;; esac\nexit 0\n' > "$tmp/e
 chmod +x "$tmp/exec/views/deno/deno"
 mount_deno='. "$0/tools/deno.sh"; if tc_deno_doctor; then printf pass; else printf fail; fi'
 t_is "$(sh_regr_run "$mount_deno")" 'pass' 'the deno doctor accepts a deno that re-execs itself (#151)'
-# The negative control: a deno that only answers the old name is not proof of a
-# working re-exec, so the clause is not passing for want of any check.
-printf '#!/bin/sh\ncase "$*" in *outputSync*) exit 1 ;; esac\nexit 0\n' > "$tmp/exec/views/deno/deno"
+# The negative control: a deno that refuses every re-exec spelling is still
+# reported. It refuses outputSync AND spawn (the two spellings the doctor
+# tries), so neither probe can mistake it for a working runtime. A fake that
+# refused only outputSync would pass through the async-spawn fallback, which
+# is correct behaviour, not a hole: honouring spawn() IS re-executing.
+printf '#!/bin/sh\ncase "$*" in *outputSync*|*spawn*) exit 1 ;; esac\nexit 0\n' > "$tmp/exec/views/deno/deno"
 chmod +x "$tmp/exec/views/deno/deno"
 t_is "$(sh_regr_run "$mount_deno")" 'fail' 'a deno that cannot re-exec is still reported (#151)'
 printf '#!/bin/sh\ncase "$*" in *spawnSync*) exit 1 ;; esac\nexit 0\n' > "$tmp/exec/views/deno/deno"

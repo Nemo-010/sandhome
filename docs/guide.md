@@ -415,16 +415,20 @@ succeeds, the build then dies with `linker 'emcc' not found`, and the message
 reads like a broken `PATH` rather than a missing toolchain. The fix is four
 things together: `rustup target add`, Emscripten installed and activated,
 `EM_CONFIG` written (the sanity check runs without it and the link still fails),
-and `CARGO_TARGET_WASM32_UNKNOWN_EMSCRIPTEN_LINKER=emcc`. `--with emscripten` is
+and `CARGO_TARGET_WASM32_UNKNOWN_EMSCRIPTEN_LINKER=emcc`. `sandhome install
+emscripten` provisions all four: it installs and activates emsdk (git clone
+first, tarball through `sh_tar` second, so the uid-0 unpack abort in #162
+cannot bite this path), writes `EM_CONFIG` beside the exec view with view
+paths (a config pointing at the noexec home hands emcc native tools it cannot
+run), and sets the cargo linker variable. Override the SDK release with
+`SANDHOME_EMSDK_VERSION` (default 3.1.73). `--with emscripten` is
 not in a toolset on purpose: it overlaps `zig` (a wasm target) and `qemuuser`
 (another architecture), but neither gives Emscripten's `std::fs`/`epoll` surface
-on the Workers event loop, and 640MB is a lot to carry for one target. The
-tree's part today is to make the failure legible: `tools/rust.sh` says the
-target list is not a link promise, and `sandhome doctor` prints
-`emscripten_linker` when a recorded target needs `emcc` and there is none. An
-Emscripten toolchain module that installs the toolchain on the **exec root**
-(its native LLVM tools have to `execve`, so a home install only half-works) is
-the scoped follow-up.
+on the Workers event loop, and 900MB is a lot to carry for one target. The
+tree's part today is both halves: `tools/rust.sh` says the
+target list is not a link promise, `sandhome doctor` prints
+`emscripten_linker` when a recorded target needs `emcc` and there is none, and
+`tools/emscripten.sh` installs the toolchain that gate names.
 
 `--with clang` is the one toolchain not in a toolset, because its view is large
 (hundreds of MB) and it wants a roomy exec root; `zig`, `deno`, `bun` and `mold`
@@ -649,9 +653,9 @@ SANDHOME_FAKEPTY_SIZE=120x40 sandhome pty less big.log
 | `File size limit exceeded` on a download | `ulimit -f` pins a per-file cap; sandhome shards any download whose `Content-Length` exceeds it and unpacks a `.tar.*` from the stream. `SANDHOME_FETCH_CHUNK_MB` tunes the range size. A `.zip` above the cap is refused by name |
 | `File size limit exceeded` while a tool **writes** one file | the cap is per `write(2)`, so a disassembler's multi-GB `.wat`, a core dump, or a huge unpack is cut off the same way a large download is, and `shard` cannot help (the tool is generating, not fetching). Stream it and bound the consumer (`tool ... \| head -c N > out`), point it at a directory where it supports one, or split the output. See section 2 |
 | an adopted `rustup target add` prints `Read-only file system` and exits 0 | the adopted `RUSTUP_HOME` cannot take a write, so no target can be added to any toolchain and a later build dies with a missing std. `sandhome install rust` points `RUSTUP_HOME` at a writable root on the exec root with the toolchains linked in and `doctor` reports `rustup_writable` (#159) |
-| a third-party SDK installer aborts with `Cannot change ownership` / `tar` exit 2 / `installation failed` | its `tar -xf` has no `--no-same-owner` and the archive carries a foreign uid; the download is fine and the unpack is not. Patch the installer's `tar` call or unpack through `sh_tar` in `lib/fetch.sh` (#162) |
+| a third-party SDK installer aborts with `Cannot change ownership` / `tar` exit 2 / `installation failed` | its `tar -xf` has no `--no-same-owner` and the archive carries a foreign uid; the download is fine and the unpack is not. `env.sh` exports `TAR_OPTIONS=--no-same-owner` as a guarded default so those installers unpack as the caller with no patching, and `doctor` reports `tar_no_same_owner` while the live shell lacks it; this tree's `sh_tar` in `lib/fetch.sh` stays the unpack path for its own fetches (#162) |
 | `mold` is on PATH but `-fuse-ld=mold` cannot find it | the mold archive ships both `mold` and `ld.mold`; both land on the exec bin. Check `command -v ld.mold`. Clang accepts `--ld-path=$(command -v mold)` as well |
-| `cargo build --target <T>` dies with `linker '<name>' not found` | the target's std is present and its linker is not. For `wasm32-unknown-emscripten` the linker is `emcc`, a separate toolchain with its own `EM_CONFIG`, not a PATH entry name rustc can find: install Emscripten, put its `upstream/emscripten` on PATH, point `EM_CONFIG` at its config, and set `CARGO_TARGET_WASM32_UNKNOWN_EMSCRIPTEN_LINKER=emcc`. `sandhome doctor` prints `emscripten_linker` while it is missing (#163). Any other `<name>` is a real missing PATH entry |
+| `cargo build --target <T>` dies with `linker '<name>' not found` | the target's std is present and its linker is not. For `wasm32-unknown-emscripten` the linker is `emcc`: run `sandhome install emscripten`, which provisions it on the exec view, writes `EM_CONFIG` with view paths, and sets `CARGO_TARGET_WASM32_UNKNOWN_EMSCRIPTEN_LINKER=emcc`. `sandhome doctor` prints `emscripten_linker` while it is missing (#163). Any other `<name>` is a real missing PATH entry |
 | `doctor` says `FAIL exec_space=low` or `=critical` | the exec root is draining. `sandhome space` names the state and the numbers, `sandhome space --probe` lists roomier candidates, `sandhome space --largest` names the entries holding the space, `sandhome gc` reclaims sandhome's own caches, and re-running the setup with `--exec DIR` moves everything to a roomy path. See section 1 for the thresholds |
 | the exec root filled | `sandhome gc` prints the entry count with the bytes reclaimed; staging (any age, `$SH_HOME/.staging` and `$SH_EXEC/.staging`), exec caches (`cache/`, `tmp/`, `node-gyp-tmp-*` entries older than DAYS; `gc 0` or `gc --now` removes them however old except a live install's hold and entries changed in the last 30 minutes), and home tmp older than DAYS are removed, toolchain data stays. What a live install holds survives even `gc 0` (`SANDHOME_GC_FORCE=1` overrides), and `go install` output in `go-bin` is not a cache: `gc` no longer removes it, nor anything else under the installer roots (`npm-global`, `uv-bin`, `cargo-install`) (issue #141). Views are never reclaimed: stale view entries go with `sandhome prune`, views are rebuilt by `sandhome repair`, not by `gc` (#67). `gc` returning 0 bytes on a full root means the space is in build output you own or in views, so `sandhome space --largest` names it first with one tag per entry (`reclaim` = gc removes it, `sandhome` = the tree owns it and gc keeps it, `yours` = remove it yourself; `space --reclaim` prints the cache bytes `gc --now` would free). `GOCACHE`, `GOBIN`, `NPM_CONFIG_PREFIX`, `CARGO_INSTALL_ROOT`, `CARGO_TARGET_DIR`, and `target/` all land on the exec root: heavy and multi-target builds need a roomy `--exec DIR`. If no candidate fits, the install names the constraint before writing anything |
 | an ASan/UBSan binary prints nothing and exits 1 (`LeakSanitizer has encountered a fatal error`) | LSan stops threads with `ptrace`, which this cage denies, and loses the programme's buffered stdout with it; `env.sh` sets `ASAN_OPTIONS=detect_leaks=0` and `LSAN_OPTIONS=detect_leaks=0` for every ptrace answer except a measured `yes`, so an unmeasured host gets the workaround too and ASan and UBSan keep working. A caller who sets either keeps theirs; `SANDHOME_ASAN=off` restores leak checking where it works. Use clang for a sanitizer build: `zig cc` ships no `libasan`/`libtsan`, while clang's own runtimes live under its resource dir (issue #144) |

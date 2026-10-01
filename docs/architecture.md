@@ -64,6 +64,7 @@ number to appear in its row, so the table and the modules cannot drift.
 | clang | 3000 | 32 |
 | cmake | 64 | 16 |
 | deno | 150 | 150 (a real copy: a runtime that forks itself cannot run from a memfd, issue #139) |
+| emscripten | 900 | 900 (native LLVM/node tools must execve; the view holds the SDK, issue #163) |
 | fd | 16 | 16 |
 | gh | 16 | 16 |
 | go | 150 | 12 |

@@ -758,7 +758,7 @@ EOF
 # with a default toolchain: without one, "rustc --version" and a link both fail
 # with "rustup could not choose a version of rustc to run". A home that cannot
 # take a write is replaced by one on the exec root with the toolchains linked
-# in, so `rustup target add` has somewhere to unpack (issue #159).
+# in, so rustup target add has somewhere to unpack (issue #159).
 export RUSTUP_HOME="$sh_re_rh_use"
 SHIMEOF
             if [ "$sh_re_rh_use" != "$sh_re_rh_ok" ]; then

@@ -105,10 +105,19 @@ measured on workerd (the Cloudflare Workers runtime):
 # and the launcher must EXEC, not spawn. node:child_process cannot pass a
 # chosen descriptor (a listener that was fd 18 in the parent arrives as fd 3),
 # and without clearing FD_CLOEXEC the kernel closes it at exec, which workerd
-# reports as an unbound socket rather than a descriptor error.
+# reports as an unbound socket rather than a descriptor error. The launcher
+# ships in this tree so it is fetched and built, not retyped:
 ./prebind ./entry.sock 4 workerd serve --experimental --socket-fd=http=4 minimal.capnp &
 curl -sS --unix-socket ./entry.sock http://x/
 ```
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/talaria0101/sandhome/main/skills/sealed-sandbox/prebind.c -o prebind.c
+cc -O2 -o prebind prebind.c
+```
+
+The shipped copy also refuses fds 0-2 (binding over stdio would replace the
+shell's own descriptors); the inline listing below is the same program.
 
 Three levers are in `workerd serve --help` and `workerd.capnp`: a `unix:/path`
 address in the config (workerd binds a filesystem socket), `-S/--socket-fd

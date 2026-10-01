@@ -85,7 +85,7 @@ the four cases the mirror has to get right, are in
 | `bootstrap.sh` | the installer. Self-fetching when piped. |
 | `bin/sandhome` | the command. A bootstrap copies it to `$SANDHOME_EXEC/bin`. |
 | `lib/` | the POSIX-sh library: `common`, `detect`, `space`, `fetch`, `env`, `toolchain`, `shim`, `report`, `profile`. |
-| `tools/` | one module per toolchain. `sandhome toolchains --json` is the live list; at the time of writing: `bun clang cmake deno fd gh go jq meson mold ninja node perl pkgconf python qemuuser ripgrep rust shellcheck shfmt yq zig`. `tests/docs.sh` fails when a module exists and this sentence does not name it. |
+| `tools/` | one module per toolchain. `sandhome toolchains --json` is the live list; at the time of writing: `bun clang cmake deno emscripten fd gh go jq meson mold ninja node perl pkgconf python qemuuser ripgrep rust shellcheck shfmt yq zig`. `tests/docs.sh` fails when a module exists and this sentence does not name it. |
 | `shims/` | seven `LD_PRELOAD` interposers, each built only when its detector says the machine needs it: `fakepty` (a userspace pty), `fakepwd` (a synthetic passwd database), `antiptrace`, and the headless enumeration shims `fakedrm`, `fakeinput`, `fakexenv`, `fakedisplay`. All of them: [`docs/guide.md` section 5](docs/guide.md). |
 | `shell/errandsh` | a POSIX-sh line discipline for a pty-less SSH session, with `shell/faketty` as the userspace-pty wrapper. |
 | [`docs/reference.md`](docs/reference.md) | **generated**: every command, flag and variable, extracted from the code. |

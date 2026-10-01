@@ -181,6 +181,41 @@ sh_env_body() {
     printf '  export XDG_CACHE_HOME\n'
     printf 'fi\n'
     printf 'if [ -n "${XDG_CACHE_HOME:-}" ]; then mkdir -p "$XDG_CACHE_HOME" 2>/dev/null || true; fi\n'
+    # # STOP: A THIRD-PARTY INSTALLER DOES NOT GO THROUGH sh_tar, SO THE TREE
+    # FIXES ITS tar CALL BY ENVIRONMENT, NOT BY PATCHING IT. lib/fetch.sh already
+    # unpacks as itself (sh_tar tries --no-same-owner first), because running as
+    # uid 0 makes tar restore the archive uid/gid and a sandbox root without
+    # CAP_CHOWN refuses that chown: every entry warns "Cannot change ownership"
+    # and tar exits 2 after a good download. emsdk is the measured case
+    # (issue #162): its single `tar -xf` carries uid 1000 and aborts with
+    # "installation failed". GNU tar reads TAR_OPTIONS before argv, so one
+    # guarded default repairs every installer that shells out to tar without
+    # touching any of them. A caller who set TAR_OPTIONS keeps it; the append
+    # arm covers a caller who set other tar flags without this one. Non-GNU
+    # tar ignores the variable, which is why sh_tar stays the unpack path for
+    # the tree's own fetches: two mechanisms, same invariant, neither assumes
+    # the other.
+    printf 'case "${TAR_OPTIONS:-}" in\n'
+    printf '  *no-same-owner*) ;;\n'
+    printf '  "") TAR_OPTIONS="--no-same-owner"; export TAR_OPTIONS ;;\n'
+    printf '  *) TAR_OPTIONS="$TAR_OPTIONS --no-same-owner"; export TAR_OPTIONS ;;\n'
+    printf 'esac\n'
+    # # STOP: THE NAIVE `cargo build && ./target/debug/x` MUST LAND WHERE IT
+    # CAN RUN. GOBIN, GOCACHE, CARGO_INSTALL_ROOT and NPM_CONFIG_PREFIX already
+    # point at the exec root, but CARGO_TARGET_DIR does not, so the default
+    # `cargo build` on a noexec work tree links fine and then dies with
+    # Permission denied running ./target/debug/x (issue #156). One guarded
+    # default closes the class: a caller who set CARGO_TARGET_DIR keeps it,
+    # otherwise each project gets its own dir under the exec root named for the
+    # work tree, so two checkouts do not share one target dir. The dir is made
+    # here so the first build has a target, matching TMPDIR.
+    printf 'if [ -z "${CARGO_TARGET_DIR:-}" ]; then\n'
+    printf '  _sh_ctd=${PWD##*/}; [ -n "$_sh_ctd" ] || _sh_ctd=work\n'
+    printf '  CARGO_TARGET_DIR="$SANDHOME_EXEC/target-${_sh_ctd}"\n'
+    printf '  export CARGO_TARGET_DIR\n'
+    printf '  unset _sh_ctd\n'
+    printf 'fi\n'
+    printf 'if [ -n "${CARGO_TARGET_DIR:-}" ]; then mkdir -p "$CARGO_TARGET_DIR" 2>/dev/null || true; fi\n'
     # # STOP: LEAKSANITIZER NEEDS ptrace, AND THIS CAGE DENIES IT. An
     # `-fsanitize=address` build compiles and links, then loses every byte of
     # its own stdout and exits 1 at exit, because LSan stops threads with
@@ -686,7 +721,15 @@ sh_bake_command() {
     # truncated launcher kept both baked lines near the top and passed the old
     # check, then every command failed to parse. The shell's own parser is the
     # cheapest whole-file check and it needs nothing but the interpreter.
-    if [ "$sh_bc_r" = "$SH_REPO_DIR" ] && [ "$sh_bc_h" = "$SH_HOME" ] && sh -n "$sh_bc_dst" 2>/dev/null; then
+    # REDUNDANCY: SIZE IS THE SECOND WITNESS. A launcher that parses but lost
+    # its tail (a here-doc body, a usage page) is still a broken command; the
+    # baked file must carry at least the source's bytes, so a short file fails
+    # even when its head parses.
+    sh_bc_src_n=$(wc -c < "$sh_bc_src" 2>/dev/null)
+    sh_bc_dst_n=$(wc -c < "$sh_bc_dst" 2>/dev/null)
+    case "$sh_bc_src_n" in ''|*[!0-9]*) sh_bc_src_n=0 ;; esac
+    case "$sh_bc_dst_n" in ''|*[!0-9]*) sh_bc_dst_n=0 ;; esac
+    if [ "$sh_bc_r" = "$SH_REPO_DIR" ] && [ "$sh_bc_h" = "$SH_HOME" ] && sh -n "$sh_bc_dst" 2>/dev/null && [ "$sh_bc_dst_n" -ge "$sh_bc_src_n" ]; then
         sh_step "baked $SH_REPO_DIR and $SH_HOME into $sh_bc_dst"
     else
         sh_warn "the bake at $sh_bc_dst is incomplete (repo='$sh_bc_r' home='$sh_bc_h'); a launch with no HOME falls back to the conventional home"
@@ -746,6 +789,17 @@ sh_entry_write() {
         printf '%s\n' '}'
         printf '%s\n' "[ -r \"\$SANDHOME_HOME/env.sh\" ] && . \"\$SANDHOME_HOME/env.sh\""
     } > "$SH_HOME/entry.sh" 2>/dev/null
+    # The entry point is sourced by shells that cannot run anything else; a
+    # file with a syntax error there breaks every cold shell at once. Verify
+    # with the shell's own parser before reporting success, and warn (not die:
+    # the old file, if any, is already replaced) when it does not parse.
+    if [ -r "$SH_HOME/entry.sh" ]; then
+        if sh -n "$SH_HOME/entry.sh" 2>/dev/null; then
+            :
+        else
+            sh_warn "the entry point at $SH_HOME/entry.sh does not parse; a cold shell cannot use it"
+        fi
+    fi
     unset sh_ew_qhome sh_ew_qexec sh_ew_qbin sh_ew_qhomerepo sh_ew_qrepo
     return 0
 }

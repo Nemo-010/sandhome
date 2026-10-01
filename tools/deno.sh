@@ -46,7 +46,21 @@ tc_deno_doctor() {
     # Deno.Command has outputSync()/output()/spawn(); there is no spawnSync, so
     # the old check threw a TypeError and reported a deno that re-executes fine
     # as broken (issue #151). Run the child and propagate its own exit code.
-    "$sh_dd_bin" eval 'const r = new Deno.Command(Deno.execPath(), {args:["eval","0"]}); Deno.exit(r.outputSync().code);' >/dev/null 2>&1
+    # REDUNDANCY: TWO SPELLINGS OF THE SAME RE-EXEC, NOT A LOWER BAR. The
+    # re-exec through Deno.execPath is what workers do, so both probes prove
+    # it: outputSync first, async spawn second. A --version fallback is
+    # deliberately absent: answering --version proves the binary starts, not
+    # that it can re-execute itself, and the gate is named for the spawn.
+    # One renamed API (the spawnSync defect) cannot red the toolchain again,
+    # and one working spelling cannot be mistaken for a working runtime.
+    if "$sh_dd_bin" eval 'const r = new Deno.Command(Deno.execPath(), {args:["eval","0"]}); Deno.exit(r.outputSync().code);' >/dev/null 2>&1; then
+        return 0
+    fi
+    if "$sh_dd_bin" eval 'const c = new Deno.Command(Deno.execPath(), {args:["eval","0"]}).spawn(); const s = await c.status; Deno.exit(s.code);' >/dev/null 2>&1; then
+        return 0
+    fi
+    return 1
+    "$sh_dd_bin" --version >/dev/null 2>&1
 }
 
 tc_deno_probe() {
