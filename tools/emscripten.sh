@@ -23,6 +23,22 @@ TC_emscripten_DESC='Emscripten SDK (emcc) for wasm32-unknown-emscripten, via ems
 TC_emscripten_BINS='upstream/emscripten/emcc upstream/emscripten/em++'
 TC_emscripten_EXEC_MB=900
 
+# tc_emscripten_copy_bins -> emcc and em++ MUST BE REAL COPIES IN THE VIEW, EVEN
+# IN LAUNCH MODE. Both are `#!/bin/sh` wrappers whose final line is
+#   exec "$PYTHON" -E "$0.py" "$@"
+# and the launch-mode view memfd-execs them. The kernel then runs
+# `/bin/sh /proc/self/fd/N`, so the script's `$0` is `/proc/self/fd/N` and
+# `$0.py` names a file that does not exist:
+#   /usr/bin/python3: can't open file '/proc/self/fd/3.py': [Errno 2] No such file or directory
+# so `sandhome install emscripten` fails its own post-install probe and doctor
+# ends `FAIL toolchain_emscripten=no` while the SDK itself is fine (issue
+# #169). A real copy keeps `$0` the view path, so `$0.py` is the view symlink
+# to the home `emcc.py`; python READS that file, which a noexec home allows.
+# Only emcc/em++ are named: they are the only two files that are exec'd.
+tc_emscripten_copy_bins() {
+    printf 'upstream/emscripten/emcc upstream/emscripten/em++'
+}
+
 # tc_emscripten_release -> the SDK release to install. Pinned, not latest: a
 # moving default turns a 640MB fetch into a surprise on every reinstall, and
 # the rust lockfile pins its own wasm-bindgen beside it. Override with
@@ -219,7 +235,7 @@ case ":\$PATH:" in
 esac
 case ":\$PATH:" in
   *":$sh_ee_view/emsdk/upstream/bin:"*) ;;
-  *) PATH="$sh_ee_view/emsdk/upstream/bin:\$PATH" ;;
+  *) PATH="\$PATH:$sh_ee_view/emsdk/upstream/bin" ;;
 esac
 export PATH
 EOF

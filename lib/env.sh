@@ -206,14 +206,45 @@ sh_env_body() {
     # `cargo build` on a noexec work tree links fine and then dies with
     # Permission denied running ./target/debug/x (issue #156). One guarded
     # default closes the class: a caller who set CARGO_TARGET_DIR keeps it,
-    # otherwise each project gets its own dir under the exec root named for the
-    # work tree, so two checkouts do not share one target dir. The dir is made
-    # here so the first build has a target, matching TMPDIR.
+    # otherwise each project gets its own dir under the exec root. The dir is
+    # made here so the first build has a target, matching TMPDIR.
+    #
+    # # STOP: THE ID IS KEYED ON THE ABSOLUTE PATH, NOT THE BASENAME. The first
+    # cut used `${PWD##*/}`, so /w/a/dup and /w/b/dup both got
+    # target-dup. Cargo treats a target dir as one project's, so the second
+    # crate's build was "fresh" and `cargo run` printed the FIRST crate's
+    # binary, and `cargo clean` in one deleted the other's artifacts (issue
+    # #167). A short digest of the absolute path is collision-resistant and
+    # keeps the readable basename; `cksum` is POSIX, and a no-tool fallback
+    # percent-encodes the path so the id is injective even when cksum is
+    # absent. The helper is a function so its `set --` can never clobber the
+    # sourcing shell's positional parameters, and it is unset after use.
     printf 'if [ -z "${CARGO_TARGET_DIR:-}" ]; then\n'
-    printf '  _sh_ctd=${PWD##*/}; [ -n "$_sh_ctd" ] || _sh_ctd=work\n'
+    printf '  _sh_target_id() {\n'
+    printf '    _sh_ti_p=$1\n'
+    printf '    _sh_ti_b=${_sh_ti_p##*/}; [ -n "$_sh_ti_b" ] || _sh_ti_b=work\n'
+    printf '    if command -v cksum >/dev/null 2>&1; then\n'
+    printf '      _sh_ti_s=$(printf "%%s" "$_sh_ti_p" | cksum)\n'
+    printf '      printf "%%s-%%s" "$_sh_ti_b" "${_sh_ti_s%%%% *}"\n'
+    printf '      return 0\n'
+    printf '    fi\n'
+    printf '    _sh_ti_o=$_sh_ti_b; _sh_ti_r=$_sh_ti_p\n'
+    printf '    while [ -n "$_sh_ti_r" ]; do\n'
+    printf '      _sh_ti_c=${_sh_ti_r%%%%"${_sh_ti_r#?}"}\n'
+    printf '      _sh_ti_r=${_sh_ti_r#?}\n'
+    printf '      case "$_sh_ti_c" in\n'
+    printf '        /) _sh_ti_o="${_sh_ti_o}%%2f" ;;\n'
+    printf '        %%) _sh_ti_o="${_sh_ti_o}%%25" ;;\n'
+    printf '        *) _sh_ti_o="${_sh_ti_o}$_sh_ti_c" ;;\n'
+    printf '      esac\n'
+    printf '    done\n'
+    printf '    printf "%%s" "$_sh_ti_o"\n'
+    printf '  }\n'
+    printf '  _sh_ctd=$(_sh_target_id "$PWD")\n'
     printf '  CARGO_TARGET_DIR="$SANDHOME_EXEC/target-${_sh_ctd}"\n'
     printf '  export CARGO_TARGET_DIR\n'
     printf '  unset _sh_ctd\n'
+    printf '  unset -f _sh_target_id\n'
     printf 'fi\n'
     printf 'if [ -n "${CARGO_TARGET_DIR:-}" ]; then mkdir -p "$CARGO_TARGET_DIR" 2>/dev/null || true; fi\n'
     # # STOP: LEAKSANITIZER NEEDS ptrace, AND THIS CAGE DENIES IT. An

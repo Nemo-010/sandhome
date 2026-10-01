@@ -942,7 +942,13 @@ sh_view_current() {
                             if cmp -s "$sh_vc_help" "$sh_vc_dst/$sh_vc_rel" 2>/dev/null; then
                                 :
                             elif cmp -s "$sh_vc_e" "$sh_vc_dst/$sh_vc_rel" 2>/dev/null; then
-                                sh_vc_ok=1; break
+                                # A real copy is the launch shape ONLY for a
+                                # file the promote copies rather than stamps:
+                                # a non-ELF script, which a launcher would
+                                # make unreadable to its interpreter (issue
+                                # #173). An ELF here is a copy-mode leftover
+                                # and stales the view (issue #113).
+                                if sh_is_elf_exec "$sh_vc_e"; then sh_vc_ok=1; break; fi
                             elif [ ! "$sh_vc_dst/$sh_vc_rel" -nt "$sh_vc_help" ]; then
                                 sh_vc_ok=1; break
                             fi
@@ -1007,6 +1013,20 @@ sh_is_exec_file() {
         *.so|*.so.*|*.dylib|*.dll|*.a|*.rlib|*.rmeta|*.o) return 1 ;;
     esac
     return 0
+}
+
+# sh_is_elf_exec PATH -> 0 when PATH is a real ELF program, the only kind of
+# file a memexec launcher may replace. A launcher copy is a BINARY, so replacing
+# a script with one makes it unreadable to the interpreter that would have read
+# it: measured, `import platform` read a stamped stdlib platform.py and died with
+# "source code string cannot contain null bytes" (issue #173). Scripts are copied
+# instead — a copy is both readable and runnable, and interpreter source is small
+# next to the binaries the launcher exists to avoid copying.
+sh_is_elf_exec() {
+    [ -f "$1" ] || return 1
+    [ -x "$1" ] || return 1
+    sh_ee_magic=$(dd if="$1" bs=4 count=1 2>/dev/null | od -An -tx1 2>/dev/null | tr -d ' \n')
+    [ "$sh_ee_magic" = 7f454c46 ]
 }
 
 # sh_promote_tree SRC DEST -> mirror SRC into DEST. Directories are recreated,
@@ -1132,13 +1152,16 @@ sh_promote_tree() {
                 sh_pt_rel=${sh_pt_e#"$sh_pt_src"/}
                 # Launch mode: a launcher copy maps itself back to this file
                 # at runtime and runs it from memory, so the exec root holds
-                # kilobytes per entry. A copy-listed executable lands as real
-                # bytes instead: it is spawned by path and locates its
+                # kilobytes per entry. Only ELF programs are stamped: a launcher
+                # is a binary, and stamping a script makes it unreadable to its
+                # interpreter (issue #173). Scripts take the copy branch, which
+                # is readable and runnable. A copy-listed executable lands as
+                # real bytes instead: it is spawned by path and locates its
                 # siblings exe-relative, which a memfd image cannot do (see
                 # sh_copy_listed). A stamp that fails falls back to the copy
                 # below, which is the old behavior and always works where
                 # the view itself is writable.
-                if [ "${SH_VIEW_MODE:-copy}" = launch ] && ! sh_copy_listed "$sh_pt_rel" && sh_memexec_stamp "$sh_pt_e" "$sh_pt_d/$sh_pt_b"; then
+                if [ "${SH_VIEW_MODE:-copy}" = launch ] && ! sh_copy_listed "$sh_pt_rel" && sh_is_elf_exec "$sh_pt_e" && sh_memexec_stamp "$sh_pt_e" "$sh_pt_d/$sh_pt_b"; then
                     :
                 else
                     # The destination is removed first: it may be a symlink

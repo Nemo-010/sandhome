@@ -1,15 +1,19 @@
 #!/bin/sh
 # Meson, the build system for C/C++/Rust/Vala projects, installed through the
-# python toolchain's uv. Meson is a Python package with no single binary, so it
-# is not fetched as a tarball: uv builds it an isolated environment on the exec
-# root and links the `meson` console script next to the toolchain's own
-# binaries. REQUIRES python so the closure installs uv first (issue #123).
+# python toolchain's uv. Meson is pure Python, so its payload does NOT need the
+# exec root: `uv pip install --target` puts the package under the toolchain root
+# on the persistent home, and a tiny launcher runs it with the exec-view python.
+# REQUIRES python so the closure installs uv first (issue #123).
 #
-# The exec-root paths are the load-bearing part: `uv tool install` writes the
-# launcher and the environment under UV_TOOL_BIN_DIR/UV_TOOL_DIR, and both
-# point at $SANDHOME_EXEC (issue #82, fixed), so the console script is
-# executable. Without them the install succeeds and the script dies with
-# "bad interpreter: Permission denied" on the noexec home.
+# STOP: THE PAYLOAD LIVES ON THE HOME, NOT UNDER `uv tool install`. The first
+# cut used `uv tool install`, which puts the venv under UV_TOOL_DIR on the exec
+# root and keeps only the console shim on the home. A tmpfs restart clears the
+# exec root, so after `sandhome resume` the kept meson shim died with
+#   cannot execute .../toolchains/meson/bin/meson from memory: No such file or directory
+# and `doctor` stayed green when meson was not in the recorded request, leaving
+# a broken name on PATH (issue #172). A pure-Python package unpacked onto the
+# home survives the restart, because only the interpreter must exec and that is
+# the exec-view python the tree already mirrors.
 TC_meson_DESC='Meson, the build system for C/C++/Rust/Vala projects'
 TC_meson_BINS='bin/meson'
 TC_meson_REQUIRES='python'
@@ -66,32 +70,41 @@ tc_meson_install() {
     fi
     [ -n "$sh_me_uv" ] || { sh_warn 'meson needs uv (install the python toolchain first)'; return 1; }
     rm -rf "$sh_me_root" 2>/dev/null
-    mkdir -p "$sh_me_root/bin" 2>/dev/null || return 1
-    # --force replaces an environment this toolchain owns, so a reinstall is
-    # deterministic rather than "already installed" into someone else's dir.
-    sh_me_out=$("$sh_me_uv" tool install --force meson 2>&1)
-    case "$sh_me_out" in
-        *meson*) : ;;
-        *) sh_warn "uv could not install meson: $(printf '%s' "$sh_me_out" | sh_first_line)"; return 1 ;;
-    esac
-    # uv links the console script where UV_TOOL_BIN_DIR points. Copy it into the
-    # toolchain's own bin so this module owns a file, exactly as the other
-    # modules do, and so repair can rebuild the view from the payload. Three
-    # locations are tried because the launcher may live under a hashed env dir
-    # while only the stable link is on PATH.
-    sh_me_src=''
-    if [ -n "${UV_TOOL_BIN_DIR:-}" ] && [ -e "$UV_TOOL_BIN_DIR/meson" ]; then
-        sh_me_src=$UV_TOOL_BIN_DIR/meson
-    elif [ -n "${SANDHOME_EXEC:-}" ] && [ -e "$SANDHOME_EXEC/uv-bin/meson" ]; then
-        sh_me_src="$SANDHOME_EXEC/uv-bin/meson"
-    elif sh_have meson; then
-        sh_me_src=$(sh_path_where meson)
+    sh_me_lib="$sh_me_root/lib"
+    mkdir -p "$sh_me_root/bin" "$sh_me_lib" 2>/dev/null || return 1
+    # --target, not `tool install`: the package lands on the persistent home
+    # and no venv is created on the exec root, so a restart cannot strand it
+    # (issue #172). --upgrade makes a reinstall deterministic.
+    sh_me_out=$("$sh_me_uv" pip install --target "$sh_me_lib" --upgrade meson 2>&1)
+    if [ ! -d "$sh_me_lib/mesonbuild" ]; then
+        sh_warn "uv could not install meson: $(printf '%s' "$sh_me_out" | sh_first_line)"
+        return 1
     fi
-    [ -n "$sh_me_src" ] || { sh_warn 'uv installed meson but no meson launcher was found'; return 1; }
-    cp -f "$sh_me_src" "$sh_me_root/bin/meson" 2>/dev/null || return 1
-    chmod 0755 "$sh_me_root/bin/meson" 2>/dev/null || true
-    if [ ! -x "$sh_me_root/bin/meson" ]; then
-        sh_warn "meson did not land at $sh_me_root/bin/meson"
+    # The launcher runs the exec-view python with the home lib on sys.path. It
+    # does not read $0 (the launch-mode view runs it from a memfd), so it is
+    # safe as a launcher copy, and it survives a restart with the payload it
+    # names. The path is single-quoted by sh_sq_quote so a home with a quote or
+    # a space still produces a runnable script.
+    sh_me_launcher="$sh_me_root/bin/meson"
+    # The launcher runs the exec-view python with the home lib on sys.path. It
+    # does not read $0 (the launch-mode view runs it from a memfd), so it is
+    # safe as a launcher copy, and it survives a restart with the payload it
+    # names. The lib directory is SINGLE-QUOTED through a shell variable, so the
+    # printf that writes the assignment is not itself a format string, and the
+    # line is a plain `SANDHOME_MESON_LIB=<default>` the reference generator can
+    # read (docs/reference.md is GENERATED; a bare literal default of $ERB
+    # there is the docs test's business, not this file's).
+    sh_me_lib_q=$(sh_sq_quote "$sh_me_lib")
+    {
+        printf '#!/bin/sh\n'
+        printf '# written by sandhome: run meson from the exec-view python.\n'
+        printf 'SANDHOME_MESON_LIB=%s\n' "$sh_me_lib_q"
+        printf 'export SANDHOME_MESON_LIB\n'
+        printf 'exec python3 -c %s "$@"\n' "$(sh_sq_quote 'import os, sys; sys.path.insert(0, os.environ["SANDHOME_MESON_LIB"]); from mesonbuild.mesonmain import main; sys.exit(main())')"
+    } > "$sh_me_launcher" 2>/dev/null || return 1
+    chmod 0755 "$sh_me_launcher" 2>/dev/null || true
+    if [ ! -x "$sh_me_launcher" ]; then
+        sh_warn "meson did not land at $sh_me_launcher"
         return 1
     fi
     return 0

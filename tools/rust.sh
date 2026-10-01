@@ -1006,6 +1006,17 @@ EOF
     if sh_have zig 2>/dev/null || [ -x "$SH_EXEC_BIN/zig" ]; then
         for sh_re_t in $(sh_split_on ',' "${SH_RUST_TARGETS:-}"); do
             [ -n "$sh_re_t" ] || continue
+            # # STOP: EMSCRIPTEN IS NOT A ZIG TARGET, SO IT GETS NO ZIG WRAPPER.
+            # The comment above already says emcc is the linker for this target
+            # and that CARGO_TARGET_WASM32_UNKNOWN_EMSCRIPTEN_LINKER=emcc is the
+            # fix, but the loop still wrote a zig wrapper for every requested
+            # target and exported the variable unconditionally. Because
+            # env.d/rust.sh loads after env.d/emscripten.sh, the zig wrapper won
+            # and the link died with `Unknown Clang option: '-sABORTING_MALLOC=0'`
+            # (issue #170). Leave the emscripten linker to tools/emscripten.sh.
+            case "$sh_re_t" in
+                *emscripten*) continue ;;
+            esac
             sh_re_wrap="$SH_EXEC_BIN/rust-link-$sh_re_t"
             # # STOP: THE WRAPPER REWRITES THE TRIPLE AND DROPS RUSTC'S OWN
             # LINKER FLAGS. The previous one-line wrapper was

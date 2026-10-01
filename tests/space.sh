@@ -970,8 +970,13 @@ lb="$tmp-launch"
 rm -rf "$lb"
 mkdir -p "$lb/home/toolchains/l/bin" "$lb/exec/bin" "$lb/exec/views" "$lb/home/tmp"
 printf 'helper-v1\n' > "$lb/exec/bin/sandhome-memexec"
-printf '#!/bin/sh\necho tool\n' > "$lb/home/toolchains/l/bin/tool"
-chmod 0755 "$lb/home/toolchains/l/bin/tool"
+chmod 0755 "$lb/exec/bin/sandhome-memexec"
+# tool is a REAL ELF so it is stamped; script.sh is text and is copied, which
+# is the shape issue #173 requires. The fixture needs both: a rebuilt helper
+# stales a launcher, and a copied script must NOT be staled by it.
+cp /bin/sh "$lb/home/toolchains/l/bin/tool" 2>/dev/null || printf 'ELF\n' > "$lb/home/toolchains/l/bin/tool"
+printf '#!/bin/sh\necho script\n' > "$lb/home/toolchains/l/bin/script.sh"
+chmod 0755 "$lb/home/toolchains/l/bin/tool" "$lb/home/toolchains/l/bin/script.sh"
 sh -c '
     for m in common detect space fetch env toolchain memexec; do . "$1/lib/$m.sh"; done
     SH_HOME=$2/home; SH_HOME_TOOLCHAINS=$2/home/toolchains; SH_EXEC=$2/exec
@@ -979,6 +984,7 @@ sh -c '
     SH_VIEW_MODE=launch; SH_DRY_RUN=0; SH_SELF=test; SH_COPY_ONLY=""
     export SH_HOME SH_HOME_TOOLCHAINS SH_EXEC SH_EXEC_BIN SH_EXEC_VIEWS SH_HOME_TMP SH_HOME_EXEC SH_VIEW_MODE SH_DRY_RUN SH_SELF SH_COPY_ONLY
     sh_promote_toolchain l bin/tool >/dev/null 2>&1
+    printf "script-kind=%s\n" "$(sh_view_kind_of "$SH_EXEC_VIEWS/l/bin/script.sh")"
     if sh_view_current "$SH_HOME_TOOLCHAINS/l" "$SH_EXEC_VIEWS/l"; then printf "launch-current\n"; fi
     sleep 1
     printf "helper-v2\n" > "$SH_EXEC_BIN/sandhome-memexec"
@@ -993,6 +999,7 @@ sh -c '
     if sh_view_current "$SH_HOME_TOOLCHAINS/l" "$SH_EXEC_VIEWS/l"; then printf "listed-real-current\n"; fi
 ' sh "$ROOT" "$lb" > "$lb/out" 2>&1
 lb_out=$(cat "$lb/out" 2>/dev/null)
+t_contains "$lb_out" 'script-kind=copy' 'a non-ELF executable is copied into the launch view (issue #173)'
 t_contains "$lb_out" 'launch-current' 'a stamped launcher matches its helper'
 t_contains "$lb_out" 'helper-rebuilt-stale' 'a rebuilt helper stales the launchers stamped from it'
 t_contains "$lb_out" 'wrapper-current' 'a module wrapper newer than the helper counts as current'

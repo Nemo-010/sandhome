@@ -58,7 +58,15 @@ tc_python_install() {
         return 1
     fi
     mkdir -p "$sh_pi_root/python" "$SH_HOME/cache/uv" 2>/dev/null || true
-    if ! UV_PYTHON_INSTALL_DIR="$sh_pi_root/python" UV_CACHE_DIR="$SH_HOME/cache/uv" \
+    # UV_PYTHON_DOWNLOADS=manual: the env.sh this process loaded exports
+    # `UV_PYTHON_DOWNLOADS=never` into it, so a plain `install --force python`
+    # inherits `never` and uv refuses to fetch the CPython it is explicitly
+    # being asked to install — measured: "Python downloads are not allowed
+    # (`python-downloads = \"never\"`)", the toolchain root left empty, and
+    # the next shell falling back to the system interpreter (issue #174).
+    # `manual` permits exactly this explicit install and nothing implicit, so
+    # the fragment's hermetic default is unchanged at runtime.
+    if ! UV_PYTHON_DOWNLOADS=manual UV_PYTHON_INSTALL_DIR="$sh_pi_root/python" UV_CACHE_DIR="$SH_HOME/cache/uv" \
          "$sh_pi_uv" python install 3.12 >/dev/null 2>&1; then
         sh_warn 'uv could not install CPython 3.12'
         return 1
