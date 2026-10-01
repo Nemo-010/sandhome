@@ -230,7 +230,13 @@ sh_toolchain_rust_target_wrapper() {
         printf '  _sh_cw_t=$_sh_cw_d\n'
         printf '  while [ -n "$_sh_cw_t" ] && [ "$_sh_cw_t" != / ]; do\n'
         printf '    [ -f "$_sh_cw_t/Cargo.toml" ] || { case "$_sh_cw_t" in */*) _sh_cw_t=${_sh_cw_t%%/*} ;; *) _sh_cw_t=/ ;; esac; continue; }\n'
-        printf '    if command -v grep >/dev/null 2>&1 && grep -q "^\\\\[workspace\\\\]" "$_sh_cw_t/Cargo.toml" 2>/dev/null; then\n'
+        printf '    _sh_cw_k=""\n'
+        printf '    while IFS= read -r _sh_cw_l 2>/dev/null; do\n'
+        printf '      case "$_sh_cw_l" in\n'
+        printf "        '[workspace]'*) _sh_cw_k=\$_sh_cw_t; break ;;\n"
+        printf '      esac\n'
+        printf '    done < "$_sh_cw_t/Cargo.toml"\n'
+        printf '    if [ -n "$_sh_cw_k" ]; then\n'
         printf '      _sh_cw_w=$_sh_cw_t; break\n'
         printf '    fi\n'
         printf '    case "$_sh_cw_t" in */*) _sh_cw_t=${_sh_cw_t%%/*} ;; *) _sh_cw_t=/ ;; esac\n'
@@ -348,8 +354,18 @@ sandhome_cargo_target() {
         #   $ grep -q '^[workspace]' ws/crates/one/Cargo.toml ->  rc=1 (right)
         #   $ grep -q '^[workspace]' ws/Cargo.toml            ->  rc=0 (right)
         # The backslash is what makes the brackets literal; the anchor is what
-        # makes it a section header rather than a mention of the word.
-        if grep -q '^\[workspace\]' "$_sh_ctr_t/Cargo.toml" 2>/dev/null; then
+        # makes it a section header rather than a mention of the word - and BOTH
+        # still put a tool in a fragment every consumer shell sources, which
+        # AGENTS.md rule 4 rules out. A TOML section header is a line that is
+        # exactly `[workspace]`, so a case on the whole line is the test and it
+        # needs nothing external.
+        _sh_ctr_k=''
+        while IFS= read -r _sh_ctr_l 2>/dev/null; do
+            case "$_sh_ctr_l" in
+                '[workspace]'*) _sh_ctr_k=$_sh_ctr_t; break ;;
+            esac
+        done < "$_sh_ctr_t/Cargo.toml"
+        if [ -n "$_sh_ctr_k" ]; then
             _sh_ctr_w=$_sh_ctr_t
             break
         fi

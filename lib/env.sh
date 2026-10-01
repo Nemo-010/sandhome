@@ -252,7 +252,13 @@ sh_env_body() {
     printf '  _sh_ctd_t=$_sh_ctd_p\n'
     printf '  while [ -n "$_sh_ctd_t" ] && [ "$_sh_ctd_t" != / ]; do\n'
     printf '    [ -f "$_sh_ctd_t/Cargo.toml" ] || { case "$_sh_ctd_t" in */*) _sh_ctd_t=${_sh_ctd_t%%/*} ;; *) _sh_ctd_t=/ ;; esac; continue; }\n'
-    printf '    if command -v grep >/dev/null 2>&1 && grep -q "^\\[workspace\\]" "$_sh_ctd_t/Cargo.toml" 2>/dev/null; then\n'
+    printf "    _sh_ctd_k=''\n"
+    printf '    while IFS= read -r _sh_ctd_l 2>/dev/null; do\n'
+    printf '      case "$_sh_ctd_l" in\n'
+    printf "        '[workspace]'*) _sh_ctd_k=\$_sh_ctd_t; break ;;\n"
+    printf '      esac\n'
+    printf '    done < "$_sh_ctd_t/Cargo.toml"\n'
+    printf '    if [ -n "$_sh_ctd_k" ]; then\n'
     printf '      _sh_ctd_w=$_sh_ctd_t; break\n'
     printf '    fi\n'
     printf '    case "$_sh_ctd_t" in */*) _sh_ctd_t=${_sh_ctd_t%%/*} ;; *) _sh_ctd_t=/ ;; esac\n'
@@ -313,7 +319,7 @@ sh_env_body() {
     printf '  fi\n'
     printf '  CARGO_TARGET_DIR="$SANDHOME_EXEC/target-${_sh_ctd}"\n'
     printf '  export CARGO_TARGET_DIR\n'
-    printf '  unset _sh_ctd_p _sh_ctd_d _sh_ctd_s _sh_ctd_o _sh_ctd_r _sh_ctd_c _sh_ctd_w _sh_ctd_t\n'
+    printf '  unset _sh_ctd_p _sh_ctd_d _sh_ctd_s _sh_ctd_o _sh_ctd_r _sh_ctd_c _sh_ctd_w _sh_ctd_t _sh_ctd_k _sh_ctd_l\n'
     printf '  unset _sh_ctd\n'
     printf 'fi\n'
     printf 'if [ -n "${CARGO_TARGET_DIR:-}" ]; then mkdir -p "$CARGO_TARGET_DIR" 2>/dev/null || true; fi\n'

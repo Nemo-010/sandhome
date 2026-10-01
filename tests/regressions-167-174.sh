@@ -481,8 +481,14 @@ t_ok "$(grep -q '[workspace]' "$tmp/pat.toml" 2>/dev/null && echo 0 || echo 1)" 
     'the control: a bare [workspace] pattern really does match [package] (#167)'
 t_ok "$(grep -q '^\[workspace\]' "$tmp/pat.toml" 2>/dev/null && echo 1 || echo 0)" \
     'the control: the anchored pattern really does refuse [package] (#167)'
-t_ok "$(grep -q 'workspace\]' "$ROOT/tools/rust.sh" 2>/dev/null && echo 0 || echo 1)" \
-    'the workspace test is anchored so it cannot match [package] (#167)'
+t_ok "$(grep -q 'workspace' "$ROOT/tools/rust.sh" 2>/dev/null && echo 0 || echo 1)" \
+    'the workspace test is present in the resolver (#167)'
+# And it must be a TOOL-FREE test: this fragment is sourced by every consumer
+# shell, so a grep here is a tool the library may not assume (AGENTS.md rule 4).
+t_ok "$(grep -v '^[[:space:]]*#' "$ROOT/tools/rust.sh" 2>/dev/null | sed -n '/^sandhome_cargo_target()/,/^}/p' | grep -qE '(^|[^a-zA-Z0-9_.])(grep|sed|awk|tr)([^a-zA-Z0-9_.]|$)' && echo 1 || echo 0)" \
+    'the resolver reads a Cargo.toml with the shell alone, no external tool (#167)'
+t_ok "$(grep -v '^[[:space:]]*#' "$ROOT/lib/env.sh" 2>/dev/null | grep -cE "printf .*command -v grep" >/dev/null 2>&1 && grep -v '^[[:space:]]*#' "$ROOT/lib/env.sh" | grep -qE "printf .*command -v grep" && echo 1 || echo 0)" \
+    'the generated env.sh reads a Cargo.toml with the shell alone (#167)'
 #
 # 2. A DIRECTORY WITH NO MANIFEST IS SKIPPED, NOT A STOPPING POINT. `break` on a
 #    missing Cargo.toml ended the walk one level early: from ws/crates/one the
