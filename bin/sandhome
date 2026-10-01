@@ -1,9 +1,22 @@
 #!/bin/sh
 # sandhome - the one command. POSIX sh; sources the library from the checkout it
-# lives in, or from SANDHOME_REPO, so a copy installed under a prefix works.
+# lives in, or from SANDHOME_REPO_DIR, so a copy installed under a prefix works.
 set -u
 
 SH_SELF=sandhome
+
+# SANDHOME-BAKED-REPO: replaced at install with the durable checkout path.
+# The installed copy on the exec root carries where its library lives, so a
+# process with no HOME and no inherited environment (`env -i /tmp/bin/sandhome
+# doctor`) still starts. A stale value fails the readability check below
+# and every later source is tried in turn, so a moved tree degrades to the
+# old behavior instead of a wrong library.
+SH_BAKED_REPO_DIR=''
+# SANDHOME-BAKED-HOME: replaced at install with the durable data root. The
+# library path alone is not enough: a copy with no inherited environment also
+# needs to know where env.sh, the toolchain payloads and the recorded exec root
+# live, or it invents /tmp/sandhome and runs the wrong environment.
+SH_BAKED_HOME=''
 
 # Resolve the repository directory: the environment wins, then this script's own
 # path. A script read from a pipe has no path, and that case is refused rather
@@ -17,16 +30,183 @@ if [ -n "${SANDHOME_REPO_DIR:-}" ]; then
     sh_repo=$SANDHOME_REPO_DIR
 elif [ -n "${SH_REPO_DIR:-}" ]; then
     sh_repo=$SH_REPO_DIR
+elif [ -n "$SH_BAKED_REPO_DIR" ] && [ -r "$SH_BAKED_REPO_DIR/lib/common.sh" ]; then
+    sh_repo=$SH_BAKED_REPO_DIR
 else
+    # # STOP: THE PRIVATE MIRROR COMES BEFORE EVERY POINTER. The bake and the
+    # `.sandhome-home` pointer are absolute paths, and a checkout that a tmpfs
+    # restart or a cleanup took away makes both of them wrong; a directory
+    # BESIDE this copy cannot be, because it moves with the copy. The bootstrap
+    # and `sh_exec_install_launchers` (which install and repair go through)
+    # mirror lib/ and bin/ into $SANDHOME_EXEC/.sandhome-lib, so `env -i
+    # <exec>/bin/sandhome doctor` still works on a host whose checkout is gone
+    # and whose home pointer is stale. That is the case issue #133 left behind:
+    # the fix made the bake durable, and this makes the thing the bake points
+    # at optional.
+    sh_priv=''
     case "$0" in
-        */*) sh_repo=$(CDPATH='' cd -- "${0%/*}/.." && pwd) ;;
-        *)   printf 'sandhome: cannot find the sandhome library; run it by path or set SANDHOME_REPO\n' >&2
-             exit 2 ;;
+        */*) sh_priv=${0%/*}/.. ;;
     esac
+    if [ -n "$sh_priv" ] && [ -r "$sh_priv/.sandhome-lib/lib/common.sh" ]; then
+        # # STOP: THE MIRROR ITSELF IS THE REPO, NOT THE DIRECTORY BESIDE IT.
+        # This set sh_repo to sh_priv (the exec root) after testing the mirror
+        # at sh_priv/.sandhome-lib, so the next `-r $sh_repo/lib/common.sh`
+        # failed and the mirror was discarded: the fallback existed, was
+        # checked, and never worked. `env -i <exec>/bin/sandhome` therefore
+        # exited 2 on every fresh pipe setup until `repair` rewrote the bake
+        # (issue #147). The cd target is the mirror directory that was just
+        # proven readable.
+        sh_repo=$(CDPATH='' cd -- "$sh_priv/.sandhome-lib" 2>/dev/null && pwd) || sh_repo=''
+    fi
+    if [ -z "${sh_repo:-}" ] || [ ! -r "$sh_repo/lib/common.sh" ]; then
+        case "$0" in
+            */*) sh_repo=$(CDPATH='' cd -- "${0%/*}/.." && pwd) ;;
+            *)   sh_repo='' ;;
+        esac
+    fi
+    # # STOP: A BARE SHELL FINDS THE CHECKOUT FROM THE ENV FILE, WHICH IS WHERE
+    # IT WAS ALREADY WRITTEN. ROUTE.md step 4 offers `eval "$(sandhome env)"`
+    # for a shell where sourcing is not possible, and it is the form a tool
+    # harness uses: no .profile, no .bashrc, no variables set. The copy PATH
+    # names lives on the exec root, where "the parent of $0" is the exec root
+    # and there is no lib/ under it, so with no SANDHOME_REPO_DIR in the
+    # environment the command could not find its own library and printed
+    #   sandhome: no library under /tmp; set SANDHOME_REPO
+    # naming a variable documented as the owner/name slug to fetch from a pipe,
+    # not a path, so following that error could not work either. The eval was
+    # impossible exactly where the docs recommend it (issue #40).
+    #
+    # The home is not a candidate for the library itself: a network-only install
+    # leaves no lib/ under the home, because the library only ever lives in the
+    # checkout. What the home does hold is env.sh, and env.sh carries
+    # SANDHOME_REPO_DIR. So the same three roots the bootstrap and env.sh
+    # resolve are searched for that file, and the single value it records is
+    # read the way the shell's own read reads it - the library may not use grep.
+    # # STOP: NO HOME IS NOT AN ABORT. `set -u` is on for this whole file, so a
+    # bare `$HOME` in this candidate list ends the process with the shell's own
+    # message and nothing else:
+    #   $ env -i PATH=/exec/bin:/usr/bin:/bin sandhome doctor
+    #   /exec/bin/sandhome: 44: HOME: parameter not set        (exit 126)
+    # That is the worst possible failure for the case this block exists to
+    # serve: a tool harness that sets no HOME, running the command the router
+    # names, getting a raw shell error that mentions neither sandhome, nor the
+    # library, nor what to set. Every command failed this way - version, doctor,
+    # space, path, env, report, toolchains - because this preamble runs before
+    # anything else. `${HOME:-}` is used throughout, and the roots that need a
+    # home now say so in words rather than aborting.
+    if [ ! -n "$sh_repo" ] || [ ! -r "$sh_repo/lib/common.sh" ]; then
+        for sh_repo_home in \
+            "${SANDHOME_HOME:-}" \
+            "${XDG_DATA_HOME:-}/sandhome" \
+            "${HOME:-}/.local/share/sandhome" \
+            "${HOME:-}/.sandhome"
+        do
+            [ -n "${sh_repo_home:-}" ] || continue
+            case "$sh_repo_home" in
+                /.local/share/sandhome|/.sandhome) continue ;;
+            esac
+            [ -r "$sh_repo_home/env.sh" ] || continue
+            while IFS= read -r sh_repo_l; do
+                # The line is `export SANDHOME_REPO_DIR=${SANDHOME_REPO_DIR:-'PATH'}`
+                # - the leading word, the parameter expansion, and a quoted
+                # default all have to come off before what is left is a path.
+                # The second pattern is spelled with a leading `*` on purpose.
+                # docs/generate-reference.sh takes the first line matching
+                # "^ *SANDHOME_REPO_DIR=" as that variable's default value, so a
+                # case arm written the obvious way - indented, then the bare
+                # name, then `=*` - is read as an assignment and the generated
+                # reference reports the default as `*)`. It failed here exactly
+                # that way, and a reference that prints `*)` is a document
+                # nobody can trust.
+                case "$sh_repo_l" in
+                    export\ SANDHOME_REPO_DIR=*) sh_repo_l=${sh_repo_l#export } ;;
+                esac
+                case "$sh_repo_l" in
+                    *SANDHOME_REPO_DIR=*)
+                        sh_repo=${sh_repo_l#SANDHOME_REPO_DIR=}
+                        sh_repo=${sh_repo#\$\{SANDHOME_REPO_DIR:-}
+                        sh_repo=${sh_repo%\}}
+                        sh_repo=${sh_repo#\'}
+                        sh_repo=${sh_repo%\'}
+                        sh_repo=${sh_repo#\"}
+                        sh_repo=${sh_repo%\"}
+                        break ;;
+                esac
+            done < "$sh_repo_home/env.sh"
+            [ -r "$sh_repo/lib/common.sh" ] && break
+            sh_repo=''
+        done
+    fi
+    if [ -z "$sh_repo" ] || [ ! -r "$sh_repo/lib/common.sh" ]; then
+        if [ -z "${HOME:-}" ] && [ -z "${SANDHOME_HOME:-}" ] && [ -z "${XDG_DATA_HOME:-}" ]; then
+            printf 'sandhome: cannot find the sandhome library, and this shell has no HOME to look in\n' >&2
+            printf 'sandhome: set SANDHOME_REPO_DIR to the checkout, or set HOME and run this again\n' >&2
+        else
+            printf 'sandhome: cannot find the sandhome library; set SANDHOME_REPO_DIR to the checkout, or run the copy in the checkout\n' >&2
+        fi
+        exit 2
+    fi
 fi
 if [ ! -r "$sh_repo/lib/common.sh" ]; then
-    printf 'sandhome: no library under %s; set SANDHOME_REPO\n' "$sh_repo" >&2
+    printf 'sandhome: no library under %s; set SANDHOME_REPO_DIR to a checkout containing lib/common.sh\n' "$sh_repo" >&2
     exit 2
+fi
+
+# # STOP: THE COPY MUST KNOW ITS HOME, NOT ONLY ITS LIBRARY. The installed copy
+# carries the checkout path so `env -i /exec/bin/sandhome version` starts; it
+# carried nothing about SANDHOME_HOME, so with no environment it fell back to
+# /tmp/sandhome, found no env.sh there, picked an unrelated exec root and
+# reported home=/tmp/sandhome. `env -i <exec>/bin/sandhome exec jq` then exited
+# 127 because jq was not on the PATH it had invented. Five routes, in order,
+# so a copy that predates the bake, whose checkout is gone, whose home moved,
+# or whose exec root was cleared still recovers: the private library mirror
+# beside the copy (above), the baked home, a `.sandhome-home` pointer written
+# on the exec root beside the copy, the conventional home paths, and the
+# recorded exec root's own pointer. Every pointer is validated (absolute path
+# plus a readable env.sh) before it is trusted, because a stale or hostile
+# file must not redirect the home.
+#
+# The library mirror beside the copy is looked for FIRST, in the block above
+# (sh_priv/.sandhome-lib/lib/common.sh): a directory beside the copy cannot be
+# stale in the way an absolute path can, because it moves with the copy, and a
+# checkout that a tmpfs restart or a cleanup took away is exactly the state
+# every pointer here describes as "present" until the copy reads it and finds
+# nothing. The bootstrap mirrors lib/ and bin/ into
+# $SANDHOME_EXEC/.sandhome-lib and `repair` re-mirrors it, so
+# `env -i <exec>/bin/sandhome doctor` works on a host whose checkout is gone
+# and whose home pointer is stale. Issue #133 measured the BAKE dying; this
+# makes the thing the bake points at optional.
+if [ -z "${SANDHOME_HOME:-}" ] && [ -n "$SH_BAKED_HOME" ]; then
+    case "$SH_BAKED_HOME" in
+        /*)
+            if [ -r "$SH_BAKED_HOME/env.sh" ]; then
+                SANDHOME_HOME=$SH_BAKED_HOME
+                export SANDHOME_HOME
+            fi ;;
+    esac
+fi
+if [ -z "${SANDHOME_HOME:-}" ]; then
+    sh_home_ptr=''
+    case "$0" in
+        */*) sh_home_ptr=$(CDPATH='' cd -- "${0%/*}/.." 2>/dev/null && pwd) ;;
+    esac
+    if [ -n "$sh_home_ptr" ] && [ -r "$sh_home_ptr/.sandhome-home" ]; then
+        IFS= read -r sh_home_from_ptr < "$sh_home_ptr/.sandhome-home" || sh_home_from_ptr=''
+        case "$sh_home_from_ptr" in
+            /*) [ -r "$sh_home_from_ptr/env.sh" ] && { SANDHOME_HOME=$sh_home_from_ptr; export SANDHOME_HOME; } ;;
+        esac
+    fi
+fi
+if [ -z "${SANDHOME_HOME:-}" ]; then
+    for sh_home_conv in "${XDG_DATA_HOME:-}/sandhome" "${HOME:-}/.local/share/sandhome" "${HOME:-}/.sandhome"; do
+        case "$sh_home_conv" in ''|/.local/share/sandhome|/.sandhome|/sandhome) continue ;; esac
+        case "$sh_home_conv" in /*) ;; *) continue ;; esac
+        if [ -r "$sh_home_conv/env.sh" ]; then
+            SANDHOME_HOME=$sh_home_conv
+            export SANDHOME_HOME
+            break
+        fi
+    done
 fi
 
 SH_REPO_DIR=$sh_repo
@@ -50,67 +230,447 @@ export SH_REPO_DIR SH_LIB_DIR SANDHOME_BIN_DIR
 . "$SH_LIB_DIR/toolchain.sh"
 # shellcheck source=../lib/shim.sh
 . "$SH_LIB_DIR/shim.sh"
+# shellcheck source=../lib/memexec.sh
+. "$SH_LIB_DIR/memexec.sh"
 # shellcheck source=../lib/report.sh
 . "$SH_LIB_DIR/report.sh"
 
 sh_detect_all
-sh_space_plan
+# # STOP: THE PLAN IS RESOLVED WITHOUT CREATING, AND THE COMMANDS THAT INSTALL
+# CREATE. `sh_space_plan` ran unconditionally before the dispatcher and it
+# mkdir'd both roots on the way, so `sandhome version` created four directories
+# under each of SANDHOME_HOME and SANDHOME_EXEC, and with an unwritable home it
+# died at startup with no usage text. A read-only plan answers the same question
+# about the machine as it stands; the three commands that put something on disk
+# (install, shims, gc) re-plan with creation. tests/space.sh asserts both
+# directions, including that `install` still creates.
+sh_space_plan --no-create
+# The plan owns the values; the exports adopt them when the caller did not
+# set them, so every `sh_env_load` below sources fragments that cannot abort
+# under `set -u`. See the same binding in bootstrap.sh after its create plan.
+: "${SANDHOME_HOME:=$SH_HOME}"
+: "${SANDHOME_EXEC:=$SH_EXEC}"
+export SANDHOME_HOME SANDHOME_EXEC
 
 usage() {
     cat <<'USAGE'
 usage: sandhome COMMAND [args]
 
   doctor                 probe the environment and report what is missing
+  doctor --json          the same gate as one JSON object
+  status [--json]        one-line readiness: roots, view, toolchains, next
+  resume                 rebuild the views after a tmpfs restart, then doctor
   env                    print the environment, for `eval "$(sandhome env)"`
   path                   print the exec-view bin directory
+  global [--status|--remove]   install the global hook: every usable
+                         directory on PATH loads the environment for a fresh
+                         shell, so setup is once and no command needs
+                         `. env.sh`. --status reports each entry and a
+                         fresh-shell probe, --remove restores them.
   space [--probe]        where the two roots are, and every candidate tried
+  space --largest [N]    the N biggest entries on the exec root (default 10)
+  space --reclaim        reclaimable cache bytes without removing anything
   toolchains             name, one-line description, PATH binaries, versions
+  skills                 where the skills are installed, one line per skill per
+                         location, with the origin (this tree's copy, a link
+                         into the checkout, or something else that was left
+                         alone). Exits non-zero when none is installed
   install NAME...        adopt or install each toolchain, then write the env
+  install --only NAMES   install exactly these and replace the recorded request
+  install --with NAMES   add to the request and install it (comma list)
+  install --without NAMES  drop from the request; alone, it records only
+  install --force NAME   install NAME even when a working copy is on PATH
+  install rust --target T   add rust cross targets (comma list, repeatable)
+  install qemuuser --extra A  also install guest emulators (comma list)
   ensure NAME...         alias for install
+  repair [NAME...]       rebuild the exec view and launchers, downloading
+                         nothing. The fix for "Permission denied" on a tool
+                         that is already installed or adopted. No names means
+                         every toolchain sandhome knows.
+  add NAME --url URL    fetch one asset as a new toolchain into the durable
+                         local directory and install it. --sha256 pins it,
+                         --bin names the executable inside an archive,
+                         --scaffold-only writes the module without installing.
   shims [build]          build the LD_PRELOAD shims this machine needs
   test                   run this checkout's whole test suite
   selftest               the checks that need this machine and no network
   selftest shims         build and exercise the LD_PRELOAD shims
   selftest exec          the noexec-home end-to-end: install, promote, run
-  shell [args]           run errandsh, the pty-less line discipline
+  shell [args]           run errandsh, the line discipline with a userspace pty
+  project NAME [--python|--node]   a project that runs on a noexec work tree:
+                         creates it on the exec root, links ./NAME to it,
+                         and sets up the venv and npm project inside
+  pty CMD...             run CMD with a userspace pty (no /dev/ptmx needed)
   exec CMD...            run CMD with the sandhome environment loaded
+  exec-dir               print the exec-capable root (where build output runs)
   report [--json]        the full report
-  gc [DAYS]              remove staging older than DAYS (default 7)
+  gc [DAYS] [--dry-run]   remove staging and caches older than DAYS (default 7).
+                         DAYS=0 (or --now) removes everything sandhome owns
+                         in its caches however old, except what a live
+                         install holds and what changed in the last 30 minutes
+                         (SANDHOME_GC_FORCE=1 overrides both).
+                         Views are never removed; `repair` rebuilds them.
+                         Prints the entry count and the bytes reclaimed.
+  prune [NAME...]        drop exec-view entries whose payload is gone.
+                         No names means every toolchain sandhome knows.
   version                print the schema version
-  help                   this text
+  help [CMD]             this text, or the help for CMD
 
 Environment:
   SANDHOME_HOME   the persistent data root (default $XDG_DATA_HOME/sandhome)
   SANDHOME_EXEC   the exec-capable root; detected when unset
-  SANDHOME_REPO   the checkout that holds lib/, tools/ and shell/
+  SANDHOME_REPO   owner/name to fetch when run from a pipe (default
+                  talaria0101/sandhome). The checkout that holds lib/ is named
+                  by SANDHOME_REPO_DIR, which env.sh sets.
   SANDHOME_SHIMS  set to 1 to put the shims in LD_PRELOAD
   SANDHOME_PASSWD_USERS   extra names for the synthetic passwd database
-  SANDHOME_SHA256 pin the sha256 of every download this run makes
+  SANDHOME_SHA256 a default digest for downloads with no pin of their own.
+                  Prefer SANDHOME_SHA256_<NAME> (the toolchain, upper-cased)
+                  or SANDHOME_SHA256_<ASSET> (the url's last path segment,
+                  upper-cased, no extension, hyphens as underscores), which
+                  apply to one download. Resolution order: <NAME>, <ASSET>,
+                  a digest the publisher published, then this.
   SANDHOME_REF    branch or tag the pipe bootstrap fetches. Default main
   SANDHOME_REPO_DIR   the checkout the installed copy of this command reads.
                       Set by env.sh; read it, do not set it.
   SANDHOME_MIN_EXEC_MB  free megabytes an exec candidate must have to be
                       preferred. Default 128
+  SANDHOME_LOW_EXEC_MB  free megabytes below which the exec root is called low
+                      and doctor fails. Default 100
+  SANDHOME_CRIT_MB   free megabytes below which the exec root is called
+                      critical. Default 32
+  SANDHOME_LOW_EXEC_PCT  percent FREE below which a large exec root is low.
+                      Default 10
+  SANDHOME_PCT_MEANINGFUL_MB  exec root size under which the megabyte rules
+                      decide and the percentage is ignored, because 10% of a
+                      40MB root is 4MB. Default 1024
   SANDHOME_REQUIRE_DIGEST  1 refuses a download when no sha256 tool exists
+  SANDHOME_DOH_URL    DNS-over-HTTPS resolver, e.g. https://1.1.1.1/dns-query.
+                      Unset, and the fallback is off until it is set. Used
+                      only after curl answers exit 6 twice.
   SANDHOME_GO_VERSION_URL, SANDHOME_GO_DL_JSON_URL, SANDHOME_NODE_INDEX_URL
                       point a version or digest parser at a mirror, so the
                       parsers can be tested offline
+  SANDHOME_RUST_TARGETS   comma list of rust cross targets to add on install
+                      (same as install rust --target T)
+  SANDHOME_FORCE      install toolchains locally even when the host already
+                      carries a working copy, which is otherwise adopted.
+                      1 (or all) forces every requested toolchain; a comma
+                      list forces the names in it. Same as install --force.
+  SANDHOME_ZIG_VERSION    pin the zig release (default latest from index)
+  SANDHOME_ZIG_INDEX_URL  point the zig version parser at a mirror for tests
 USAGE
 }
 
+# cmd_help [CMD] -> general usage or one command's help. `sandhome <cmd>
+# --help` and `sandhome help <cmd>` both land here (issue #68), so a consumer
+# without a clone has a help path for every command ROUTE.md step 3 names.
+cmd_help() {
+    case "${1:-}" in
+        ''|help) usage; return 0 ;;
+        doctor)
+            cat <<'HELP'
+usage: sandhome doctor [--json]
+Probe the environment and report what is missing. One line per invariant,
+ending in doctor_failures=N. Exits non-zero when N is not zero. Repairs
+nothing; the bootstrap and install do that. --json prints one object
+(failures, failed[], checks{}) for a harness to branch on.
+HELP
+            return 0 ;;
+        status)
+            cat <<'HELP'
+usage: sandhome status [--json]
+The one-command readiness answer: exit 0/1 like doctor, but one line naming
+the roots, the view, the toolchains present, and the next command. --json
+carries the same plus workdir and build fields.
+HELP
+            return 0 ;;
+        exec-dir)
+            cat <<'HELP'
+usage: sandhome exec-dir
+Print the exec-capable root on one line. This is where build output must land
+on a host whose work tree or home refuses execve, and it is the value ROUTE's
+"build under $SANDHOME_EXEC" means. It exists because a global-hook shell has
+no exported SANDHOME_EXEC: use `cd "$(sandhome exec-dir)"` or
+`sandhome exec --shell '...'`, which applies the whole environment instead.
+HELP
+            return 0 ;;
+        resume)
+            cat <<'HELP'
+usage: sandhome resume
+Rehydrate after a tmpfs restart without fetching: re-plan the roots, rebuild
+every recorded view, then run doctor and exit with its code. The full
+bootstrap stays for a machine whose env.sh is gone.
+HELP
+            return 0 ;;
+        install|ensure)
+            cat <<'HELP'
+usage: sandhome install [--force] [--target T] [--extra LIST] NAME...
+usage: sandhome install --only NAME[,NAME...] [--without NAME...]
+Adopt each toolchain already on PATH, or install it into the home root when
+absent, then rebuild its exec view and write the env. --force installs even
+when a working copy is on PATH. --target T (rust only, repeatable,
+comma-separated) adds cross targets. --extra LIST (qemuuser only,
+comma-separated or repeatable) also installs the named guest emulators, so
+`install qemuuser --extra aarch64` makes `qemu-aarch64` exist; the same
+lever is SANDHOME_QEMUUSER_EXTRA.
+
+The request flags take the same shape as bootstrap's (issue #129): --only
+NAME[,NAME...] installs exactly those names and REPLACES the recorded
+SANDHOME_WANTED_TOOLCHAINS, --with NAME adds a name to both the request and
+this run, --without NAME takes a name out of both (alone, it changes only
+the recorded request and installs nothing). Together they decide what
+doctor gates on. --dry-run is a bootstrap.sh flag and is refused here: an
+unknown flag aborts before anything is installed.
+HELP
+            return 0 ;;
+        repair)
+            cat <<'HELP'
+usage: sandhome repair [NAME...]
+Rebuild the exec view and launchers for toolchains already on the machine,
+downloading nothing. No names means every toolchain sandhome knows. This is
+the fix for Permission denied on a tool that is already installed or adopted.
+HELP
+            return 0 ;;
+        space)
+            cat <<'HELP'
+usage: sandhome space [--probe] [--largest [N]] [--reclaim]
+Print the chosen roots with free and total megabytes, the exec-space state,
+and the ceiling across exec-capable candidates (max_exec_free_mb and
+exec_ceiling). --probe lists every candidate with writable/exec/free/total
+and a verdict (chosen, usable, noexec, not-writable, too-small) so the list
+is a decision, not a table of numbers. --largest [N] lists the N biggest
+top-level entries on the exec root with an owner tag (reclaim = gc removes
+it, sandhome = this tree owns it and gc keeps it, yours = build output you
+remove), which is what to
+remove first when the root fills with build output. --reclaim
+prints the cache bytes `gc --now` would reclaim, removing nothing.
+HELP
+            return 0 ;;
+        gc)
+            cat <<'HELP'
+usage: sandhome gc [DAYS] [--dry-run] [--now]
+Remove staging and caches older than DAYS (default 7). DAYS=0, or --now,
+removes everything sandhome owns in its caches however old, except what a
+live install holds and what changed in the last 30 minutes (SANDHOME_GC_FORCE=1
+overrides both). --dry-run names
+what would be removed and removes nothing, and the run prints the entry
+count with the bytes actually reclaimed. Toolchain views are never removed;
+`sandhome prune` drops their stale entries and `sandhome repair` rebuilds them.
+HELP
+            return 0 ;;
+        prune)
+            cat <<'HELP'
+usage: sandhome prune [NAME...]
+Drop exec-view entries whose payload is gone, for the named toolchains or
+for every toolchain sandhome knows when no names are given. An entry whose
+home file was deleted survives every reinstall on PATH pointing at nothing;
+this removes it, downloading nothing. Prints the count pruned.
+HELP
+            return 0 ;;
+        add)
+            cat <<'HELP'
+usage: sandhome add NAME --url URL [--sha256 DIGEST] [--bin PATH] [--desc TEXT] [--scaffold-only]
+Fetch one asset as a new toolchain: the module is written into the durable
+local directory ($SANDHOME_HOME/toolchains.d/) and installed, so doctor,
+toolchains and repair treat it like a shipped toolchain. --bin names the
+executable inside an archive, relative to the toolchain root (required for
+archives; a single file defaults to its own basename). --sha256 pins the
+download. --scaffold-only writes the module without installing it, for a
+bespoke install to start from. An existing module is never overwritten.
+HELP
+            return 0 ;;
+        project)
+            cat <<'HELP'
+usage: sandhome project NAME [--python|--node] [--no-link]
+A project that runs on a noexec work tree. Creates NAME under the exec
+root, links ./NAME to it, and sets up the venv (uv or python -m venv)
+and the npm project (npm init) inside, so console scripts, npx and
+native CLIs run where they stand. With neither --python nor --node
+both halves are set up; a half whose toolchain is absent is skipped
+with a warning. --no-link skips the ./NAME symlink.
+HELP
+            return 0 ;;
+        report)
+            cat <<'HELP'
+usage: sandhome report [--json]
+The full report read from the machine. --json prints one object.
+HELP
+            return 0 ;;
+        toolchains)
+            cat <<'HELP'
+usage: sandhome toolchains [--json]
+Name, status, version, description and PATH reach for every known toolchain.
+A dynamic line names runtimes that fetch at run time (registry installs,
+remote imports, self-upgrade), so running with the network down is answered
+before it fails. --json carries the same plus origin, view and dynamic.
+HELP
+            return 0 ;;
+        exec)
+            cat <<'HELP'
+usage: sandhome exec CMD [ARGS...]
+usage: sandhome exec --shell 'string'
+Run CMD with the environment loaded. With exactly one argument that is not
+a program, the string runs through the shell (so `sandhome exec 'echo hi'`
+works); two or more arguments stay exec-argv. --shell names the string form
+explicitly. A path with a slash is always argv, never a shell string.
+HELP
+            return 0 ;;
+        global)
+            cat <<'HELP'
+usage: sandhome global [--status|--remove]
+Install or refresh the global hook in EVERY usable directory on this shell's
+PATH: a directory that runs binaries gets the dispatcher written in place, and
+an entry on a root that refuses execve becomes a symlink to a directory under
+the exec root that runs. Different shells inherit different PATHs, so a fresh
+shell (login, interactive, or the non-login shell a tool harness spawns per
+call) finds the hook whichever entry it carries and needs to source nothing.
+Each installed directory is probed from a fresh `env -i` shell before it is
+reported; --status prints every entry with its probe result, its recorded
+original state and any name a host file shadows. --remove restores every entry
+to the state install found. When no writable PATH entry can host it, entry.sh
+and `sandhome exec` remain.
+HELP
+            return 0 ;;
+        skills)
+            cat <<'HELP'
+usage: sandhome skills
+Where the harness skills are installed, one line per skill per location
+(~/.agents/skills and, when Pi state exists, ~/.pi/agent/skills), with the
+state (installed, foreign, absent) and the origin (this tree's copy, a link
+into the checkout, or a file that differs from it). Ends in
+skills_installed=N and exits non-zero when none is installed. The setup
+installs them; this command confirms it instead of asking a consumer to
+fetch them again by hand.
+HELP
+            return 0 ;;
+        env|path|project|shims|shell|pty|test|selftest|version)
+            usage; return 0 ;;
+        # # STOP: A HELP WORD WITH NO HELP PAGE PRINTS THE COMMAND LIST, NOT AN
+        # ERROR. `sandhome --help` reached this arm with $1 = --help and died
+        # with "no help for '--help'", exit 2, on the one command whose whole
+        # job is to print help (issue #136). The list is the right answer for
+        # any name this file has no page for, because a person who typed a
+        # wrong subcommand and then asked for help wants to be shown the
+        # subcommands. A NAME that is a real command with no page of its own
+        # is the same case, so the refusal was never earning anything.
+        *)
+            usage; return 0 ;;
+    esac
+}
 cmd_env()    { sh_env_print; }
 cmd_path()   { printf '%s\n' "$SH_EXEC_BIN"; }
+# cmd_exec_dir -> the exec-capable root on one line.
+#
+# A global-hook shell has no exported SANDHOME_EXEC: the hook sources env.sh in
+# its own process and execs the tool, which cannot export to the caller. ROUTE
+# nevertheless tells a consumer to "build under $SANDHOME_EXEC", and in the
+# shell it produces that variable is empty, so `mkdir -p "$SANDHOME_EXEC/build"`
+# creates /build and fails (issue #156). This command resolves the root where
+# build output can run, from either the ambient variable or the plan.
+cmd_exec_dir() {
+    case "${1:-}" in
+        -h|--help) cmd_help exec-dir; return 0 ;;
+        '') : ;;
+        *) sh_die "exec-dir takes no arguments; run 'sandhome help exec-dir'" ;;
+    esac
+    # # STOP: NEVER PRINT AN EMPTY LINE. The hook shell that needs this command
+    # has no exported SANDHOME_EXEC, and SH_EXEC is set only inside a process
+    # that loaded the roots. When both are present they win; otherwise the
+    # recorded file is read (first this home, then the conventional homes a
+    # login fragment would try), because a shell with no environment still has
+    # a home. Only when nothing names a root does this fail, and then it says
+    # where it looked instead of printing a blank line that makes
+    # `mkdir -p "$SANDHOME_EXEC/build"` create /build (issue #156).
+    if [ -n "${SH_EXEC:-}" ]; then
+        printf '%s\n' "$SH_EXEC"
+        return 0
+    fi
+    if [ -n "${SANDHOME_EXEC:-}" ]; then
+        printf '%s\n' "$SANDHOME_EXEC"
+        return 0
+    fi
+    sh_ed_home=${SH_HOME:-${SANDHOME_HOME:-}}
+    for sh_ed_cand in "$sh_ed_home/env.sh" "$HOME/.local/share/sandhome/env.sh" "$HOME/.sandhome/env.sh"; do
+        [ -n "$sh_ed_cand" ] && [ "$sh_ed_cand" != "/env.sh" ] || continue
+        [ -r "$sh_ed_cand" ] || continue
+        sh_ed_exec=$(sh_bake_value "$sh_ed_cand" SANDHOME_EXEC)
+        if [ -n "$sh_ed_exec" ]; then
+            printf '%s\n' "$sh_ed_exec"
+            unset sh_ed_home sh_ed_cand sh_ed_exec
+            return 0
+        fi
+    done
+    unset sh_ed_home sh_ed_cand sh_ed_exec
+    sh_die 'no exec root is recorded here; run the setup first, then sandhome exec-dir names where build output runs'
+}
+
+# cmd_global [--status|--remove] -> install, report or remove the global hook
+# (issue #127). The bootstrap installs it by default; this command exists for a
+# session that wants to (re)install it after a view moved, read where it is, or
+# undo it. It never touches a file it did not create.
+cmd_global() {
+    sh_cg_mode=install
+    for sh_cg_arg in "$@"; do
+        case "$sh_cg_arg" in
+            --status) sh_cg_mode=status ;;
+            --remove) sh_cg_mode=remove ;;
+            -h|--help) cmd_help global; return 0 ;;
+            *) sh_die "global does not take '$sh_cg_arg'; run 'sandhome help global' for the form it takes" ;;
+        esac
+    done
+    sh_env_load
+    case "$sh_cg_mode" in
+        status) sh_global_status ;;
+        remove) sh_global_remove ;;
+        *)      sh_global_install ;;
+    esac
+}
 cmd_space() {
+    case "${1:-}" in
+        -h|--help) cmd_help space; return 0 ;;
+        --largest) sh_space_largest "${2:-10}"; return 0 ;;
+        --reclaim)
+            # Reclaimable bytes without removing anything: a dry run over
+            # everything however fresh, read off its count line. Live and
+            # fresh entries are excluded the same way the real run excludes
+            # them, so the number is what `gc --now` would actually free.
+            SH_GC_DRY_RUN=1
+            export SH_GC_DRY_RUN
+            sh_rc_out=$(sh_space_gc 0 2>/dev/null) || return $?
+            sh_rc_kb=${sh_rc_out##* }
+            case "$sh_rc_kb" in
+                ''|*[!0-9]*) sh_rc_kb=0 ;;
+            esac
+            printf 'reclaimable_kb=%s\n' "$sh_rc_kb"
+            return 0 ;;
+    esac
     if [ "${1:-}" = --probe ]; then
         sh_space_probe_report
         return 0
     fi
+    case "${1:-}" in
+        -*) sh_die "space does not take '$1'; run 'sandhome help space' for the form it takes" ;;
+    esac
     sh_space_report
 }
 # cmd_toolchains [--json] -> name, description, declared PATH binaries, the
 # status read from a probe, and the version. Everything here is read from the
 # machine, not from what the module declares it should be.
 cmd_toolchains() {
+    case "${1:-}" in
+        -h|--help) cmd_help toolchains; return 0 ;;
+        --json) : ;;
+        # # STOP: AN UNKNOWN FLAG IS REFUSED, NOT IGNORED. This case handled only
+        # --help, and any other argument fell through to the plain table with
+        # exit 0 - so `sandhome toolchains --bogus` printed the whole listing as
+        # if nothing had happened and a script could not tell. Every other
+        # command already refuses with rc=2 (install, doctor, gc, ...); this one,
+        # cmd_shims and cmd_report were the three that did not (issue #125). The
+        # accepted flag is named in the case above so the refusal cannot swallow
+        # it.
+        -*) sh_die "toolchains does not take '$1'; run 'sandhome help toolchains' for the flags it takes" ;;
+    esac
     if [ "${1:-}" = --json ]; then
         printf '['
         sh_c_n=0
@@ -118,12 +678,24 @@ cmd_toolchains() {
             sh_toolchain_load "$sh_c_t" >/dev/null 2>&1
             eval "sh_c_desc=\${TC_${sh_c_t}_DESC:-}"
             eval "sh_c_bins=\${TC_${sh_c_t}_BINS:-}"
+            eval "sh_c_dynamic=\${TC_${sh_c_t}_DYNAMIC:-}"
             [ "$sh_c_n" -gt 0 ] && printf ','
-            printf '{"name":"%s","desc":"%s","bins":"%s","status":"%s","version":"%s"}' \
+            # The version is read only for a present toolchain: probing
+            # already bounded the hung-binary case, and re-running its
+            # version query would make every listing pay the timeout twice.
+            sh_c_st=$(sh_toolchain_status "$sh_c_t")
+            sh_c_ver=''
+            if [ "$sh_c_st" = present ]; then
+                sh_c_ver=$(sh_toolchain_version "$sh_c_t")
+            fi
+            printf '{"name":"%s","desc":"%s","bins":"%s","status":"%s","version":"%s","origin":"%s","view":"%s","dynamic":"%s"}' \
                 "$(sh_json_escape "$sh_c_t")" "$(sh_json_escape "$sh_c_desc")" \
                 "$(sh_json_escape "$sh_c_bins")" \
-                "$(sh_json_escape "$(sh_toolchain_status "$sh_c_t")")" \
-                "$(sh_json_escape "$(sh_toolchain_version "$sh_c_t")")"
+                "$(sh_json_escape "$sh_c_st")" \
+                "$(sh_json_escape "$sh_c_ver")" \
+                "$(sh_toolchain_origin "$sh_c_t")" \
+                "$(sh_toolchain_view_kind "$sh_c_t")" \
+                "$(sh_json_escape "$sh_c_dynamic")"
             sh_c_n=$((sh_c_n + 1))
         done
         printf ']\n'
@@ -133,42 +705,430 @@ cmd_toolchains() {
         sh_toolchain_load "$sh_c_t" >/dev/null 2>&1
         eval "sh_c_desc=\${TC_${sh_c_t}_DESC:-}"
         eval "sh_c_bins=\${TC_${sh_c_t}_BINS:-}"
+        eval "sh_c_dynamic=\${TC_${sh_c_t}_DYNAMIC:-}"
         if [ -n "$sh_c_bins" ]; then
             sh_c_path="via $(sh_commas_to_spaces "$sh_c_bins")"
         else
             sh_c_path='via its own PATH fragment'
         fi
+        # The origin marks modules read from the durable local directory
+        # rather than the shipped tree, so an override is visible.
+        if [ "$(sh_toolchain_origin "$sh_c_t")" = local ]; then
+            sh_c_path="$sh_c_path (local module)"
+        fi
+        # Status first, version only when present: same single-timeout rule
+        # as the JSON arm above.
+        sh_c_st=$(sh_toolchain_status "$sh_c_t")
+        sh_c_ver=''
+        if [ "$sh_c_st" = present ]; then
+            sh_c_ver=$(sh_toolchain_version "$sh_c_t")
+        fi
         printf '%-9s %-8s %-9s %s\n' \
-            "$sh_c_t" "$(sh_toolchain_status "$sh_c_t")" \
-            "$(sh_toolchain_version "$sh_c_t")" "$sh_c_desc"
+            "$sh_c_t" "$sh_c_st" \
+            "$sh_c_ver" "$sh_c_desc"
         printf '          path: %s\n' "$sh_c_path"
+        # A toolchain that fetches after install says so here, where a consumer
+        # lists what is here, so "run this with the network down" is answered
+        # before it fails rather than after (issue #125).
+        if [ -n "$sh_c_dynamic" ]; then
+            printf '          dynamic: %s\n' "$sh_c_dynamic"
+        fi
+        # Qemu guests are opt-in and otherwise invisible: `install qemuuser`
+        # alone holds only the host emulator, and the failure is a bare
+        # `command not found` (issue #117). The hint is printed here, where a
+        # consumer lists what is here, not only in the module source.
+        if [ "$sh_c_t" = qemuuser ]; then
+            if command -v tc_qemuuser_guests >/dev/null 2>&1; then
+                sh_c_guests=''
+                for sh_c_g in $(tc_qemuuser_guests 2>/dev/null); do
+                    sh_c_guests="$sh_c_guests $sh_c_g"
+                done
+                sh_c_guests=$(sh_trim "$sh_c_guests")
+                if [ -n "$sh_c_guests" ]; then
+                    printf '          guests: %s\n' "$sh_c_guests"
+                else
+                    printf '          guests: none (add with: sandhome install qemuuser --extra aarch64)\n'
+                fi
+            else
+                printf '          guests: none (add with: sandhome install qemuuser --extra aarch64)\n'
+            fi
+        fi
     done
+}
+
+# # STOP: THE SKILLS ARE THE SETUP'S TO REPORT, NOT A CONSUMER'S TO FETCH. ROUTE.md
+# step 2 spent three curl round-trips and three mkdirs telling a consumer to
+# fetch three SKILL.md files the bootstrap had already installed into both
+# locations a harness reads, and the `ls` that followed proved nothing that was
+# not already true (issue #134). The check is now a command that READS the
+# machine: one line per skill per location with where it came from, so a
+# harness with a resource reload can confirm in one call and a person can see
+# that a skill is a stale link rather than a copy.
+#
+# Each line is `name location=... state=... origin=...`, state being
+#   installed  a file this tree wrote (or a link into this checkout)
+#   foreign    something is there that this tree did not write; left alone
+#   absent     not there
+# and origin naming the bytes, so "installed" and "the same bytes as the
+# checkout" are two different claims and a reader can tell which one holds.
+cmd_skills() {
+    sh_sk_home=${SANDHOME_HOME:-${SH_HOME:-}}
+    sh_sk_repo=${SH_REPO_DIR:-}
+    sh_sk_n=0
+    printf 'skills_home=%s\n' "${HOME:-unset}"
+    for sh_sk_name in sandhome errandsh sealed-sandbox; do
+        for sh_sk_base in "$HOME/.agents/skills" "$HOME/.pi/agent/skills"; do
+            case "$sh_sk_base" in
+                "$HOME/.pi/agent/skills") [ -d "$HOME/.pi" ] || continue ;;
+            esac
+            sh_sk_path=$sh_sk_base/$sh_sk_name/SKILL.md
+            sh_sk_state=absent
+            sh_sk_origin=''
+            if [ -L "$sh_sk_path" ]; then
+                sh_sk_state=installed
+                sh_sk_origin="link -> $(readlink "$sh_sk_path" 2>/dev/null || printf '?')"
+            elif [ -r "$sh_sk_path" ]; then
+                sh_sk_state=installed
+                if [ -n "$sh_sk_repo" ] && [ -r "$sh_sk_repo/skills/$sh_sk_name/SKILL.md" ]; then
+                    if cmp -s "$sh_sk_path" "$sh_sk_repo/skills/$sh_sk_name/SKILL.md" 2>/dev/null; then
+                        sh_sk_origin='same bytes as the checkout'
+                    else
+                        sh_sk_origin='a file that differs from the checkout'
+                    fi
+                else
+                    sh_sk_origin='a file (no checkout to compare with)'
+                fi
+            elif [ -e "$sh_sk_base/$sh_sk_name" ]; then
+                sh_sk_state=foreign
+                sh_sk_origin="something that is not a SKILL.md: $sh_sk_base/$sh_sk_name"
+            fi
+            printf '%-16s %s state=%s origin=%s\n' "$sh_sk_name" "$sh_sk_base" "$sh_sk_state" "${sh_sk_origin:--}"
+            [ "$sh_sk_state" = installed ] && sh_sk_n=$((sh_sk_n + 1))
+        done
+    done
+    printf 'skills_installed=%s\n' "$sh_sk_n"
+    if [ "$sh_sk_n" -eq 0 ]; then
+        printf 'skills_hint=none installed; re-run the setup without --no-skills, or fetch them by URL as ROUTE.md step 2 says\n'
+        return 1
+    fi
+    return 0
 }
 cmd_install() {
     if [ "$#" -eq 0 ]; then
         sh_die 'install needs at least one toolchain name'
+    fi
+    # `install rust --target <triple>,...` adds cross targets via rustup and
+    # writes zig-cc linker wrappers on the exec view (see tools/rust.sh and
+    # tools/zig.sh). The flag only applies to rust; other toolchains ignore it.
+    SH_RUST_TARGETS=''
+    sh_c_args=''
+    # The --only/--with/--without shape of bootstrap's request flags (issue
+    # #129): --only replaces the recorded request with exactly its names,
+    # --with adds a name to both the request and this run, --without takes a
+    # name out of both.
+    sh_c_only=''
+    sh_c_only_given=0
+    sh_c_with=''
+    sh_c_without=''
+    # `install --force NAME` skips the adopt probe and installs NAME into the
+    # toolchain root. It exists because the tool PRINTS it: the promote step
+    # warns "run 'sandhome install --force <name>' to place it properly" for a
+    # borrowed toolchain that cannot run from the exec root, and without the
+    # flag the named command adopted again every time and installed nothing
+    # (issue #45). An instruction the tool prints must be one the tool obeys.
+    SH_FORCE=0
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --force|-f)
+                SH_FORCE=1
+                shift ;;
+            --force=*)
+                case "${1#--force=}" in 0|no|off|false) SH_FORCE=0 ;; *) SH_FORCE=1 ;; esac
+                shift ;;
+            --target)
+                [ "$#" -ge 2 ] || sh_die 'install --target needs a value'
+                if [ -n "$SH_RUST_TARGETS" ]; then
+                    SH_RUST_TARGETS="$SH_RUST_TARGETS,$2"
+                else
+                    SH_RUST_TARGETS=$2
+                fi
+                shift 2 ;;
+            # `install qemuuser --extra aarch64` is the flag spelling of
+            # SANDHOME_QEMUUSER_EXTRA, which the module read but no command
+            # ever showed a caller how to set from the prompt. qemuuser is the
+            # only consumer today; the flag is parsed once and exported, so a
+            # second module that grows an extra list gets the same lever.
+            --extra|--guest)
+                [ "$#" -ge 2 ] || sh_die 'install --extra needs a value'
+                sh_c_x=$(sh_split_on ',' "$2")
+                if [ -n "${SANDHOME_QEMUUSER_EXTRA:-}" ]; then
+                    SANDHOME_QEMUUSER_EXTRA="$SANDHOME_QEMUUSER_EXTRA $sh_c_x"
+                else
+                    SANDHOME_QEMUUSER_EXTRA=$sh_c_x
+                fi
+                export SANDHOME_QEMUUSER_EXTRA
+                shift 2 ;;
+            --extra=*|--guest=*)
+                sh_c_x=$(sh_split_on ',' "${1#*=}")
+                [ -n "$(sh_trim "$sh_c_x")" ] || sh_die 'install --extra needs a value'
+                if [ -n "${SANDHOME_QEMUUSER_EXTRA:-}" ]; then
+                    SANDHOME_QEMUUSER_EXTRA="$SANDHOME_QEMUUSER_EXTRA $sh_c_x"
+                else
+                    SANDHOME_QEMUUSER_EXTRA=$sh_c_x
+                fi
+                export SANDHOME_QEMUUSER_EXTRA
+                shift ;;
+            --target=*)
+                sh_c_v=${1#--target=}
+                [ -n "$sh_c_v" ] || sh_die 'install --target needs a value'
+                if [ -n "$SH_RUST_TARGETS" ]; then
+                    SH_RUST_TARGETS="$SH_RUST_TARGETS,$sh_c_v"
+                else
+                    SH_RUST_TARGETS=$sh_c_v
+                fi
+                shift ;;
+            # --only consumes words up to the next flag, the same way the
+            # bootstrap's --only does, so `--only jq ripgrep` and
+            # `--only jq,ripgrep` are one request.
+            --only)
+                sh_c_only_given=1
+                [ "$#" -ge 2 ] || sh_die 'install --only needs at least one toolchain name'
+                shift
+                while [ "$#" -gt 0 ]; do
+                    case "$1" in --*) break ;; esac
+                    sh_c_only="$sh_c_only,$1"
+                    shift
+                done
+                [ -n "$(sh_trim "$sh_c_only")" ] || sh_die 'install --only needs at least one toolchain name'
+                ;;
+            --with)
+                [ "$#" -ge 2 ] || sh_die 'install --with needs a toolchain name'
+                sh_c_with="$sh_c_with,$2"
+                shift 2 ;;
+            --with=*)
+                sh_c_wv=${1#--with=}
+                [ -n "$sh_c_wv" ] || sh_die 'install --with needs a toolchain name'
+                sh_c_with="$sh_c_with,$sh_c_wv"
+                shift ;;
+            --without)
+                [ "$#" -ge 2 ] || sh_die 'install --without needs a toolchain name'
+                sh_c_without="$sh_c_without,$2"
+                shift 2 ;;
+            --without=*)
+                sh_c_wv=${1#--without=}
+                [ -n "$sh_c_wv" ] || sh_die 'install --without needs a toolchain name'
+                sh_c_without="$sh_c_without,$sh_c_wv"
+                shift ;;
+            -h|--help) cmd_help install; return 0 ;;
+            -*)
+                sh_die "install does not take '$1'; run 'sandhome help install' for the flags it takes"
+                ;;
+            *) sh_c_args="$sh_c_args $1"; shift ;;
+        esac
+    done
+    export SH_RUST_TARGETS
+    export SH_FORCE
+    # SANDHOME_FORCE is the bootstrap spelling of the same decision; honor
+    # it here too, so the environment forces regardless of entry point.
+    if [ "$SH_FORCE" = 0 ]; then
+        case "${SANDHOME_FORCE:-}" in
+            ''|0|no|off|false) SH_FORCE_LIST='' ;;
+            1|all|yes|on|true) SH_FORCE_LIST='*' ;;
+            *) SH_FORCE_LIST=",${SANDHOME_FORCE}," ;;
+        esac
+        export SH_FORCE_LIST
+    fi
+    if [ "$sh_c_only_given" = 1 ] && [ -n "$(sh_trim "$sh_c_args")" ]; then
+        sh_die 'install --only selects the toolchains itself; give the names to --only, not beside it'
+    fi
+    # The install set for this run: --only's names, plus --with, plus any
+    # positional names, minus --without, each once and in the order asked.
+    sh_c_pool="$(sh_split_on ',' "$sh_c_only") $(sh_split_on ',' "$sh_c_with") $sh_c_args"
+    sh_c_drop=$(sh_split_on ',' "$sh_c_without")
+    sh_c_final=''
+    for sh_c_n in $sh_c_pool; do
+        [ -n "$sh_c_n" ] || continue
+        sh_c_in=no
+        for sh_c_d in $sh_c_drop; do
+            [ "$sh_c_d" = "$sh_c_n" ] && { sh_c_in=yes; break; }
+        done
+        [ "$sh_c_in" = yes ] && continue
+        sh_c_in=no
+        for sh_c_f in $sh_c_final; do
+            [ "$sh_c_f" = "$sh_c_n" ] && { sh_c_in=yes; break; }
+        done
+        [ "$sh_c_in" = yes ] && continue
+        sh_c_final="$sh_c_final $sh_c_n"
+    done
+    if [ -z "$(sh_trim "$sh_c_final")" ]; then
+        # `--without` alone is a request UPDATE: it records the drop and
+        # installs nothing, which is the point of taking a name back out of
+        # the gate. Without a --only or a --without, nothing was asked for at
+        # all and that stays an error.
+        if [ "$sh_c_only_given" = 1 ]; then
+            sh_die 'install --only resolved to no toolchain; name at least one'
+        fi
+        if [ -z "$(sh_trim "$sh_c_drop")" ]; then
+            sh_die 'install needs at least one toolchain name'
+        fi
     fi
     # # STOP: A NAME IS CHECKED BEFORE ANY DOWNLOAD, AND A FAILED ENSURE IS COUNTED.
     # `|| true` made `sandhome install nonsense` print "unknown toolchain" and
     # exit 0, so a script could not tell a typo from a success. sh_fail already
     # increments the counter, so an unknown name and a failed install both end
     # the command non-zero through the check at the bottom of this file.
-    for sh_c_n in "$@"; do
+    sh_c_bad=0
+    for sh_c_n in $sh_c_final; do
         if ! sh_toolchain_known "$sh_c_n"; then
             sh_fail "unknown toolchain $sh_c_n; run 'sandhome toolchains' for the list"
+            sh_c_bad=1
         fi
     done
+    # # STOP: AN UNKNOWN NAME ABORTS BEFORE THE ENV AND HOOK ARE REWRITTEN.
+    # The loop above only counted the failure and fell through to sh_env_write
+    # and sh_global_install, so `sandhome install stringer` rewrote env.sh,
+    # recorded a bogus wanted name and refreshed the hook before the counter
+    # turned the exit code non-zero (issue #141). Nothing is written for a
+    # request that names no toolchain.
+    [ "$sh_c_bad" = 0 ] || return 1
     sh_env_load
-    for sh_c_n in "$@"; do
+    # The helper may postdate the exec root (an older setup, a wiped tmpfs
+    # recovered by repair): rebuild the decision before any promote, so a
+    # missing helper reads as copy mode rather than as a broken view.
+    sh_memexec_ensure
+    for sh_c_n in $sh_c_final; do
         sh_toolchain_ensure "$sh_c_n" || true
     done
+    # # STOP: AN EXPLICIT VIEW MODE REBUILDS THE NAMED VIEWS. `ensure` sees an
+    # already-present toolchain and stops, so `SANDHOME_VIEW_MODE=copy sandhome
+    # install node` printed success and changed nothing - the promote that
+    # would have honoured the mode never ran (issue #113). The named trees are
+    # re-mirrored here so the mode the caller asked for is the mode on disk,
+    # and no payload is downloaded: the home tree is already there.
+    case "${SANDHOME_VIEW_MODE:-}" in
+        ''|auto) ;;
+        *)
+            for sh_c_n in $sh_c_final; do
+                [ -d "$(sh_toolchain_root "$sh_c_n")" ] || continue
+                sh_toolchain_load "$sh_c_n" >/dev/null 2>&1 || continue
+                sh_ci_bins=''
+                eval "sh_ci_bins=\${TC_${sh_c_n}_BINS:-}"
+                [ -n "$sh_ci_bins" ] || continue
+                # shellcheck disable=SC2086
+                sh_promote_toolchain "$sh_c_n" $sh_ci_bins || true
+                if command -v "tc_${sh_c_n}_env" >/dev/null 2>&1; then
+                    "tc_${sh_c_n}_env" >/dev/null 2>&1 || true
+                fi
+            done ;;
+    esac
+    # Record what was asked for even when an ensure failed, so doctor can name
+    # the unfulfilled request later (issue #57). sh_env_write merges with the
+    # list already in the file when this process holds none; `--only` instead
+    # REPLACES it (the caller restated the request in full), and `--without`
+    # drops names through sh_wanted_drop, which also writes by replacement so
+    # a drop to the empty list is not re-read back out of the file.
+    if [ "$sh_c_only_given" = 1 ]; then
+        SH_WANTED_TOOLCHAINS=$(sh_trim "$sh_c_final")
+        SH_WANTED_REPLACE=1
+        export SH_WANTED_TOOLCHAINS SH_WANTED_REPLACE
+    else
+        # shellcheck disable=SC2086
+        sh_wanted_merge $sh_c_args $(sh_split_on ',' "$sh_c_with")
+        if [ -n "$(sh_trim "$sh_c_drop")" ]; then
+            # shellcheck disable=SC2086
+            sh_wanted_drop $(sh_split_on ',' "$sh_c_without")
+        fi
+    fi
     sh_env_write
     SH_INSTALLED=$INSTALLED
     SH_ADOPTED=$ADOPTED
     sh_env_load
+    sh_global_install || true
+    return 0
+}
+# # STOP: REPAIR REBUILDS THE VIEW AND DOWNLOADS NOTHING. Every consumer-facing
+# diagnostic procedure routed step 2 through `sandhome install <name>`, and on a
+# host with an adopted toolchain that command is the cause of the defect rather
+# than the cure for it: it re-runs the adopt path, and 8 rounds of the documented
+# procedure left jq, rg or fd broken in 8 of them (issues #49, #43). The repair a
+# consumer with "Permission denied" needs is a relink of what is already on the
+# machine, and `install` cannot be asked for that without also being allowed to
+# download.
+#
+# So this is the command the docs name, and it does exactly three things: relink
+# every toolchain already in the home or already on PATH into the exec view,
+# put sandhome and errandsh back on the root, and re-run the shims. It adopts
+# nothing, downloads nothing, and so cannot turn a working install into a broken
+# one. With no arguments it covers every known toolchain; with names it covers
+# only those, which is what a consumer who knows which tool is broken wants.
+cmd_repair() {
+    case "${1:-}" in
+        -h|--help) cmd_help repair; return 0 ;;
+    esac
+    sh_env_load
+    sh_memexec_ensure
+    sh_rp_names=''
+    for sh_rp_arg in "$@"; do
+        case "$sh_rp_arg" in
+            -*) sh_die "repair does not take '$sh_rp_arg'; run 'sandhome help repair' for the form it takes" ;;
+        esac
+        if ! sh_toolchain_known "$sh_rp_arg"; then
+            sh_fail "unknown toolchain $sh_rp_arg; run 'sandhome toolchains' for the list"
+        fi
+        # `sh_in_list` splits on commas and pipes, not on spaces, so a
+        # space-separated accumulator would ask it whether ' jq' is in the empty
+        # list, be told no, and still be told yes by the first name added. The
+        # accumulator is a comma list here for exactly that reason.
+        sh_in_list "$sh_rp_arg" "$sh_rp_names" || sh_rp_names="$sh_rp_names,$sh_rp_arg"
+    done
+    if [ -z "$(sh_trim "$sh_rp_names")" ]; then
+        sh_rp_names=$(sh_toolchain_available)
+    fi
+    for sh_rp_name in $(sh_split_on ',' "$sh_rp_names"); do
+        sh_toolchain_known "$sh_rp_name" || continue
+        # The module has to be sourced before its TC_<name>_BINS is readable.
+        # install gets this for free because sh_toolchain_ensure loads it; a
+        # command that goes straight to the promote step has to ask, and asking
+        # is what sh_toolchain_load is for.
+        sh_toolchain_load "$sh_rp_name" || continue
+        eval "sh_rp_bins=\${TC_${sh_rp_name}_BINS:-}"
+        [ -n "$sh_rp_bins" ] || continue
+        # shellcheck disable=SC2086
+        if sh_promote_toolchain "$sh_rp_name" $sh_rp_bins; then
+            # The module gets its post-promote step, as it does on install:
+            # a promote copies executables over the view, so a module that
+            # rewrites one of them afterwards (rust's --sysroot wrapper)
+            # would have that work undone by repair. Install calls
+            # tc_<name>_env after the promote; repair leaves the view in
+            # the same state.
+            if command -v "tc_${sh_rp_name}_env" >/dev/null 2>&1; then
+                "tc_${sh_rp_name}_env" >/dev/null 2>&1 || true
+            fi
+            # Rust targets added after the last promote are re-linked here
+            # too: a repair that re-mirrors without re-linking would undo
+            # the live-target invariant and bring back E0463 (issue #115).
+            if [ "$sh_rp_name" = rust ] && command -v tc_rust_link_data_targets >/dev/null 2>&1; then
+                tc_rust_link_data_targets "$SH_EXEC_VIEWS/rust" "$(sh_toolchain_root rust)" >/dev/null 2>&1 || true
+            fi
+            sh_say "repaired the exec view for $sh_rp_name"
+        else
+            sh_fail "could not rebuild the exec view for $sh_rp_name"
+        fi
+    done
+    sh_exec_install_launchers
+    sh_shim_build_all "$SH_REPO_DIR/shims"
+    sh_shim_write_passwd
+    sh_shim_report
+    sh_env_write
+    sh_global_install || true
     return 0
 }
 cmd_shims() {
+    case "${1:-}" in
+        -h|--help) cmd_help shims; return 0 ;;
+        # An unknown flag is refused, matching every other command (issue #125).
+        -*) sh_die "shims does not take '$1'; run 'sandhome help shims' for the form it takes" ;;
+    esac
     if [ "${1:-build}" = build ]; then
         sh_shim_build_all "$SH_REPO_DIR/shims"
         sh_shim_write_passwd
@@ -185,14 +1145,70 @@ cmd_shell() {
     fi
     sh_die 'no errandsh found'
 }
+# pty CMD... -> run CMD with a userspace pty, where the kernel has none. The
+# wrapper exports the fakepty interposer and execs, so a subshell CMD spawns
+# keeps the terminal. This is the same path errandsh uses for a full-screen
+# program, exposed for a caller that is not in an errandsh session.
+cmd_pty() {
+    if [ "$#" -eq 0 ]; then
+        sh_die 'pty needs a command'
+    fi
+    if [ ! -r "$SH_REPO_DIR/shell/faketty" ]; then
+        sh_die "no faketty wrapper at $SH_REPO_DIR/shell/faketty"
+    fi
+    exec sh "$SH_REPO_DIR/shell/faketty" "$@"
+}
 cmd_exec() {
     if [ "$#" -eq 0 ]; then
         sh_die 'exec needs a command'
     fi
-    sh_env_load
+    # An explicit shell-string form, so the intent is named rather than guessed:
+    # `sandhome exec --shell 'make -j4 && ./run'` runs the line through the
+    # shell with the environment loaded. `--shell` with no string fails loudly
+    # rather than running an empty line.
+    if [ "${1:-}" = --shell ]; then
+        shift
+        if [ "$#" -eq 0 ]; then
+            sh_die "exec --shell needs a string; use: sandhome exec --shell 'make -j4'"
+        fi
+        sh_env_apply
+        exec sh -c "$*"
+    fi
+    case "${1:-}" in
+        -h|--help) cmd_help exec; return 0 ;;
+        -*) sh_die "exec does not take '$1'; use: sandhome exec CMD [ARGS...] or sandhome exec --shell 'string'" ;;
+    esac
+    # # STOP: A SINGLE NON-EXECUTABLE ARGUMENT IS A SHELL STRING, NOT A PROGRAM.
+    # `exec "$@"` with one argument that is not on PATH died with the
+    # interpreter's own error and the installed copy's line number:
+    #   sandhome: 802: exec: echo hi: not found
+    # which reads like a corrupted tree rather than "exec takes argv". The
+    # documented working form is `sandhome exec sh -c '...'`; the single-argument
+    # form is now honoured the way a caller means it, by running it through the
+    # shell, so the common "run this line with the environment loaded" case works
+    # (issue #125). Two or more arguments stay exec-argv: `sandhome exec make -j4`
+    # must exec make, not pass "-j4" to a shell.
+    if [ "$#" -eq 1 ]; then
+        case "$1" in
+            */*) : ;;
+            *)
+                if ! command -v "$1" >/dev/null 2>&1; then
+                    sh_env_apply
+                    exec sh -c "$1"
+                fi ;;
+        esac
+    fi
+    sh_env_apply
     exec "$@"
 }
 cmd_report() {
+    case "${1:-}" in
+        -h|--help) cmd_help report; return 0 ;;
+        --json) : ;;
+        # An unknown flag is refused, matching every other command (issue #125);
+        # the accepted flag is named above so the refusal cannot swallow it.
+        -*) sh_die "report does not take '$1'; run 'sandhome help report' for the flags it takes" ;;
+    esac
     sh_env_load
     if [ "${1:-}" = --json ]; then
         sh_report_json
@@ -200,8 +1216,679 @@ cmd_report() {
         sh_report_text
     fi
 }
-cmd_gc() { sh_say "removed $(sh_space_gc "${1:-7}") staging entries"; }
-cmd_version() { printf 'sandhome/1\n'; }
+# # STOP: GC VALIDATES ITS ARGUMENT AND MEASURES WHAT IT RECLAIMED. `gc abc` and
+# `gc -5` used to print "removed 0 staging entries" and exit 0: the value went
+# straight into `find -mtime +"$days"`, find failed, the substitution was empty,
+# nothing was removed, and the command reported success. The line now refuses a
+# value that is not a whole number of days by name and exits 2, which is what
+# `install` already does for an unknown toolchain, and it prints the space
+# actually reclaimed rather than a count of entries - the reason to run gc is a
+# full exec root, and a count says nothing about bytes. `--dry-run` names what
+# it would remove and removes nothing, which a command that deletes should have
+# had from the start.
+#
+# # STOP: THE BYTES ARE COUNTED, NOT DIFFERENCED. The old line diffed df before
+# and after on the home tmp filesystem, which is three wrong answers at once:
+# it measured the wrong filesystem when the exec root is elsewhere, it read 0
+# whenever the kernel had not yet flushed the unlink, and sh_gc_bytes -- the
+# variable that existed for exactly this -- was never incremented, so the
+# recovery command reported "0KB (0MB) reclaimed" however much it deleted
+# (issue #85). sh_space_gc measures each entry before removal and exports the
+# total; this prints it.
+cmd_gc() {
+    sh_cg_days=7
+    sh_cg_dry=0
+    for sh_cg_arg in "$@"; do
+        case "$sh_cg_arg" in
+            --dry-run) sh_cg_dry=1 ;;
+            --now) sh_cg_days=0 ;;
+            -h|--help) cmd_help gc; return 0 ;;
+            -*)
+                sh_die "gc does not take '$sh_cg_arg'; it takes DAYS, --now, or --dry-run"
+                ;;
+            *)
+                sh_cg_days=$sh_cg_arg
+                ;;
+        esac
+    done
+    case "$sh_cg_days" in
+        ''|*[!0-9]*)
+            sh_die "gc needs a whole number of days, not '$sh_cg_days'"
+            ;;
+    esac
+    if [ "$sh_cg_dry" = 1 ]; then
+        SH_GC_DRY_RUN=1
+        export SH_GC_DRY_RUN
+    fi
+    # sh_space_gc prints two words: the entry count and the kilobytes actually
+    # removed. Both cross the command substitution as text, because assignments
+    # inside it (a subshell) would not reach this shell.
+    sh_cg_out=$(sh_space_gc "$sh_cg_days") || return $?
+    sh_cg_removed=${sh_cg_out%% *}
+    sh_cg_kb=${sh_cg_out##* }
+    case "$sh_cg_removed" in
+        ''|*[!0-9]*) sh_cg_removed=0 ;;
+    esac
+    case "$sh_cg_kb" in
+        ''|*[!0-9]*) sh_cg_kb=0 ;;
+    esac
+    if [ "$sh_cg_dry" = 1 ]; then
+        sh_say "dry run: nothing was removed; the entries above are what gc $sh_cg_days would delete"
+        return 0
+    fi
+    sh_cg_mb=$((sh_cg_kb / 1024))
+    sh_say "removed $sh_cg_removed entries, ${sh_cg_kb}KB (${sh_cg_mb}MB) reclaimed"
+    return 0
+}
+
+# cmd_prune [NAME...] -> drop exec-view entries whose payload is gone.
+# No names means every toolchain the tree knows. Unknown names are refused
+# by name rather than silently skipped: a prune that misspells a toolchain
+# and reports zero is a success that did nothing.
+cmd_prune() {
+    sh_pr_total=0
+    sh_pr_names=''
+    for sh_pr_arg in "$@"; do
+        case "$sh_pr_arg" in
+            -h|--help) cmd_help prune; return 0 ;;
+            -*) sh_die "prune does not take '$sh_pr_arg'; run 'sandhome help prune' for the form it takes" ;;
+            *) sh_pr_names="$sh_pr_names $sh_pr_arg" ;;
+        esac
+    done
+    if [ -z "$sh_pr_names" ]; then
+        sh_pr_names=$(sh_toolchain_available)
+    fi
+    for sh_pr_name in $sh_pr_names; do
+        [ -n "$sh_pr_name" ] || continue
+        if ! sh_toolchain_known "$sh_pr_name"; then
+            sh_die "unknown toolchain $sh_pr_name; run 'sandhome toolchains' for the list"
+        fi
+        sh_pr_n=$(sh_view_prune "$sh_pr_name" 2>/dev/null)
+        case "$sh_pr_n" in
+            ''|*[!0-9]*) sh_pr_n=0 ;;
+        esac
+        if [ "$sh_pr_n" -gt 0 ]; then
+            sh_say "pruned $sh_pr_n stale view entries for $sh_pr_name"
+        fi
+        sh_pr_total=$((sh_pr_total + sh_pr_n))
+    done
+    sh_say "pruned $sh_pr_total stale view entries"
+    return 0
+}
+
+# cmd_add NAME --url URL [--sha256 DIGEST] [--bin PATH] [--desc TEXT]
+# [--scaffold-only] -> write a module for one asset into the durable local
+# directory and install it. The common case from issue #94: one static asset,
+# one name on PATH, no hand-written module. Archive suffixes unpack first;
+# anything else lands as one binary. The generated file carries the contract
+# rules as comments, so --scaffold-only (write without installing) is the
+# starting point for a bespoke install. An existing module is never
+# overwritten: edit it or remove it first.
+cmd_add() {
+    sh_ad_name=''
+    sh_ad_url=''
+    sh_ad_sha=''
+    sh_ad_bin=''
+    sh_ad_desc=''
+    sh_ad_scaffold=0
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --url)     [ "$#" -ge 2 ] || sh_die 'add --url needs a value'; sh_ad_url=$2; shift 2 ;;
+            --url=*)    sh_ad_url=${1#--url=}; [ -n "$sh_ad_url" ] || sh_die 'add --url needs a value'; shift ;;
+            --sha256)  [ "$#" -ge 2 ] || sh_die 'add --sha256 needs a value'; sh_ad_sha=$2; shift 2 ;;
+            --sha256=*) sh_ad_sha=${1#--sha256=}; shift ;;
+            --bin)     [ "$#" -ge 2 ] || sh_die 'add --bin needs a value'; sh_ad_bin=$2; shift 2 ;;
+            --bin=*)    sh_ad_bin=${1#--bin=}; shift ;;
+            --desc)    [ "$#" -ge 2 ] || sh_die 'add --desc needs a value'; sh_ad_desc=$2; shift 2 ;;
+            --desc=*)   sh_ad_desc=${1#--desc=}; shift ;;
+            --scaffold-only) sh_ad_scaffold=1; shift ;;
+            -h|--help) cmd_help add; return 0 ;;
+            -*) sh_die "add does not take '$1'; run 'sandhome help add' for the form it takes" ;;
+            *)
+                if [ -n "$sh_ad_name" ]; then
+                    sh_die "add takes one NAME, already have '$sh_ad_name'"
+                fi
+                sh_ad_name=$1; shift ;;
+        esac
+    done
+    [ -n "$sh_ad_name" ] || sh_die 'add needs a NAME; run sandhome help add for the form it takes'
+    case "$sh_ad_name" in
+        [a-z]*)
+            case "$sh_ad_name" in
+                *[!a-z0-9_]*) sh_die "add NAME '$sh_ad_name' must be [a-z][a-z0-9_]* (it becomes function suffixes)" ;;
+            esac ;;
+        *) sh_die "add NAME '$sh_ad_name' must be [a-z][a-z0-9_]* (it becomes function suffixes)" ;;
+    esac
+    [ -n "$sh_ad_url" ] || sh_die 'add needs --url URL'
+    case "$sh_ad_url" in
+        https://*|http://*) ;;
+        *) sh_die "add --url '$sh_ad_url' must be http(s)" ;;
+    esac
+    # The values below are interpolated into a generated shell file, so shell
+    # metacharacters in them become code. Refuse the set rather than escaping
+    # it: a URL, a relative bin path and a one-line description have no
+    # legitimate use for quotes, dollars, backticks or backslashes.
+    case "$sh_ad_url$sh_ad_bin$sh_ad_desc" in
+        *\'*|*\"*|*\$*|*\`*|*\\*) sh_die 'add --url/--bin/--desc carry no quotes, dollars, backticks or backslashes' ;;
+    esac
+    if [ -n "$sh_ad_sha" ] && ! sh_is_hex64 "$sh_ad_sha"; then
+        sh_die "add --sha256 '$sh_ad_sha' is not 64 hex characters"
+    fi
+    # The exposed binary: named, or the asset's own basename for a single
+    # file. An archive without --bin is refused: guessing which entry is
+    # the tool is how a wrong tree gets put on PATH.
+    sh_ad_archive=0
+    case "$sh_ad_url" in
+        *.tar.gz|*.tgz|*.tar.xz|*.txz|*.tar.zst|*.tzst|*.tar.bz2|*.tbz|*.tbz2|*.tar|*.zip) sh_ad_archive=1 ;;
+    esac
+    if [ -z "$sh_ad_bin" ]; then
+        if [ "$sh_ad_archive" = 1 ]; then
+            sh_die 'add needs --bin PATH for an archive (the executable inside it, relative to the toolchain root)'
+        fi
+        sh_ad_base=${sh_ad_url##*/}
+        sh_ad_base=${sh_ad_base%%\?*}
+        [ -n "$sh_ad_base" ] || sh_die "add cannot name the binary from '$sh_ad_url'; pass --bin PATH"
+        sh_ad_bin="bin/$sh_ad_base"
+    fi
+    case "$sh_ad_bin" in
+        *'..'*|/*) sh_die "add --bin '$sh_ad_bin' must be relative and stay inside the toolchain root" ;;
+    esac
+    case "$sh_ad_bin" in
+        */*) ;;
+        *) sh_ad_bin="bin/$sh_ad_bin" ;;
+    esac
+    [ -n "$sh_ad_desc" ] || sh_ad_desc="$sh_ad_name, added locally via sandhome add"
+    sh_ad_dir="$SH_HOME/toolchains.d"
+    sh_ad_file="$sh_ad_dir/$sh_ad_name.sh"
+    if [ -e "$sh_ad_file" ] || [ -L "$sh_ad_file" ]; then
+        sh_die "add refuses to overwrite $sh_ad_file; edit it or remove it first"
+    fi
+    if [ "$SH_DRY_RUN" = 1 ]; then
+        sh_step "would write $sh_ad_file and install $sh_ad_name"
+        return 0
+    fi
+    mkdir -p "$sh_ad_dir" 2>/dev/null || { sh_fail "could not create $sh_ad_dir"; return 1; }
+    sh_ad_binary=${sh_ad_bin##*/}
+    sh_ad_sq="'"
+    {
+        printf '#!/bin/sh\n'
+        printf '# %s - %s. Written by %s add; lives in\n' "$sh_ad_name" "$sh_ad_desc" "$SH_SELF"
+        printf '# $SANDHOME_HOME/toolchains.d/ so reinstalls never touch it. Edit freely.\n'
+        printf 'TC_%s_DESC=%s%s%s\n' "$sh_ad_name" "$sh_ad_sq" "$sh_ad_desc" "$sh_ad_sq"
+        printf 'TC_%s_BINS=%s%s%s\n' "$sh_ad_name" "$sh_ad_sq" "$sh_ad_bin" "$sh_ad_sq"
+        printf 'TC_%s_EXEC_MB=16\n' "$sh_ad_name"
+        printf '# EXEC_MB is a pre-install estimate: measure the view and correct it.\n'
+        printf 'tc_%s_probe() {\n' "$sh_ad_name"
+        printf '    sh_have %s || return 1\n' "$sh_ad_binary"
+        printf '    %s --version >/dev/null 2>&1 || %s -h >/dev/null 2>&1 || %s --help >/dev/null 2>&1\n' "$sh_ad_binary" "$sh_ad_binary" "$sh_ad_binary"
+        printf '}\n'
+        printf 'tc_%s_install() {\n' "$sh_ad_name"
+        printf '    sh_ad_root=$(sh_toolchain_root %s)\n' "$sh_ad_name"
+        printf '    rm -rf "$sh_ad_root" 2>/dev/null\n'
+        if [ "$sh_ad_archive" = 1 ]; then
+            printf '    mkdir -p "$sh_ad_root" 2>/dev/null || return 1\n'
+            printf '    if ! sh_fetch_unpack "%s" "$sh_ad_root" "" %s; then\n' "$sh_ad_url" "$sh_ad_name"
+            printf '        return 1\n'
+            printf '    fi\n'
+        else
+            printf '    mkdir -p "$sh_ad_root/%s" 2>/dev/null || return 1\n' "${sh_ad_bin%/*}"
+            # The pin is looked up at install time, not baked now: an operator
+            # pin set later must still answer.
+            printf '    if ! sh_fetch_verified "%s" "$sh_ad_root/%s" "$(sh_pin_for "%s" %s)"; then\n' "$sh_ad_url" "$sh_ad_bin" "$sh_ad_url" "$sh_ad_name"
+            printf '        return 1\n'
+            printf '    fi\n'
+            printf '    chmod 0755 "$sh_ad_root/%s" 2>/dev/null || true\n' "$sh_ad_bin"
+        fi
+        printf '    [ -x "$sh_ad_root/%s" ] || { sh_warn "the asset did not put %s where it was promised"; return 1; }\n' "$sh_ad_bin" "$sh_ad_bin"
+        printf '    return 0\n'
+        printf '}\n'
+        if [ -n "$sh_ad_sha" ]; then
+            printf 'tc_%s_pin() { printf %s%s%s; }\n' "$sh_ad_name" "$sh_ad_sq" "$sh_ad_sha" "$sh_ad_sq"
+        fi
+        printf 'tc_%s_env() {\n' "$sh_ad_name"
+        printf '    return 0\n'
+        printf '}\n'
+        printf 'tc_%s_version() {\n' "$sh_ad_name"
+        printf '    sh_have %s && sh_first_line %s --version 2>/dev/null\n' "$sh_ad_binary" "$sh_ad_binary"
+        printf '}\n'
+    } > "$sh_ad_file" 2>/dev/null || { sh_fail "could not write $sh_ad_file"; return 1; }
+    sh_say "wrote $sh_ad_file"
+    if [ "$sh_ad_scaffold" = 1 ]; then
+        sh_say "scaffold only; edit $sh_ad_file, then run 'sandhome install $sh_ad_name'"
+        return 0
+    fi
+    sh_toolchain_ensure "$sh_ad_name" || return 1
+    return 0
+}
+# cmd_doctor [--json] -> the readiness gate, prose or JSON. Exit 0/1, never
+# the count. --json prints one object (failures, failed[], checks{}) for a
+# harness to branch on (issue #88).
+cmd_doctor() {
+    sh_cd_json=0
+    for sh_cd_arg in "$@"; do
+        case "$sh_cd_arg" in
+            --json) sh_cd_json=1 ;;
+            -h|--help) cmd_help doctor; return 0 ;;
+            -*) sh_die "doctor does not take '$sh_cd_arg'; run 'sandhome help doctor' for the form it takes" ;;
+            *) sh_die "doctor takes no names; run 'sandhome help doctor' for the form it takes" ;;
+        esac
+    done
+    sh_env_load
+    if [ "$sh_cd_json" = 1 ]; then
+        SH_DOCTOR_JSON=1
+        export SH_DOCTOR_JSON
+    fi
+    sh_doctor || exit 1
+}
+
+# cmd_status [--json] -> the one-command readiness answer (issue #88): exit
+# 0/1 like doctor, but one line naming the roots, the view, the toolchains
+# present, and the next command -- the line a harness calls first and
+# ROUTE.md names. --json carries the same plus workdir/build fields.
+cmd_status() {
+    sh_cs_json=0
+    for sh_cs_arg in "$@"; do
+        case "$sh_cs_arg" in
+            --json) sh_cs_json=1 ;;
+            -h|--help) cmd_help status; return 0 ;;
+            -*) sh_die "status does not take '$sh_cs_arg'; run 'sandhome help status' for the form it takes" ;;
+            *) sh_die "status takes no names; run 'sandhome help status' for the form it takes" ;;
+        esac
+    done
+    sh_env_load
+    sh_cs_doc=$(SH_DOCTOR_JSON=1 sh_doctor 2>/dev/null)
+    sh_cs_rc=$?
+    # The count out of the JSON without sed: status is the first command a
+    # bare harness runs, and the library may not require sed. Single-quoted
+    # literal plus [!0-9]: the double-quoted form mis-strips on some shells,
+    # and [^...] is not portable negation.
+    sh_cs_fail=${sh_cs_doc#*'"failures"':}
+    sh_cs_fail=${sh_cs_fail%%[!0-9]*}
+    case "$sh_cs_fail" in
+        ''|*[!0-9]*) sh_cs_fail=1 ;;
+    esac
+    sh_cs_present=0
+    sh_cs_total=0
+    # The readiness scan probes EVERY known toolchain, including ones the setup
+    # did not ask for. A wedged or self-re-resolving binary (see
+    # sh_adopt_view_skip) must not make a one-line summary wait the install-time
+    # 60s timeout per name; status is a summary, not the correctness gate, and
+    # the gate is doctor above. Bound the scan and leave the global alone.
+    SH_PROBE_TIMEOUT_SECS=5
+    for sh_cs_t in $(sh_toolchain_available); do
+        [ -n "$sh_cs_t" ] || continue
+        sh_cs_total=$((sh_cs_total + 1))
+        if sh_toolchain_probe "$sh_cs_t"; then
+            sh_cs_present=$((sh_cs_present + 1))
+        fi
+    done
+    sh_cs_wd=${PWD:-.}
+    sh_cs_wd_noexec=no
+    sh_exec_probe "$sh_cs_wd" 2>/dev/null || sh_cs_wd_noexec=yes
+    if [ "$sh_cs_rc" = 0 ]; then
+        sh_cs_ready=yes
+        sh_cs_next="build under ${SH_EXEC:-.}"
+    else
+        sh_cs_ready=no
+        sh_cs_next="run 'sandhome doctor' for the failing invariant"
+    fi
+    if [ "$sh_cs_json" = 1 ]; then
+        printf '{"ready":"%s","failures":%s,"home":"%s","exec":"%s","exec_space":"%s","exec_ceiling":"%s","view":"%s","toolchains_present":%s,"toolchains_total":%s,"workdir":"%s","workdir_noexec":"%s","build_root":"%s","next_action":"%s"}\n' \
+            "$sh_cs_ready" "$sh_cs_fail" \
+            "$(sh_json_escape "${SH_HOME:-unknown}")" "$(sh_json_escape "${SH_EXEC:-unknown}")" \
+            "$(sh_json_escape "$(sh_space_status "${SH_EXEC:-/tmp}" 2>/dev/null)")" \
+            "$(sh_json_escape "$(sh_space_ceiling 2>/dev/null)")" \
+            "$(sh_json_escape "$(sh_report_view 2>/dev/null)")" \
+            "$sh_cs_present" "$sh_cs_total" \
+            "$(sh_json_escape "$sh_cs_wd")" "$sh_cs_wd_noexec" \
+            "$(sh_json_escape "${SH_EXEC:-unknown}")" "$(sh_json_escape "$sh_cs_next")"
+        return "$sh_cs_rc"
+    fi
+    printf 'ready=%s home=%s exec=%s exec_space=%s exec_ceiling=%s view=%s toolchains=%s/%s workdir_noexec=%s next=%s\n' \
+        "$sh_cs_ready" "${SH_HOME:-unknown}" "${SH_EXEC:-unknown}" \
+        "$(sh_space_status "${SH_EXEC:-/tmp}" 2>/dev/null)" "$(sh_space_ceiling 2>/dev/null)" "$(sh_report_view 2>/dev/null)" \
+        "$sh_cs_present" "$sh_cs_total" "$sh_cs_wd_noexec" "$sh_cs_next"
+    return "$sh_cs_rc"
+}
+
+# cmd_resume -> rehydrate after a tmpfs restart without fetching (issue #88):
+# re-plan the roots (the exec root may be gone), rebuild every recorded view,
+# then run doctor and exit with its code. The full bootstrap stays for a
+# machine whose env.sh is gone; resume is for a session that watched its
+# view exist.
+cmd_resume() {
+    for sh_rs_arg in "$@"; do
+        case "$sh_rs_arg" in
+            -h|--help) cmd_help resume; return 0 ;;
+            -*) sh_die "resume does not take '$sh_rs_arg'; run 'sandhome help resume' for the form it takes" ;;
+            *) sh_die "resume takes no names; run 'sandhome help resume' for the form it takes" ;;
+        esac
+    done
+    sh_env_load
+    if [ ! -r "$SH_HOME/env.sh" ]; then
+        sh_die 'no recorded environment here; run the setup instead of resuming it'
+    fi
+    # # STOP: A RESUME MUST NOT DISARM THE READINESS GATE. sh_env_load sources
+    # env.d/ but not env.sh, so this process holds no wanted list; a plan or a
+    # routine write that resolves its own default would record the developer set
+    # and drop every toolchain a later `install` added from doctor's gate, while
+    # the payloads those names describe are gone or half-rebuilt (issue #153).
+    # Seed the recorded request from the file before anything can rewrite it.
+    SH_WANTED_TOOLCHAINS=$(sh_wanted_from_file)
+    if [ -n "$SH_WANTED_TOOLCHAINS" ]; then
+        export SH_WANTED_TOOLCHAINS
+    fi
+    # Same class as the wanted list above: a requested cross target is recorded
+    # in env.sh (SANDHOME_RUST_TARGETS) so doctor can name the linker it needs,
+    # and a resume that plans without it would rewrite the file without the row
+    # and silence the emscripten_linker gate (issue #163). Seed it before the
+    # plan for the same reason.
+    if [ -z "${SH_RUST_TARGETS:-}" ]; then
+        SH_RUST_TARGETS=$(sh_rust_targets_from_file)
+        if [ -n "$SH_RUST_TARGETS" ]; then
+            export SH_RUST_TARGETS
+        fi
+    fi
+    sh_space_plan || return 2
+    : "${SANDHOME_HOME:=$SH_HOME}"
+    : "${SANDHOME_EXEC:=$SH_EXEC}"
+    export SANDHOME_HOME SANDHOME_EXEC
+    sh_memexec_ensure
+    sh_exec_install_launchers
+    # Refresh the stable entry point after a tmpfs restart moved the exec root:
+    # the snippet bakes the exec-bin path, and the restart is exactly when a cold
+    # non-login shell needs it (issue #122). The writer is shared with the
+    # bootstrap so the two cannot drift (issues #154, #122).
+    sh_entry_write && sh_step "wrote $SH_HOME/entry.sh (source it from a shell with no PATH)"
+    # Repair, not install: payloads that survived rebuild their views with
+    # no download, and genuinely missing toolchains fail loudly in doctor.
+    cmd_repair || sh_warn 'resume could not rebuild every view; doctor names what is missing'
+    sh_say 'resumed; running the readiness gate'
+    cmd_doctor || return 1
+    return 0
+}
+# cmd_project NAME [--python|--node] [--no-link] -> a project that runs on
+# a noexec work tree (issue #74). The working tree refuses execve, so every
+# naive setup half-works: `uv venv .venv` builds scripts with a shebang
+# into the tree (`bad interpreter: Permission denied`), `npm install` exits
+# 0 and `npx` fails, a native CLI dies with `spawnSync ... EACCES`. Each was
+# documented as its own hand-rolled dance; this does the whole dance once:
+# the project lives under the exec root (where it runs), and ./NAME links
+# to it (where the work happens to be). With neither --python nor --node
+# both halves are attempted; a half whose toolchain is absent is skipped
+# with a warning rather than failing the other half.
+#
+# STOP: THE NAME IS CLOSED TO PATH-SAFE CHARACTERS, BECAUSE IT BECOMES A
+# DIRECTORY AND A SYMLINK IN THE CURRENT DIRECTORY. A `../x` or an absolute
+# path would write outside the project the caller meant, and a name starting
+# with `-` already parses as a flag. The check below refuses all three.
+cmd_project() {
+    sh_pj_name=''
+    sh_pj_py=0
+    sh_pj_node=0
+    sh_pj_seen=0
+    sh_pj_link=1
+    for sh_pj_arg in "$@"; do
+        case "$sh_pj_arg" in
+            --python) sh_pj_py=1; sh_pj_seen=1 ;;
+            --node) sh_pj_node=1; sh_pj_seen=1 ;;
+            --no-link) sh_pj_link=0 ;;
+            -h|--help) cmd_help project; return 0 ;;
+            -*) sh_die "project does not take '$sh_pj_arg'; run 'sandhome help project' for the form it takes" ;;
+            *)
+                if [ -n "$sh_pj_name" ]; then
+                    sh_die 'project takes one NAME'
+                fi
+                sh_pj_name=$sh_pj_arg
+                ;;
+        esac
+    done
+    if [ -z "$sh_pj_name" ]; then
+        sh_die 'project needs a NAME'
+    fi
+    case "$sh_pj_name" in
+        ''|.|..|*/*)
+            sh_die "project NAME '$sh_pj_name' would not stay in this directory; use [A-Za-z0-9_.-]+" ;;
+        *[!A-Za-z0-9_.-]*)
+            sh_die "project NAME '$sh_pj_name' would not stay in this directory; use [A-Za-z0-9_.-]+" ;;
+    esac
+    if [ "$sh_pj_seen" = 0 ]; then
+        sh_pj_py=1
+        sh_pj_node=1
+    fi
+    sh_pj_dir=$SH_EXEC/projects/$sh_pj_name
+    sh_pj_failed=0
+    if ! mkdir -p "$sh_pj_dir" 2>/dev/null; then
+        sh_fail "could not create $sh_pj_dir"
+        return 1
+    fi
+    sh_say "project $sh_pj_name at $sh_pj_dir"
+    if [ "$sh_pj_link" = 1 ]; then
+        if [ -L ./"$sh_pj_name" ] && sh_have readlink; then
+            sh_pj_cur=$(readlink ./"$sh_pj_name" 2>/dev/null)
+            if [ "$sh_pj_cur" = "$sh_pj_dir" ]; then
+                sh_say "./$sh_pj_name already links there"
+            else
+                sh_fail "./$sh_pj_name links elsewhere ($sh_pj_cur); move it aside first"
+                return 1
+            fi
+        elif [ -e ./"$sh_pj_name" ] || [ -L ./"$sh_pj_name" ]; then
+            sh_fail "./$sh_pj_name exists and is not this project; move it aside first"
+            return 1
+        else
+            if ln -s "$sh_pj_dir" ./"$sh_pj_name" 2>/dev/null; then
+                sh_say "linked ./$sh_pj_name to $sh_pj_dir"
+            else
+                sh_warn "could not link ./$sh_pj_name; work in $sh_pj_dir directly"
+            fi
+        fi
+    fi
+    if [ "$sh_pj_py" = 1 ]; then
+        # A CALLER OF `sandhome project` MAY HAVE NO ENVIRONMENT LOADED, AND
+        # THE COMMAND EXISTS FOR THAT CALLER (issues #74, #137). Both halves
+        # are run through the written environment rather than the caller's
+        # bare PATH: `uv` and `npm` are the toolchain's own view wrappers, and
+        # a wrapper that has not read env.sh cannot map itself back to its
+        # payload. The python half did not show it because uv happened to be
+        # exposed as a working copy on a host that had one; npm is a symlink
+        # into a view, so `sh_have node` was true and `npm init` died with
+        # "cannot map this copy back", swallowed by 2>&1.
+        sh_env_apply 2>/dev/null || true
+        if [ -d "$sh_pj_dir/.venv" ]; then
+            sh_say "python: .venv already present"
+        elif sh_have uv; then
+            # STOP: A VENV WITH NO pip IS A VENV NOTHING CAN INSTALL INTO
+            # (issue #79). `uv venv` seeds no pip by default, and the old
+            # line then told the consumer to use a venv whose first
+            # dependency install dies with "No module named pip". --seed
+            # puts pip in; when the uv at hand predates the flag, pip is
+            # installed into the venv afterwards, and a venv that still has
+            # no working pip is reported rather than announced as ready.
+            # # STOP: A HALF-BUILT VENV IS CLEARED BEFORE THE RETRY, BECAUSE THE
+            # FIRST FORM CAN LEAVE ONE BEHIND. `uv venv --seed` builds the
+            # environment and THEN installs pip into it, so a seed that fails -
+            # a cage with no resolver, measured here: "Failed to fetch
+            # https://pypi.org/simple/pip/, dns error" - leaves a .venv with no
+            # pip in it, and the retry then answered "A virtual environment
+            # already exists at: .venv" and the command reported a python half
+            # that had failed when it had in fact half worked. The retry
+            # therefore clears what the first form left, and the cleared copy is
+            # announced rather than done silently, because a person watching
+            # for a state change should see the venv they already have replaced.
+            sh_pj_uvout=$( ( CDPATH='' cd -- "$sh_pj_dir" 2>/dev/null && uv venv --seed "$sh_pj_dir/.venv" ) 2>&1 )
+            sh_pj_uvrc=$?
+            if [ "$sh_pj_uvrc" != 0 ] || [ ! -d "$sh_pj_dir/.venv" ]; then
+                if [ -d "$sh_pj_dir/.venv" ]; then
+                    rm -rf "$sh_pj_dir/.venv" 2>/dev/null || true
+                    sh_say "python: cleared the half-built .venv $sh_pj_dir/.venv (uv venv --seed left it without pip)"
+                fi
+                sh_pj_uvout=$( ( CDPATH='' cd -- "$sh_pj_dir" 2>/dev/null && uv venv "$sh_pj_dir/.venv" ) 2>&1 )
+                sh_pj_uvrc=$?
+            fi
+            if [ "$sh_pj_uvrc" = 0 ] && [ -d "$sh_pj_dir/.venv" ]; then
+                sh_say "python: uv venv $sh_pj_dir/.venv"
+                if [ -x "$sh_pj_dir/.venv/bin/python" ] && \
+                   ! "$sh_pj_dir/.venv/bin/python" -m pip --version >/dev/null 2>&1; then
+                    if uv pip install --python "$sh_pj_dir/.venv/bin/python" pip >/dev/null 2>&1; then
+                        sh_say 'python: pip installed into the venv'
+                    else
+                        # # STOP: A VENV WITHOUT pip IS A WARNING, NOT A
+                        # FAILED HALF, AND THE DIFFERENCE IS MEASURED. The
+                        # venv itself answers: `.venv/bin/python -c "print(1)"`
+                        # runs, and `uv pip install` installs into it without
+                        # pip ever existing. What is missing is one of three
+                        # ways to install into it. Measured here: the seed fails
+                        # with "Failed to fetch https://pypi.org/simple/pip/,
+                        # dns error" on a cage with no resolver, so a non-zero
+                        # exit here would report the project command as broken
+                        # on every such host while the venv beside it works.
+                        # A half that produced NOTHING is a failure (the two
+                        # `sh_pj_failed=1` below); a half that produced
+                        # something usable with one gap named is a warning.
+                        sh_warn 'the venv has no working pip; run `<venv>/bin/python -m ensurepip` or `uv pip install --python <venv>/bin/python pip` before installing dependencies'
+                    fi
+                fi
+            else
+                sh_pj_failed=1
+                sh_warn "uv venv failed${sh_pj_uvout:+: $(sh_first_line "$sh_pj_uvout")}; python half skipped"
+            fi
+        elif sh_have python3; then
+            sh_pj_pyout=$( ( CDPATH='' cd -- "$sh_pj_dir" 2>/dev/null && python3 -m venv "$sh_pj_dir/.venv" ) 2>&1 )
+            if [ "$?" = 0 ] && [ -d "$sh_pj_dir/.venv" ]; then
+                sh_say "python: venv $sh_pj_dir/.venv"
+            else
+                sh_pj_failed=1
+                sh_warn "python -m venv failed${sh_pj_pyout:+: $(sh_first_line "$sh_pj_pyout")}; python half skipped"
+            fi
+        else
+            sh_warn 'no uv or python3 on PATH; python half skipped (sandhome install python)'
+        fi
+        if [ -x "$sh_pj_dir/.venv/bin/python" ]; then
+            sh_say "python: use ./$sh_pj_name/.venv/bin/python (or source ./$sh_pj_name/.venv/bin/activate)"
+        fi
+    fi
+    if [ "$sh_pj_node" = 1 ]; then
+        # The readiness line is gated on package.json existing, so the command
+        # cannot tell a consumer that `npm install` and `npx` "all run there"
+        # in the same breath as the npm half failing (issue #137), and the
+        # first line of npm's own error is printed rather than swallowed by
+        # 2>&1: "npm: not found", "cannot map this copy back" and a registry
+        # error are three different problems and a reader cannot tell them
+        # apart from one word.
+        if sh_have node; then
+            if [ ! -f "$sh_pj_dir/package.json" ]; then
+                sh_pj_npmout=$( ( CDPATH='' cd -- "$sh_pj_dir" 2>/dev/null && npm init -y ) 2>&1 )
+                sh_pj_npmrc=$?
+                if [ "$sh_pj_npmrc" = 0 ] && [ -f "$sh_pj_dir/package.json" ]; then
+                    sh_say "node: npm init in $sh_pj_dir"
+                else
+                    sh_pj_failed=1
+                    sh_warn "npm init failed${sh_pj_npmout:+: $(sh_first_line "$sh_pj_npmout")}; node half skipped"
+                fi
+            else
+                sh_say 'node: package.json already present'
+            fi
+            if [ -f "$sh_pj_dir/package.json" ]; then
+                sh_say "node: work in ./$sh_pj_name (npm install, npx, native CLIs all run there)"
+            fi
+        else
+            sh_warn 'no node on PATH; node half skipped (sandhome install node)'
+        fi
+    fi
+    # The two limits, said once, where the project will feel them: a tmpfs
+    # exec root does not survive a restart (re-run this command), and a
+    # native payload must live here, not on the work tree (issue #72).
+    sh_say "note: $sh_pj_dir lives on the exec root; a tmpfs restart clears it, and this command rebuilds it"
+    # A tool that was PRESENT and failed is a non-zero exit so a script can
+    # react; a tool that is ABSENT still leaves the other half usable and the
+    # warning says so, which is the old behavior and stays exit 0 (issue #137).
+    return "$sh_pj_failed"
+}
+# # NOTE: BOTH PROGRAMS REPORT THE SAME SCHEMA STRING, AND A READER WHO CHECKS
+# ONE HAS TO CHECK THE SAME ONE. `bootstrap.sh --version` printed `bootstrap/1`
+# and `sandhome version` printed `sandhome/1`: two spellings of the same value,
+# so a script that wanted to know whether this tree is schema 1 had to try both
+# and could not tell a version difference from a program-name difference. The
+# schema is a property of the TREE, not of the file that prints it, and both
+# now print `sandhome/1`. The program name still goes in the human line the
+# bootstrap prints while setting up, so nothing is lost by the two agreeing.
+SH_VERSION_LINE='sandhome/1'
+cmd_version() { printf '%s\n' "$SH_VERSION_LINE"; }
+
+# sh_cmd_needs_roots COMMAND -> create both roots, now, for the commands that
+# put something on disk. A read-only plan answered first so that the commands
+# that only ask could run on a machine whose home cannot be created; this is the
+# other half, and it is the ONLY place a root is brought into being by this
+# command. An unusable root is refused here, by name, which is what a create
+# plan would have done from startup.
+sh_cmd_needs_roots() {
+    if [ "${SH_PLAN_CREATED:-0}" = 1 ]; then
+        return 0
+    fi
+    sh_space_plan || return 2
+    : "${SANDHOME_HOME:=$SH_HOME}"
+    : "${SANDHOME_EXEC:=$SH_EXEC}"
+    export SANDHOME_HOME SANDHOME_EXEC
+    if [ "${SH_EXEC_UNUSABLE:-0}" = 1 ]; then
+        if [ -n "${SANDHOME_EXEC:-}" ]; then
+            sh_die "SANDHOME_EXEC=$SANDHOME_EXEC is not writable or does not allow exec"
+        fi
+        sh_die 'no writable mount here both allows exec and can be written; set SANDHOME_EXEC to one'
+    fi
+    # A create plan may have moved the exec root; make sure the command that was
+    # just invoked is on the root it chose (issue #41). `repair` does the same
+    # for the same reason: it is the command a consumer runs when the exec view
+    # has gone, and the first thing it must put back is the command they are
+    # running it with.
+    case "${1:-}" in
+        install|repair) sh_exec_install_launchers ;;
+    esac
+    return 0
+}
+
+# sh_cmd_needs_roots_recover -> roots for the recovery commands (gc, prune).
+# gc is the recovery for a full exec root, and prune deletes too, so both must
+# run where the create plan refuses: a full root is exactly the state it refuses.
+# the exec probe cannot write its file, so ENOSPC reads as "not writable or
+# does not allow exec" and the documented recovery dies precisely because the
+# root is full (issue #81). The create plan is probed in a subshell first --
+# sh_die exits, so it cannot be caught in-process -- and on refusal the plan
+# falls back to read-only plus the recorded exec root, which gc then empties.
+sh_cmd_needs_roots_recover() {
+    if [ "${SH_PLAN_CREATED:-0}" = 1 ]; then
+        return 0
+    fi
+    if ( sh_space_plan >/dev/null 2>&1 ); then
+        sh_space_plan || return 2
+        : "${SANDHOME_HOME:=$SH_HOME}"
+        : "${SANDHOME_EXEC:=$SH_EXEC}"
+        export SANDHOME_HOME SANDHOME_EXEC
+        if [ "${SH_EXEC_UNUSABLE:-0}" = 1 ]; then
+            sh_die 'no writable mount here both allows exec and can be written; set SANDHOME_EXEC to one'
+        fi
+        return 0
+    fi
+    sh_space_plan --no-create >/dev/null 2>&1 || true
+    if [ -z "${SH_EXEC:-}" ] || [ ! -d "$SH_EXEC" ]; then
+        sh_gc_rec=$(sh_space_recorded_exec)
+        if [ -n "$sh_gc_rec" ] && [ -d "$sh_gc_rec" ]; then
+            SH_EXEC=$sh_gc_rec
+        fi
+    fi
+    if [ -z "${SH_EXEC:-}" ] || [ ! -d "$SH_EXEC" ]; then
+        sh_die 'no writable mount here both allows exec and can be written; set SANDHOME_EXEC to one'
+    fi
+    SH_EXEC_BIN="$SH_EXEC/bin"
+    SH_EXEC_VIEWS="$SH_EXEC/views"
+    SH_HOME_TOOLCHAINS="$SH_HOME/toolchains"
+    SH_HOME_TMP="$SH_HOME/tmp"
+    export SH_EXEC SH_EXEC_BIN SH_EXEC_VIEWS SH_HOME_TOOLCHAINS SH_HOME_TMP
+    : "${SANDHOME_HOME:=$SH_HOME}"
+    : "${SANDHOME_EXEC:=$SH_EXEC}"
+    export SANDHOME_HOME SANDHOME_EXEC
+    sh_warn 'the exec root is full or unusable; running gc against the recorded roots to recover it'
+    return 0
+}
 
 # STOP: `selftest` AND `test` RUN WHAT IS IN THE CHECKOUT, AND WERE NAMED IN THE
 # USAGE WITHOUT EXISTING. An agent that reads `sandhome help`, picks the obvious
@@ -209,17 +1896,41 @@ cmd_version() { printf 'sandhome/1\n'; }
 # is incomplete. selftest takes no network (syntax, unit, space, shims, and the
 # noexec end-to-end when this machine has a noexec root to test with);
 # `sandhome test` runs the whole suite the way a caller does.
+# # STOP: A TEST COMMAND THAT RAN NOTHING EXITS NON-ZERO, AND SAYS WHY. On a
+# network-only install the checkout is fetched without tests/, so every one of
+# these answered "no test named X in this checkout" - or, for `test`, a bare
+# "sh: 0: cannot open .../tests/run.sh: No such file" - and then exited 0. A
+# consumer checking a setup with the command the router names was told it
+# passed (issue #39). Nothing ran, and the exit code was the only thing that
+# could have said so.
+#
+# The missing suite is now named as a whole rather than file by file, because
+# the cause is one thing - no tests/ in the checkout - and the per-file message
+# reads as seven unrelated absences. A clone has them and is unaffected.
 cmd_selftest() {
+    if [ ! -d "$SH_REPO_DIR/tests" ]; then
+        sh_say "this checkout has no tests/ directory, so there is nothing to self-test"
+        # sh_fail, not sh_say: the dispatcher ends non-zero only on SH_FAILURES,
+        # so a sh_say here and a `return 2` that nothing reads produced exit 0
+        # over a command that ran nothing, which is the defect itself.
+        sh_fail "selftest has no suite to run: this is a network-only checkout, which fetches the library without tests/; clone the repository to run it"
+        return 2
+    fi
     case ${1:-} in
         shims) sandhome_test_one shims ;;
         exec)  sandhome_test_one bootstrap ;;
-        *)      sandhome_test_one syntax
+        # `harness` runs first here too. selftest is what an agent runs under
+        # pressure, and a run that reports a broken suite as green is worse than
+        # a run that reports nothing; see the note in tests/run.sh.
+        *)      sandhome_test_one harness
+                 sandhome_test_one syntax
                  sandhome_test_one unit
                  sandhome_test_one space
                  sandhome_test_one shims
                  sandhome_test_one bootstrap
                  sandhome_test_one toolchain ;;
     esac
+    return $?
 }
 
 sandhome_test_one() {
@@ -239,28 +1950,112 @@ sandhome_test_one() {
     esac
 }
 
-cmd_test() { sh "$SH_REPO_DIR/tests/run.sh"; }
+cmd_test() {
+    # The same guard as selftest, and for the same reason: `sh run.sh` on a
+    # checkout without it printed a raw "cannot open" from the shell and the
+    # command still exited 0, which is worse than a refusal because it looks
+    # like output from a run.
+    if [ ! -r "$SH_REPO_DIR/tests/run.sh" ]; then
+        sh_fail "the suite cannot run: this is a network-only checkout with no tests/run.sh; clone the repository to run it"
+        return 2
+    fi
+    sh "$SH_REPO_DIR/tests/run.sh"
+}
+
+case "${2:-}" in
+    -h|--help)
+        case "${1:-}" in
+            doctor|env|path|global|space|status|resume|toolchains|skills|install|ensure|repair|shims|shell|pty|exec|report|gc|prune|add|project|test|selftest|version|help)
+                cmd_help "${1:-help}"
+                exit 0 ;;
+        esac ;;
+esac
+
+# # STOP: A BARE `sandhome` IS THE DISCOVERY PATH, AND EVERY DISPATCHER BRANCH
+# GUARDS ITS OWN SHIFT. The case word defaulted to `help`, so with no arguments
+# the help branch ran `shift` with $#=0: bash ignores that, dash writes "shift:
+# can't shift that many" to stderr, and the reader of a command they forgot the
+# subcommand of gets a shell diagnostic instead of the usage text (issue #136).
+#
+# A GUARD IS `if [ "$#" -gt 0 ]; then shift; fi`, SPELLED AT EVERY CALL SITE, and
+# that is not a style preference. It was written here first as a FUNCTION,
+# `sh_dispatch_shift`, and it is a silent no-op: inside a POSIX function `$#` and
+# `$1` are the function's own, so the guard read 0, the branch never ran, and
+# the caller's list never moved. Measured three ways, all agreeing: a two-line
+# program printing the function's own `$#` (0) against the caller's (1);
+# `cmd_project` receiving "project pj-x --no-link" and reading the name as
+# "project"; and the trace of that call. So there is no function here, and the
+# guard is visible where the shift is, and the clause in tests/syntax.sh refuses
+# a dispatcher branch that guards a shift with anything else.
+#
+# The two branches that can be reached with NOTHING to shift (a bare
+# `sandhome`, and a second help flag) are answered before the dispatcher and
+# never shift at all, which is the other half of the fix: `sandhome --help`
+# used to reach cmd_help with $1 still reading --help and answer "no help for
+# '--help'" with exit 2 on the one command whose job is to print help.
+if [ "$#" -eq 0 ]; then
+    cmd_help ''
+    exit 0
+fi
+if [ "$1" = -h ] || [ "$1" = --help ]; then
+    cmd_help ''
+    exit 0
+fi
 
 case "${1:-help}" in
-    doctor)      sh_env_load; sh_doctor || exit 1 ;;
+    doctor)      if [ "$#" -gt 0 ]; then shift; fi; cmd_doctor "$@" ;;
+    status)      if [ "$#" -gt 0 ]; then shift; fi; cmd_status "$@" ;;
+    resume)      if [ "$#" -gt 0 ]; then shift; fi; cmd_resume "$@" ;;
     env)         cmd_env ;;
     path)        cmd_path ;;
-    space)       shift; cmd_space "$@" ;;
-    toolchains)  shift; cmd_toolchains "$@" ;;
-    install|ensure) shift; cmd_install "$@" ;;
-    shims)       shift; cmd_shims "$@" ;;
-    shell)       shift; cmd_shell "$@" ;;
-    exec)        shift; cmd_exec "$@" ;;
-    report)      shift; cmd_report "$@" ;;
-    gc)          shift; cmd_gc "$@" ;;
+    global)      sh_cmd_needs_roots global; if [ "$#" -gt 0 ]; then shift; fi; cmd_global "$@" ;;
+    space)       if [ "$#" -gt 0 ]; then shift; fi; cmd_space "$@" ;;
+    toolchains)  if [ "$#" -gt 0 ]; then shift; fi; cmd_toolchains "$@" ;;
+    skills)      if [ "$#" -gt 0 ]; then shift; fi; cmd_skills "$@" ;;
+    install|ensure) case "${2:-}" in -h|--help) if [ "$#" -gt 0 ]; then shift; fi; cmd_install "$@" ;; *) sh_cmd_needs_roots install; if [ "$#" -gt 0 ]; then shift; fi; cmd_install "$@" ;; esac ;;
+    repair) case "${2:-}" in -h|--help) if [ "$#" -gt 0 ]; then shift; fi; cmd_repair "$@" ;; *) sh_cmd_needs_roots repair; if [ "$#" -gt 0 ]; then shift; fi; cmd_repair "$@" ;; esac ;;
+    shims)       sh_cmd_needs_roots shims; if [ "$#" -gt 0 ]; then shift; fi; cmd_shims "$@" ;;
+    shell)       if [ "$#" -gt 0 ]; then shift; fi; cmd_shell "$@" ;;
+    pty)         if [ "$#" -gt 0 ]; then shift; fi; cmd_pty "$@" ;;
+    exec)        if [ "$#" -gt 0 ]; then shift; fi; cmd_exec "$@" ;;
+    exec-dir)    if [ "$#" -gt 0 ]; then shift; fi; cmd_exec_dir "$@" ;;
+    report)      if [ "$#" -gt 0 ]; then shift; fi; cmd_report "$@" ;;
+    gc) case "${2:-}" in -h|--help) if [ "$#" -gt 0 ]; then shift; fi; cmd_gc "$@" ;; *) sh_cmd_needs_roots_recover; if [ "$#" -gt 0 ]; then shift; fi; cmd_gc "$@" ;; esac ;;
+    prune) case "${2:-}" in -h|--help) if [ "$#" -gt 0 ]; then shift; fi; cmd_prune "$@" ;; *) sh_cmd_needs_roots_recover; if [ "$#" -gt 0 ]; then shift; fi; cmd_prune "$@" ;; esac ;;
+    add) case "${2:-}" in -h|--help) if [ "$#" -gt 0 ]; then shift; fi; cmd_add "$@" ;; *) sh_cmd_needs_roots add; if [ "$#" -gt 0 ]; then shift; fi; cmd_add "$@" ;; esac ;;
+    project) case "${2:-}" in -h|--help) if [ "$#" -gt 0 ]; then shift; fi; cmd_project "$@" ;; *) sh_cmd_needs_roots project; if [ "$#" -gt 0 ]; then shift; fi; cmd_project "$@" ;; esac ;;
     test)        cmd_test ;;
-    selftest)    shift; cmd_selftest "${1:-}" ;;
+    selftest)    if [ "$#" -gt 0 ]; then shift; fi; cmd_selftest "${1:-}" ;;
     version|--version) cmd_version ;;
-    help|-h|--help) usage ;;
+    help|-h|--help)
+        # # STOP: THE SUBCOMMAND IS TAKEN BEFORE THE SHIFT, AS A VALUE. The
+        # branch reads the name, then shifts, then hands the name on: with the
+        # read AFTER the shift, `sandhome help doctor` printed the command list
+        # instead of the doctor's page, because what the docs call the page for
+        # a command is the word that followed `help`, and reading it after the
+        # shift is impossible in POSIX sh. `sandhome --help` and `sandhome -h`
+        # name nothing: they are answered before the dispatcher, and this
+        # branch's case drops the flag when a reader reaches it anyway.
+        sh_dispatch_subcommand=${1:-}
+        case "$sh_dispatch_subcommand" in
+            -h|--help) sh_dispatch_subcommand='' ;;
+            help) sh_dispatch_subcommand=${2:-} ;;
+        esac
+        if [ "$#" -gt 0 ]; then shift; fi
+        cmd_help "$sh_dispatch_subcommand" ;;
     *)           usage >&2; sh_die "unknown command $1" ;;
 esac
 
-if [ "$SH_FAILURES" -gt 0 ]; then
-    exit 1
+# # STOP: THE DISPATCHER KEEPS THE COMMAND'S EXIT STATUS. It read only the
+# failure COUNTER, so every `return 1` a command ended with was discarded and
+# the process always exited 0: `sandhome skills` with nothing installed printed
+# `skills_installed=0` and a hint naming the fix, and a script that branched on
+# its status saw success. The status is read first, then the counter is allowed
+# to turn a 0 into a 1 (a command that reported a failure and forgot to return
+# one is the case the counter was built for), and an explicit non-zero is never
+# softened to 0.
+sh_dispatch_status=$?
+if [ "${SH_FAILURES:-0}" -gt 0 ] && [ "$sh_dispatch_status" -eq 0 ]; then
+    sh_dispatch_status=1
 fi
-exit 0
+exit "$sh_dispatch_status"

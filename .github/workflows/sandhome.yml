@@ -20,44 +20,23 @@ jobs:
           command -v dash || { sudo apt-get update -qq && sudo apt-get install -y dash; }
           dash -c 'echo "dash ok"'
 
-      - name: POSIX syntax under dash and bash
-        run: sh tests/syntax.sh
-
-      # The pure helpers, the two-root plan, the mirror, the framework, the
-      # shims, and the documentation checks. None of these need a network
-      # except the shims, which need a compiler.
-      - name: helpers, plan, mirror, framework, shims, docs
-        run: |
-          sh tests/unit.sh
-          sh tests/space.sh
-          sh tests/toolchain.sh
-          sh tests/shims.sh
-          sh tests/docs.sh
-
-      # The end-to-end install needs the network. When it cannot run it exits 2
-      # and says so; that is `skipped`, not `failed`, and the runner reports
-      # the two separately so a red job always means a defect.
-      - name: the end-to-end install
-        run: sh tests/bootstrap.sh
-
-      - name: the line discipline over pipes
-        run: bash tests/errandsh-posix.sh
-
       # The machine-readable report is parsed here, not eyeballed: a --json
-      # that is not JSON is a defect, and this is where it is caught.
+      # that is not JSON is a defect, and this is where it is caught. It runs
+      # before the suite so a broken report is named in seconds rather than at
+      # the end of a four-minute run.
       - name: the JSON report parses
         run: |
           set -e
-          sh bootstrap.sh --toolset minimal --no-profile --no-path-line --no-shell --json > report.json
+          sh bootstrap.sh --toolset minimal --no-profile --no-path-line --no-shell --no-global --json > report.json
           jq -e '.schema == "sandhome/1"' report.json > /dev/null
           sh bin/sandhome toolchains --json | jq -e 'length > 0' > /dev/null
           sh bin/sandhome report --json | jq -e 'has("failures")' > /dev/null
           echo "the report is valid JSON"
 
-      # The generated reference must be what the generator produces, which is
-      # the same check tests/docs.sh makes. It is run again here as its own
-      # job so a stale document is named in one line of the CI output rather
-      # than inside a test file's tally.
+      # The generated reference must be what the generator produces. This is
+      # also checked by tests/docs.sh inside the suite; it is run first as its
+      # own step so a stale document is named in one line of the CI output
+      # rather than inside a test file's tally.
       - name: the generated reference is current
         run: |
           set -e
@@ -68,5 +47,14 @@ jobs:
           fi
           echo "the reference matches the code"
 
+      # THE SUITE IS THE GATE, AND IT RUNS EACH FILE EXACTLY ONCE. `run.sh`
+      # already runs harness, syntax, unit, space, fetch, toolchain, memexec,
+      # shims, docs, bootstrap and errandsh-posix, and reads every file's own
+      # tally as well as its exit status. The workflow used to run syntax,
+      # unit/space/toolchain/shims/docs, the end-to-end install and the line
+      # discipline as their own steps and then run all of them AGAIN here, so
+      # every suite paid for itself twice. One caller keeps the two claims
+      # apart the same way: only `failed` turns the job red, and `skipped` is
+      # a fact about the runner.
       - name: the whole suite, as a caller reads it
         run: sh tests/run.sh

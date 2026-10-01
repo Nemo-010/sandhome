@@ -1,0 +1,134 @@
+### PASSING-AFTER: the same nine checks against talaria0101/sandhome talaria/issues-131-139
+### date: 2026-09-30 (UTC), same host and the same consumer-shaped rig as
+### FAILING-BEFORE-main.log: HOME on /state (noexec), exec root on /workspace,
+### every check in an `env -i` shell with only HOME and PATH. Reproduce:
+### sh issues.sh <tree> <label> <home> <exec> --stamp
+### tree: /workspace/sandhome at commit aff8491
+
+### fix-final: reproducing #131-#139 against /workspace/sandhome
+date: 2026-09-30T16:25:21Z
+roots: home=/state/ff-home exec=/workspace/tri/fix-final-exec
+install: view=copy memexec=built but the probe fails here; views fall back to copies
+
+#131 a non-interactive login shell resolves exec/bin before the env is loaded
+   $ bash -lc 'jq --version'
+   | jq-1.8.2
+   $ bash -lc 'echo $SANDHOME_EXEC' (did the login shell load the environment?)
+   | /workspace/tri/fix-final-exec
+   $ bash -lc 'node --version'
+   | node: cannot map this copy back to its payload; set SANDHOME_EXEC and SANDHOME_HOME
+   $ sh -c 'jq --version' (non-login: no profile, the hook only)
+   | jq-1.8.2
+
+#132 the global hook must expose every tool the view advertises
+   |   node  /state/ff-home/bin/node
+   |   npm   /state/ff-home/bin/npm
+   |   npx   /state/ff-home/bin/npx
+   | 11.19.1
+
+#133 the bake in exec/bin/sandhome must survive install and repair
+   baked repo lines right after the bootstrap: 1
+   after 'sandhome repair jq':  1
+   after 'sandhome install jq': 1
+   $ env -i $SANDHOME_EXEC/bin/sandhome doctor  (no HOME, no PATH, no environment)
+   | ok   toolchain_node_spawn=yes
+   | doctor_failures=0
+   rc=0
+   $ the same with the CHECKOUT GONE, which is what the pointers cannot survive
+   (no clone recorded for this rig; skipped)
+
+#134 the skills: the setup installs them, so the document must say so and the check is a command
+   ~/.agents/skills: 3 SKILL.md files
+   $ sandhome skills
+   | skills_home=/state/ff-home
+   | sandhome         /state/ff-home/.agents/skills state=installed origin=same bytes as the checkout
+   | errandsh         /state/ff-home/.agents/skills state=installed origin=same bytes as the checkout
+   | sealed-sandbox   /state/ff-home/.agents/skills state=installed origin=same bytes as the checkout
+   | skills_installed=3
+   hand-written curl lines in ROUTE.md step 2: 3 (the documented --no-skills fallback, kept on purpose)
+   ROUTE.md leads with the fact instead: yes
+
+#135 rust: TC_rust_BINS must name rustc, and a fresh shell must get it
+   TC_rust_BINS='cargo/bin/rustup cargo/bin/cargo cargo/bin/rustc cargo/bin/rustdoc cargo/bin/cargo-clippy cargo/bin/cargo-fmt'
+   $ sandhome install rust   (the fix's own regression: the toolchain is installed)
+   |   cargo       /state/ff-home/bin/cargo
+   |   rustc       /state/ff-home/bin/rustc
+   |   rustdoc     /state/ff-home/bin/rustdoc
+   |   cargo-fmt   /state/ff-home/bin/cargo-fmt
+   $ rustc --version from a shell that sourced nothing
+   | rustc 1.98.1 (48a229cea 2026-09-01)
+
+#136 a bare sandhome on a POSIX shell
+   $ dash bin/sandhome   (no arguments)
+   | usage: sandhome COMMAND [args]
+   | 
+   rc=0
+   $ dash bin/sandhome help doctor   (the page for one command)
+   | usage: sandhome doctor [--json]
+   rc=0
+   $ sh bin/sandhome   (no arguments)
+   | usage: sandhome COMMAND [args]
+   | 
+   rc=0
+   $ sh bin/sandhome help doctor   (the page for one command)
+   | usage: sandhome doctor [--json]
+   rc=0
+   $ bash bin/sandhome   (no arguments)
+   | usage: sandhome COMMAND [args]
+   | 
+   rc=0
+   $ bash bin/sandhome help doctor   (the page for one command)
+   | usage: sandhome doctor [--json]
+   rc=0
+
+#137 sandhome project: the node half, and the exit status
+   $ sandhome project p137 --no-link  (a fresh shell with the hook, nothing sourced)
+   | sandhome: project p137 at /workspace/tri/fix-final-exec/projects/p137
+   | sandhome: python: cleared the half-built .venv /workspace/tri/fix-final-exec/projects/p137/.venv (uv venv --seed left it without pip)
+   | sandhome: python: uv venv /workspace/tri/fix-final-exec/projects/p137/.venv
+   | sandhome: [!] the venv has no working pip; run `<venv>/bin/python -m ensurepip` or `uv pip install --python <venv>/bin/python pip` before installing dependencies
+   | sandhome: python: use ./p137/.venv/bin/python (or source ./p137/.venv/bin/activate)
+   | sandhome: node: npm init in /workspace/tri/fix-final-exec/projects/p137
+   | sandhome: node: work in ./p137 (npm install, npx, native CLIs all run there)
+   | sandhome: note: /workspace/tri/fix-final-exec/projects/p137 lives on the exec root; a tmpfs restart clears it, and this command rebuilds it
+   package.json exists: yes
+   | exit status: 0
+
+#138 npm install -g: the prefix bin must stay a real directory
+   |   /workspace/tri/fix-final-exec/npm-global/bin
+   |   is a real directory: true
+   $ npm install -g cowsay (through the hook, with the prefix on PATH)
+   | 3 packages are looking for funding
+   |   run `npm fund` for details
+   |   which: NONE
+   | sh: 1: cowsay: not found
+   $ control: the same link in a REAL bin directory, same shell, same PATH shape
+   |   which: /workspace/tri/fix-final/npmctl/bin/cowsay
+   | 1.6.0
+   $ a CLI installed after the setup, from a shell that sourced NOTHING
+   | sh: 1: cowsay: not found
+   $ and after ONE refresh, which is how the hook learns a CLI it did not ship with
+   | /state/ff-home/bin/cowsay
+   | 1.6.0
+   |   the link npm wrote: ../lib/node_modules/cowsay/cli.js
+   |   runnable: yes
+
+#139 a runtime that spawns itself
+   | /workspace/tri/fix-final-exec/views/node/bin/node
+   $ node -e 'spawnSync(process.execPath)'
+   | status=0 error=undefined
+   doctor has a spawn check: 4 clause(s)
+   node is a real copy in the view: 10 declaration(s)
+   $ doctor, from a shell that sourced nothing
+   | ok   toolchain_node_spawn=yes
+   | doctor_failures=0
+   (now the launch-mode fixture, to show what the real copy protects against)
+   | node: memfd_create failed: Operation not permitted
+   | node: memfd_create failed: Operation not permitted
+   $ doctor with the view stamped: the gate must FAIL, and name the fix
+   | doctor_failures=1
+   $ doctor again, with the real copy restored
+   | ok   toolchain_node_spawn=yes
+   | doctor_failures=0
+
+### end fix-final

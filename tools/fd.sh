@@ -2,6 +2,7 @@
 # fd - the friendlier find. A single musl binary from GitHub releases.
 TC_fd_DESC='fd, a fast and user-friendly find replacement'
 TC_fd_BINS='bin/fd'
+TC_fd_EXEC_MB=16
 
 tc_fd_probe() {
     sh_have fd && fd --version >/dev/null 2>&1
@@ -49,7 +50,11 @@ tc_fd_version() {
 # so this is what `$SANDHOME_EXEC/bin` links against, and what the promote step
 # mirrors through an exec view when the copy cannot run from where it sits.
 tc_fd_adopted() {
-    sh_fd_which=$(command -v fd 2>/dev/null)
+    # sh_path_where, not command -v: the exec view is on PATH by the time an
+    # install runs, so command -v answers with the view this tool is being
+    # linked INTO and the promote step then links the view onto itself (issue
+    # #43). The exec view is not a working copy and is not consulted.
+    sh_fd_which=$(sh_path_where fd)
     [ -n "$sh_fd_which" ] || return 0
     sh_fd_dir=${sh_fd_which%/*}
     [ -n "$sh_fd_dir" ] || sh_fd_dir=.

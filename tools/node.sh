@@ -7,9 +7,70 @@ TC_node_DESC='Node.js with the bundled npm, from the official nodejs.org tarball
 # exec bin next to node, so `npm` is on PATH from a shell that read only env.sh
 # and never sourced the module's own fragment.
 TC_node_BINS='bin/node bin/npm bin/npx'
+TC_node_EXEC_MB=200
+
+# tc_node_copy_bins -> node MUST BE A REAL FILE IN THE VIEW, EVEN IN LAUNCH
+# MODE. Every UI tool re-executes node: Playwright and Puppeteer spawn a
+# download helper, webpack/vite/jest spawn workers, esbuild and native CLIs
+# spawn children. A launcher copy makes process.execPath an anonymous memfd
+# (`/memfd:sandhome (deleted)`, a path that no longer exists by the time it is
+# read), and every one of those spawns dies with ENOENT while `node --version`
+# still answers and `doctor` stays green (issue #139). The copy-list is the
+# existing per-module lever for "this executable cannot run from memory"; node
+# is the canonical member. npm and npx stay launchers: they exec node, which is
+# a real file, so their own process.execPath is a real path too.
+tc_node_copy_bins() { printf 'bin/node'; }
+
+# tc_node_exec_mb -> the fresh-install exec need in MB. node is on the copy
+# list, so launch mode already pays for the real runtime: 149711504 bytes
+# measured for the bin/node inside the linux-x64 tarball, plus the launcher
+# copies for npm and npx, and the declared 200 leaves room for both modes to
+# agree. Copy mode is the full tree. Read by the install gate below and the
+# feasibility plan so the two never disagree (issues #92, #105, #139).
+tc_node_exec_mb() {
+    if [ "${SH_VIEW_MODE:-copy}" = launch ]; then
+        printf '200'
+    else
+        printf '200'
+    fi
+}
 
 tc_node_probe() {
     sh_have node && node --version >/dev/null 2>&1
+}
+
+# tc_node_doctor -> 0 when node can re-execute itself, which is what every UI
+# tool and every worker does. A launcher view makes process.execPath an
+# anonymous memfd and the spawn dies with ENOENT while `node --version` still
+# answers, so the readiness gate used to report that tree green (issue #139).
+#
+# The view copy is named explicitly, not taken from the PATH doctor inherited:
+# a doctor run in a fresh shell resolves node through the hook, which is a
+# dispatcher and not the file, and a run where the hook serves a DIFFERENT
+# toolchain's node would then check the wrong bytes. The PATH copy is the
+# fallback for an adopted toolchain, which has no view of its own.
+#
+# The check is the one the failing tool performs, not a proxy for it: node
+# spawning ITSELF through process.execPath. `--eval` is kept because a child
+# that only prints a version would pass on a runtime whose spawn path is
+# broken in some other way; the exit status is what the caller reads.
+tc_node_doctor() {
+    sh_nd_node=''
+    # NOT sh_toolchain_view: the isolated runner sources common.sh and this
+    # module only, so the library helper is not defined there. SH_EXEC_VIEWS is
+    # exported by the space plan, and SANDHOME_EXEC is exported by env.sh, so
+    # the view is reachable from either shape the hook can run in.
+    sh_nd_view=${SH_EXEC_VIEWS:-}
+    if [ -z "$sh_nd_view" ] && [ -n "${SANDHOME_EXEC:-}" ]; then
+        sh_nd_view="$SANDHOME_EXEC/views"
+    fi
+    if [ -n "$sh_nd_view" ] && [ -x "$sh_nd_view/node/bin/node" ]; then
+        sh_nd_node="$sh_nd_view/node/bin/node"
+    elif sh_have node; then
+        sh_nd_node=node
+    fi
+    [ -n "$sh_nd_node" ] || return 1
+    "$sh_nd_node" -e 'const r=require("child_process").spawnSync(process.execPath,["-e","0"]); process.exit(r.status===0?0:1)' >/dev/null 2>&1
 }
 
 # STOP: THE `latest/` REDIRECT NAMES A TRAIN, NOT A VERSION. nodejs.org/dist/latest/
@@ -65,14 +126,27 @@ tc_node_install() {
     sh_ni_stage=${SH_HOME_TMP:-${TMPDIR:-/tmp}}
     mkdir -p "$sh_ni_stage" 2>/dev/null || return 1
     sh_space_need 300 home || return 1
+    # The exec view holds the node runtime plus npm/npx and their tree (about
+    # 163MB measured, up to ~244MB with the bundled npm). Gate it the same way
+    # as go (issue #66): a home-only check let the install succeed into a root
+    # the view did not fit. Mode-aware: launch mode holds launcher copies
+    # (5MB measured), copy mode the tree above.
+    sh_space_need "$(tc_node_exec_mb)" exec || return 1
 
     sh_ni_sha=''
     if sh_have curl || sh_have wget; then
         sh_ni_sums="$sh_ni_stage/node-SHASUMS256.$$"
         if sh_fetch "$sh_ni_base/SHASUMS256.txt" "$sh_ni_sums"; then
-            while read -r sh_ni_hex sh_ni_file; do
+            # Shape-validate every manifest field and drop the record if any
+            # one fails (issue #10); carry the last line out of read so a
+            # file with no trailing newline still yields its entry.
+            while read -r sh_ni_hex sh_ni_file || [ -n "$sh_ni_hex" ]; do
                 case "$sh_ni_file" in
-                    *"${sh_ni_name}.tar.xz") sh_ni_sha=$sh_ni_hex; break ;;
+                    *"${sh_ni_name}.tar.xz")
+                        if sh_is_hex64 "$sh_ni_hex" && sh_is_nonempty "$sh_ni_file"; then
+                            sh_ni_sha=$sh_ni_hex
+                        fi
+                        break ;;
                 esac
             done < "$sh_ni_sums"
             rm -f "$sh_ni_sums" 2>/dev/null
@@ -82,7 +156,7 @@ tc_node_install() {
     rm -rf "$sh_ni_root" 2>/dev/null
     mkdir -p "$sh_ni_root" 2>/dev/null || return 1
     sh_ni_tar="$sh_ni_stage/${sh_ni_name}.tar.xz"
-    if ! sh_fetch_verified "$sh_ni_url" "$sh_ni_tar" "$sh_ni_sha"; then
+    if ! sh_fetch_verified "$sh_ni_url" "$sh_ni_tar" "$(sh_pin_for "$sh_ni_url" node "$sh_ni_sha")"; then
         return 1
     fi
     if ! sh_untar "$sh_ni_tar" "$sh_ni_root"; then
@@ -126,21 +200,119 @@ tc_node_install() {
 # that works only once node is on PATH, which the fragment below guarantees. What
 # is checked afterwards is that npm answers at all, and a miss is reported rather
 # than left to fail inside a later build.
+#
+# tc_node_repair_cli_js VIEW ROOT -> put real JavaScript back at the view's
+# npm-cli.js/npx-cli.js when a shell wrapper is there instead.
+#
+# The node view holds `bin/npm` as a symlink into
+# `lib/node_modules/npm/bin/npm-cli.js`. That target must stay JavaScript:
+# `node <dir-of-node>/npm` is the invocation Node documents and a real build
+# script used (`scripts/setup.sh` of rust-workers-minecraft), and a shell script
+# at a .js path dies with `SyntaxError: Invalid or unexpected token` while
+# `npm` itself still works (issue #157). The wrapper that the noexec repair
+# needs belongs on the exec bin, never at the symlink target; this restores the
+# target from the payload so a view that was clobbered is repaired rather than
+# left passing a version probe. A file whose first line already names node is
+# left alone.
+tc_node_repair_cli_js() {
+    sh_nr_view=$1
+    sh_nr_root=$2
+    [ -n "$sh_nr_view" ] && [ -d "$sh_nr_view/lib/node_modules/npm/bin" ] || return 0
+    sh_nr_fixed=0
+    sh_nr_broken=0
+    for sh_nr_name in npm npx; do
+        sh_nr_dest="$sh_nr_view/lib/node_modules/npm/bin/${sh_nr_name}-cli.js"
+        [ -e "$sh_nr_dest" ] || continue
+        sh_nr_first=''
+        read -r sh_nr_first < "$sh_nr_dest" 2>/dev/null || sh_nr_first=''
+        case "$sh_nr_first" in
+            '#!'*node*|'#!'*env*) continue ;;
+        esac
+        # The target is not JavaScript. Count it before attempting the restore
+        # so an unrestorable view is reported, not silently kept: a view whose
+        # payload is gone cannot be healed from here and doctor must say so.
+        sh_nr_broken=$((sh_nr_broken + 1))
+        sh_nr_src=''
+        for sh_nr_c in "$sh_nr_root/lib/node_modules/npm/bin/${sh_nr_name}-cli.js" \
+                       "$sh_nr_root/npm/lib/node_modules/npm/bin/${sh_nr_name}-cli.js" \
+                       "$sh_nr_root/npm/bin/${sh_nr_name}-cli.js"; do
+            [ -r "$sh_nr_c" ] && { sh_nr_src=$sh_nr_c; break; }
+        done
+        [ -n "$sh_nr_src" ] || continue
+        # Verify the source IS JavaScript before copying: restoring shell text
+        # over shell text is a no-op that reports a repair.
+        sh_nr_sfirst=''
+        read -r sh_nr_sfirst < "$sh_nr_src" 2>/dev/null || sh_nr_sfirst=''
+        case "$sh_nr_sfirst" in
+            '#!'*node*|'#!'*env*) ;;
+            *) continue ;;
+        esac
+        if cp -f "$sh_nr_src" "$sh_nr_dest" 2>/dev/null && chmod 0755 "$sh_nr_dest" 2>/dev/null; then
+            sh_nr_fixed=$((sh_nr_fixed + 1))
+        fi
+    done
+    if [ "$sh_nr_broken" -gt "$sh_nr_fixed" ]; then
+        sh_warn "the $sh_nr_view npm-cli.js/npx-cli.js is shell text and no JavaScript payload was found to restore it; node <view>/npm cannot run until the view is rebuilt"
+    elif [ "$sh_nr_fixed" -gt 0 ]; then
+        sh_step "restored $sh_nr_fixed JavaScript cli.js file(s) in the node view"
+    fi
+    unset sh_nr_dest sh_nr_first sh_nr_src sh_nr_c sh_nr_name sh_nr_sfirst sh_nr_fixed sh_nr_broken
+    return 0
+}
+
 tc_node_env() {
     sh_ne_root=$(sh_toolchain_root node)
-    # An adopted system node has no sandhome root; its npm configuration is not
-    # ours to rewrite, and probing a view that was never built would warn about a
-    # tool that is present and working.
+    # # STOP: A NODE WHOSE npm DOES NOT RUN GETS ONE, HERE, BEFORE ANY FRAGMENT
+    # IS WRITTEN. This used to return 0 for an adopted node on the grounds that
+    # "an adopted system node has no sandhome root; its npm configuration is not
+    # ours to rewrite" - and the toolset then exited 0 with no working npm
+    # (issue #46). Not rewriting the HOST's npm is right and is still what
+    # happens: the repair puts a working npm on the exec view, which is ours.
+    # A node whose npm already answers takes the version probe only and fetches
+    # nothing, so a healthy host pays one command.
+    if ! npm --version >/dev/null 2>&1; then
+        tc_node_ensure_npm || sh_warn "npm does not run on this machine; run 'sandhome install --force node' for a node that ships one"
+    fi
     if [ ! -d "$sh_ne_root" ]; then
         return 0
     fi
     sh_ne_view=$(sh_toolchain_view node)
-    mkdir -p "$SH_HOME/npm-global" "$SH_HOME/cache/npm" 2>/dev/null || true
+    # A view whose npm-cli.js is shell text cannot be run by `node <dir>/npm`
+    # (issue #157). Repair the target before the fragment so a repair cycle
+    # heals a clobbered view instead of only re-probing the wrapper.
+    tc_node_repair_cli_js "$sh_ne_view" "$sh_ne_root"
+    # STOP: THE PREFIX AND CACHE LIVE ON THE EXEC ROOT, NOT THE HOME (issue
+    # #21). A prefix under the noexec home leaves global CLIs neither on PATH
+    # nor executable (`bad interpreter: Permission denied` on a `#!/usr/bin/env
+    # node` script whose inode is noexec). The npx one-shot cache
+    # (`~/.npm/_npx`) has the same property, so it is relocated too.
+    mkdir -p "$SH_EXEC/npm-global" "$SH_EXEC/cache/npm" 2>/dev/null || true
+    # # STOP: A DOWNLOADED BROWSER IS AN EXECUTABLE, SO ITS CACHE IS NOT DATA.
+    # Puppeteer defaults to $HOME/.cache/puppeteer and Playwright to
+    # $HOME/.cache/ms-playwright, and the home is the mount that refuses
+    # execve: the download succeeds, `--version` then answers Permission
+    # denied, and `launch()` fails with an error that names the cache rather
+    # than the mount (issue #143). The exec root is the only root a browser can
+    # run from, so both caches are pointed there by default; a caller who set
+    # either keeps it. The dirs are created so the first install has a target.
+    mkdir -p "$SH_EXEC/puppeteer" "$SH_EXEC/ms-playwright" 2>/dev/null || true
+    # Self-sufficient under `set -u`: a leftover fragment must not abort a shell
+    # that sources it with the names unset. See tools/go.sh for the shape.
     sh_env_write_fragment node <<EOF
-NPM_CONFIG_PREFIX="\$SANDHOME_HOME/npm-global"
-NPM_CONFIG_CACHE="\$SANDHOME_HOME/cache/npm"
+: "\${SANDHOME_HOME:=$SH_HOME}"
+: "\${SANDHOME_EXEC:=$SH_EXEC}"
+export SANDHOME_HOME SANDHOME_EXEC
+NPM_CONFIG_PREFIX="\$SANDHOME_EXEC/npm-global"
+NPM_CONFIG_CACHE="\$SANDHOME_EXEC/cache/npm"
 NPM_CONFIG_UPDATE_NOTIFIER=false
 export NPM_CONFIG_PREFIX NPM_CONFIG_CACHE NPM_CONFIG_UPDATE_NOTIFIER
+PUPPETEER_CACHE_DIR="\${PUPPETEER_CACHE_DIR:-\$SANDHOME_EXEC/puppeteer}"
+PLAYWRIGHT_BROWSERS_PATH="\${PLAYWRIGHT_BROWSERS_PATH:-\$SANDHOME_EXEC/ms-playwright}"
+export PUPPETEER_CACHE_DIR PLAYWRIGHT_BROWSERS_PATH
+case ":\$PATH:" in
+  *":\$SANDHOME_EXEC/npm-global/bin:"*) ;;
+  *) PATH="\$SANDHOME_EXEC/npm-global/bin:\$PATH" ;;
+esac
 case ":\$PATH:" in
   *":$sh_ne_view/bin:"*) ;;
   *) PATH="$sh_ne_view/bin:\$PATH" ;;
@@ -148,10 +320,181 @@ esac
 export PATH
 EOF
     sh_ne_frag=$?
-    if ! "$sh_ne_view/bin/node" --version >/dev/null 2>&1; then
+    # # STOP: THE VIEW IS ONLY WARNED ABOUT WHEN A VIEW WAS ACTUALLY BUILT. An
+    # adopted node has no toolchain root, so no exec view was made for it, and
+    # this check ran anyway and named a directory that does not exist:
+    #   the promoted node at /tmp/views/node/bin/node does not run
+    # while `node --version` answered v26.8.1 from the exec bin the whole time.
+    # A warning about a path that was never made is a false alarm about the
+    # machine, and a consumer who reads it has been told to go fix something that
+    # is not broken. The file's own rule is that a probe is a question about the
+    # world, not about what we made; the directory has to exist first.
+    if [ -x "$sh_ne_view/bin/node" ] && ! "$sh_ne_view/bin/node" --version >/dev/null 2>&1; then
         sh_warn "the promoted node at $sh_ne_view/bin/node does not run; node needs an exec-capable home or a larger exec root"
     fi
+    if ! tc_node_behavioural >/dev/null 2>&1; then
+        sh_warn "node installed without an error and still does not run a script from the exec view (home $SH_HOME is noexec)"
+    fi
     return "$sh_ne_frag"
+}
+
+# tc_node_ensure_npm -> 0 when `npm` runs, fetching and shimming a real one
+# when it does not.
+#
+# # STOP: AN ADOPTED NODE WITH A BROKEN npm GETS A WORKING ONE, NOT AN EXCUSE.
+# The old behaviour checked npm only when a toolchain root existed, which is
+# precisely the adopted case, and excused a borrowed node on the grounds that a
+# broken host npm is "the host's defect, not this toolchain's". The result was
+# `--toolset developer` exiting 0 and reporting a working node while
+# `npm --version` died with MODULE_NOT_FOUND and `npx` was not on PATH at all
+# (issue #46). Whose defect it is does not change what the consumer got. The
+# ask was a developer toolset where npm works, and a warning is not a tool.
+tc_node_npm_url() {
+    # # STOP: THE npm VERSION IS NOT THE NODE VERSION, AND THE REGISTRY ANSWER
+    # IS ONE LINE. Two mistakes this replaces, both measured. Asking for
+    # npm-<node version>.tgz, which the first draft did, is a 404: node v26.8.1
+    # and npm 11.x have independent version lines, so the URL built was
+    # https://registry.npmjs.org/npm/-/npm-26.8.1.tgz -> HTTP 404. And /latest
+    # is a single line of JSON, so taking its first line yields the whole
+    # document and a match for a tarball name never finds one.
+    #
+    # The version is read out of the document by key, and the tarball URL is
+    # built from npm's documented layout rather than guessed from a field.
+    sh_nu_tmp=$SH_HOME_TMP/npm-latest.$$
+    sh_fetch 'https://registry.npmjs.org/npm/latest' "$sh_nu_tmp" || {
+        rm -f "$sh_nu_tmp" 2>/dev/null
+        return 1
+    }
+    sh_nu_ver=''
+    # # STOP: THE FIRST "version" IN THE DOCUMENT IS NOT THE PACKAGE'S. The
+    # npm manifest carries nested objects that have their own version key -
+    # `"tap":{"nyc":{...,"version":"5.1.1"...}}` - and taking the first match
+    # resolved npm 5.1.1, whose tarball is a 404, on a registry whose current npm
+    # is 12.1.0. The top-level version is the one that ends the document in this
+    # layout, but relying on that is fragile, so the name is checked as well: a
+    # match is only accepted when the document says it is the npm manifest.
+    sh_nu_is_npm=no
+    case "$(cat "$sh_nu_tmp")" in
+        *'"name":"npm"'*) sh_nu_is_npm=yes ;;
+    esac
+    if [ "$sh_nu_is_npm" = yes ]; then
+        # The last "version" in a flat npm manifest is the package's own; the
+        # nested ones belong to objects that come earlier.
+        for sh_nu_line in $(tr ',' '\n' < "$sh_nu_tmp" | grep '"version"'); do
+            sh_nu_rest=${sh_nu_line#*'"version"'}
+            sh_nu_rest=${sh_nu_rest#*:}
+            sh_nu_rest=${sh_nu_rest#*\"}
+            sh_nu_ver=${sh_nu_rest%%\"*}
+        done
+    fi
+    rm -f "$sh_nu_tmp" 2>/dev/null
+    case "$sh_nu_ver" in
+        [0-9]*.[0-9]*)
+            printf 'https://registry.npmjs.org/npm/-/npm-%s.tgz' "$sh_nu_ver"
+            return 0 ;;
+    esac
+    return 1
+}
+
+tc_node_ensure_npm() {
+    sh_have npm && npm --version >/dev/null 2>&1 && return 0
+
+    sh_en_root=$(sh_toolchain_root node)
+    sh_en_lib=$(sh_toolchain_adopted_root node)
+    if [ -n "$sh_en_lib" ]; then
+        for sh_en_c in "$sh_en_lib/npm/lib/node_modules/npm" "$sh_en_lib/npm"; do
+            [ -r "$sh_en_c/bin/npm-cli.js" ] && { sh_en_lib=$sh_en_c; break; }
+        done
+    fi
+    if [ -z "$sh_en_lib" ] || [ ! -r "$sh_en_lib/bin/npm-cli.js" ]; then
+        sh_en_url=$(tc_node_npm_url) || {
+            sh_warn "could not resolve an npm for node $(node --version 2>/dev/null); npm and npx are unavailable"
+            return 1
+        }
+        sh_space_need 20 home || return 1
+        rm -rf "$sh_en_root/npm" 2>/dev/null
+        mkdir -p "$sh_en_root/npm" 2>/dev/null || return 1
+        if ! sh_fetch_unpack "$sh_en_url" "$sh_en_root/npm"; then
+            sh_warn "could not fetch or unpack $sh_en_url"
+            rm -rf "$sh_en_root/npm" 2>/dev/null
+            return 1
+        fi
+        # A registry tarball unpacks as package/.
+        if [ -d "$sh_en_root/npm/package" ] && [ ! -d "$sh_en_root/npm/package/lib" ]; then
+            for sh_en_f in "$sh_en_root/npm/package"/* "$sh_en_root/npm/package"/.[!.]*; do
+                [ -e "$sh_en_f" ] || continue
+                mv "$sh_en_f" "$sh_en_root/npm/" 2>/dev/null || true
+            done
+            rmdir "$sh_en_root/npm/package" 2>/dev/null || true
+        fi
+        for sh_en_c in "$sh_en_root/npm/lib/node_modules/npm" "$sh_en_root/npm"; do
+            if [ -r "$sh_en_c/bin/npm-cli.js" ]; then
+                sh_en_lib=$sh_en_c
+                break
+            fi
+        done
+    fi
+    if [ -z "$sh_en_lib" ] || [ ! -r "$sh_en_lib/bin/npm-cli.js" ]; then
+        sh_warn 'the npm that was fetched has no bin/npm-cli.js'
+        return 1
+    fi
+
+    # Shims on the exec view. The node beside this npm is not ours to rewrite,
+    # and a `#!/usr/bin/env node` script does not run from a noexec root, so the
+    # shims live where they can be exec'd.
+    mkdir -p "$SH_EXEC_BIN" 2>/dev/null || true
+    sh_en_saved=$PATH
+    PATH="$SH_EXEC_BIN:$PATH"
+    export PATH
+    for sh_en_name in npm npx; do
+        sh_en_cli="$sh_en_lib/bin/${sh_en_name}-cli.js"
+        [ -r "$sh_en_cli" ] || continue
+        printf '#!/bin/sh\n# written by sandhome: the npm beside this node does not run here\nexec node %s "$@"\n' \
+            "$sh_en_cli" > "$SH_EXEC_BIN/$sh_en_name" 2>/dev/null || continue
+        chmod 0755 "$SH_EXEC_BIN/$sh_en_name" 2>/dev/null || true
+    done
+    # Report what is true: the shim runs, or it does not.
+    if npm --version >/dev/null 2>&1; then
+        PATH=$sh_en_saved
+        export PATH
+        sh_step "provided a working npm $(npm --version 2>/dev/null) for node $(node --version 2>/dev/null)"
+        return 0
+    fi
+    PATH=$sh_en_saved
+    export PATH
+    sh_warn 'the npm that was fetched does not run on this machine'
+    return 1
+}
+
+tc_node_behavioural() {
+    sh_nb_tmp=${SH_EXEC:-${TMPDIR:-/tmp}}/node-probe.$$
+    mkdir -p "$sh_nb_tmp" 2>/dev/null || return 1
+    if ! node -e 'console.log("ok")' >/dev/null 2>&1; then
+        rm -rf "$sh_nb_tmp" 2>/dev/null
+        return 1
+    fi
+    # # STOP: npm IS PART OF THE PROBE FOR AN ADOPTED NODE TOO. The old probe
+    # checked npm only when a toolchain root existed, which is precisely the
+    # adopted case, and excused a borrowed node on the grounds that a broken
+    # host npm is "the host's defect, not this toolchain's". The result was
+    # `--toolset developer` exiting 0 and reporting a working node while
+    # `npm --version` died with MODULE_NOT_FOUND and `npx` was not on PATH at
+    # all (issue #46). Whether the base image is broken is a fact about the base
+    # image; what the consumer asked for is a toolset where npm works.
+    #
+    # THIS IS A PROBE AND IT HAS NO SIDE EFFECTS. It answers "does node with its
+    # npm work here", and it is what the post-promote check in
+    # sh_toolchain_install_one reads. Repairing is tc_node_ensure_npm's job and
+    # it runs from tc_node_env, so a probe that fails says so instead of
+    # quietly fetching something. A probe with side effects also cannot be
+    # asserted on: tests/toolchain.sh calls this directly and a probe that tries
+    # to fix what it finds is a probe whose result depends on the network.
+    if ! npm --version >/dev/null 2>&1; then
+        rm -rf "$sh_nb_tmp" 2>/dev/null
+        return 1
+    fi
+    rm -rf "$sh_nb_tmp" 2>/dev/null
+    return 0
 }
 
 tc_node_version() {

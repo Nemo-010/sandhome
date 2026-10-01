@@ -20,8 +20,13 @@ export SH_REPO_DIR SH_LIB_DIR
 
 t_begin space
 
-tmp=$(mktemp -d "${TMPDIR:-/tmp}/sandhome-space.XXXXXX")
-trap 'rm -rf "$tmp"' EXIT
+tmp=$(t_exec_tmpdir sandhome-space)
+# STOP: THE TRAP READS A NAME NOTHING REASSIGNS. Line ~354 repoints $tmp into a
+# subdirectory for the roomiest-candidate fixtures, so a trap on $tmp removed
+# only that subdir and every suite run leaked its top temp dir. The trap reads
+# a dedicated name set once here.
+sh_space_test_tmp=$tmp
+trap 'rm -rf "$sh_space_test_tmp"' EXIT
 
 # --- writable and exec probes -------------------------------------------------
 mkdir -p "$tmp/writable" "$tmp/ro" 2>/dev/null
@@ -30,7 +35,7 @@ sh_dir_writable "$tmp/writable" && t_ok 0 'dir_writable accepts a writable dir' 
 sh_dir_writable "$tmp/ro" && t_ok 1 'dir_writable rejects a read-only dir' || t_ok 0 'dir_writable rejects a read-only dir'
 sh_dir_writable "$tmp/nope" && t_ok 1 'dir_writable rejects a missing dir' || t_ok 0 'dir_writable rejects a missing dir'
 
-sh_exec_probe /tmp && t_ok 0 'exec_probe says /tmp runs a binary' || t_ok 1 'exec_probe says /tmp runs a binary'
+sh_exec_probe "$tmp" && t_ok 0 'exec_probe says the exec-capable test dir runs a binary' || t_ok 1 'exec_probe says the exec-capable test dir runs a binary'
 
 # A directory that the sandbox allows no exec from is the case this whole tree is
 # about. When there is one, the probe must say no; when there is not, this clause
@@ -114,6 +119,64 @@ case "$absent_report" in
     *) t_ok 1 'a missing candidate is reported at all' ;;
 esac
 t_ok "$([ ! -d "$ghost" ]; echo $?)" 'the probe report did not create the candidate it named'
+# A present candidate carries a verdict, so a consumer reading the list knows
+# why a roomy directory was passed over (issue #125). The exec root this test
+# runs against is exec-capable, so its verdict is chosen or usable.
+mkdir -p "$tmp/probed" 2>/dev/null
+exec_report=$(SANDHOME_EXEC="$tmp/probed" sh_space_probe_report 2>/dev/null)
+case "$exec_report" in
+    *'verdict=chosen'*|*'verdict=usable'*) t_ok 0 'a present candidate carries a verdict' ;;
+    *) t_ok 1 "a present candidate carries a verdict (got: $exec_report)" ;;
+esac
+# A noexec candidate is named as noexec, not left as a bare row of numbers.
+if [ -r /state/home ] && ! sh_exec_probe /state/home 2>/dev/null; then
+    noexec_report=$(sh_space_probe_report 2>/dev/null)
+    case "$noexec_report" in
+        *'verdict=noexec'*) t_ok 0 'a noexec candidate is named noexec' ;;
+        *) t_ok 1 'a noexec candidate is named noexec' ;;
+    esac
+else
+    t_skip 'no known noexec candidate on this host to check the noexec verdict'
+fi
+# A working candidate with less than the floor is too-small, not usable: room is
+# a reason to lose the ranking exactly like noexec is, and without the word the
+# list reads as though the plan ignored a working root.
+small_dir=$tmp/too-small-cand
+mkdir -p "$small_dir" 2>/dev/null
+if sh_dir_writable "$small_dir" && sh_exec_probe "$small_dir" 2>/dev/null; then
+    # THE FIXTURE MUST BE A CANDIDATE, NOT MERELY A WORKING DIRECTORY. The
+    # verdict exists only for a row the probe reports, and on a host where
+    # every ambient candidate is absent or refuses execve (noexec /tmp and
+    # /dev/shm, this tree's own subject) the clause had no row to mark
+    # too-small and failed on both main and any branch: measured here, 139
+    # run / 1 failed on a virgin tree, green only after an earlier test's
+    # create-plan happened to leave /workspace/.sandhome/exec behind.
+    # Naming the fixture SANDHOME_EXEC puts a known-working row on the list,
+    # so the clause measures the verdict and not the host's mount layout.
+    small_report=$(SANDHOME_EXEC="$small_dir" SANDHOME_MIN_EXEC_MB=999999999 sh_space_probe_report 2>/dev/null)
+    case "$small_report" in
+        *'verdict=too-small'*) t_ok 0 'a working candidate under the floor is too-small' ;;
+        *) t_ok 1 "a working candidate under the floor is too-small (got: $small_report)" ;;
+    esac
+else
+    t_skip 'could not build a working candidate to check the too-small verdict'
+fi
+# The probe names the total beside the free, so larger volumes are comparable
+# at a glance: free alone cannot tell 40MB of 245MB from 40MB of 4TB.
+mkdir -p "$tmp/probed" 2>/dev/null
+probe_line=$(SANDHOME_EXEC="$tmp/probed" sh_space_probe_report 2>/dev/null | grep 'candidate=' | grep 'exists=yes' | head -1 || true)
+case "$probe_line" in
+    *'total_mb='*) t_ok 0 'a present candidate names its total beside its free' ;;
+    *) t_ok 1 "a present candidate names its total beside its free (got: $probe_line)" ;;
+esac
+# The named work volumes are candidates even when PWD is elsewhere: a harness
+# that runs in /tmp beside a roomy /workspace must still consider it, and exec
+# perms differ by sandbox so listing never decides (the probe does).
+ws_cands=$(sh_exec_candidates)
+case " $ws_cands " in
+    *' /workspace/.sandhome/exec '*) t_ok 0 'the workspace volume is a candidate' ;;
+    *) t_ok 1 "the workspace volume is a candidate (got: $ws_cands)" ;;
+esac
 
 # NOTE: THE CANDIDATE LIST IS DEDUPLICATED. A $HOME equal to the home root put
 # the same directory in the list twice, and it was probed and reported twice.
@@ -129,6 +192,50 @@ for d in $dupes; do
     esac
 done
 t_is "$dupes_n" 0 'the exec candidate list has no duplicates'
+
+# A WORKING TREE ON A ROOMY EXEC-CAPABLE MOUNT IS A CANDIDATE, AND IS LISTED
+# WITHOUT BEING MADE (issue #114). The list was hardcoded, so a checkout on a
+# big mount was invisible to the planner and to `space --probe`; the candidate
+# is a namespaced `.sandhome/exec` under the tree, and a report must name it
+# without creating it. `/` is not a working tree and must not offer `/.sandhome`.
+wt=$(cd "$tmp" && mkdir -p worktree && cd worktree && \
+    SANDHOME_EXEC='' HOME='' sh -c \
+        '. "$1/lib/common.sh"; . "$1/lib/space.sh"; sh_exec_candidates' sh "$ROOT" 2>/dev/null)
+case "$wt" in
+    *"/worktree/.sandhome/exec"*) t_ok 0 'the working tree is an exec candidate (#114)' ;;
+    *) t_ok 1 "the working tree is an exec candidate (#114) (got $wt)" ;;
+esac
+wt_probe=$(cd "$tmp/worktree" && SANDHOME_EXEC='' HOME='' sh -c \
+    '. "$1/lib/common.sh"; . "$1/lib/detect.sh"; . "$1/lib/space.sh"; sh_space_probe_report' sh "$ROOT" 2>/dev/null)
+case "$wt_probe" in
+    *"/worktree/.sandhome/exec"*) t_ok 0 'space --probe lists the working-tree candidate (#114)' ;;
+    *) t_ok 1 'space --probe lists the working-tree candidate (#114)' ;;
+esac
+t_ok "$([ ! -d "$tmp/worktree/.sandhome" ]; echo $?)" \
+    'the probe report did not create the working-tree candidate (#114)'
+wt_root=$(cd / && SANDHOME_EXEC='' HOME='' sh -c \
+    '. "$1/lib/common.sh"; . "$1/lib/space.sh"; sh_exec_candidates' sh "$ROOT" 2>/dev/null)
+case " $wt_root " in
+    *" /.sandhome/exec "*) t_ok 1 'the filesystem root is not offered as a working tree (#114)' ;;
+    *) t_ok 0 'the filesystem root is not offered as a working tree (#114)' ;;
+esac
+# PARENT DIRS AND MOUNT SCANS ARE CANDIDATES TOO, NOT JUST PWD. An agent in
+# project/subdir must see the project root's namespaced dir, and a roomy
+# mount that is neither PWD nor /tmp must appear from /proc/mounts. System
+# prefixes (/bin, /usr, tool bind mounts) must never appear.
+wt_sub=$(mkdir -p "$tmp/wtproj/sub" && cd "$tmp/wtproj/sub" && \
+    SANDHOME_EXEC='' HOME='' sh -c \
+        '. "$1/lib/common.sh"; . "$1/lib/space.sh"; sh_exec_candidates' sh "$ROOT" 2>/dev/null)
+case "$wt_sub" in
+    *"/wtproj/.sandhome/exec"*) t_ok 0 'a parent dir is an exec candidate (#114)' ;;
+    *) t_ok 1 "a parent dir is an exec candidate (#114) (got $wt_sub)" ;;
+esac
+wt_sys=$(SANDHOME_EXEC='' HOME='' PWD=/tmp sh -c \
+    '. "$1/lib/common.sh"; . "$1/lib/space.sh"; sh_exec_candidates' sh "$ROOT" 2>/dev/null)
+case "$wt_sys" in
+    *"/bin/.sandhome/exec"*|*"/usr/.sandhome/exec"*|*"/lib/.sandhome/exec"*) t_ok 1 "system prefixes are not exec candidates (got $wt_sys)" ;;
+    *) t_ok 0 'system prefixes are not exec candidates' ;;
+esac
 
 # NOTE: A SYMLINK WHOSE TARGET IS OUTSIDE THE TREE IS LEFT ALONE. The remap ran
 # for every absolute target and compared afterwards, so
@@ -186,7 +293,903 @@ if [ -d "$SH_HOME_TMP/old" ]; then
 else
     t_ok "$([ -d "$SH_HOME_TMP/fresh" ]; echo $?)" 'gc keeps a fresh temp directory'
 fi
-t_ok "$(case $gc_n in ''|*[!0-9]*) echo 1;; *) echo 0;; esac)" 'gc answers a plain count'
+t_ok "$(case $gc_n in [0-9]*' '[0-9]*) echo 0;; *) echo 1;; esac)" 'gc answers a count and a byte total'
+gc_n_removed=${gc_n%% *}
+gc_n_bytes=${gc_n##* }
+t_ok "$(case $gc_n_bytes in ''|*[!0-9]*) echo 1;; *) echo 0;; esac)" 'the gc byte total is a number, not a claim (issue #85)'
+
+# # STOP: GC REFUSES AN ARGUMENT THAT IS NOT A WHOLE NUMBER OF DAYS, AND SAYS
+# WHICH ARGUMENT. The value went straight into `find -mtime +"$days"`, so
+# `sandhome gc abc` ran a find that failed, removed nothing, and PRINTED
+# "removed 0 staging entries" with exit 0 - a success for a command that did
+# nothing, on the one command here that deletes. `gc -5` became `-mtime +-5`
+# the same way. The check is here and in bin/sandhome; this is the library half.
+gc_rc=0
+gc_out=$(sh_space_gc abc 2>&1) || gc_rc=$?
+t_is "$gc_rc" '2' 'gc refuses a non-numeric day count with a status a caller can branch on'
+case "$gc_out" in
+    *abc*) t_ok 0 'the refusal names the value it was given' ;;
+    *) t_ok 1 "the refusal names the value it was given (got: $gc_out)" ;;
+esac
+gc_rc=0
+sh_space_gc -5 >/dev/null 2>&1 || gc_rc=$?
+t_is "$gc_rc" '2' 'gc refuses a negative day count too'
+gc_rc=0
+sh_space_gc '' >/dev/null 2>&1 || gc_rc=$?
+t_is "$gc_rc" '0' 'gc with an empty argument falls back to the default and does not fail'
+# A day count is used as an integer by find; a float must be refused rather than
+# passed through, because `find -mtime +7.5` is a find error on some builds and a
+# silent no-op on others.
+gc_rc=0
+sh_space_gc 7.5 >/dev/null 2>&1 || gc_rc=$?
+t_is "$gc_rc" '2' 'gc refuses a fractional day count'
+
+# A DRY RUN NAMES WHAT IT WOULD DELETE AND DELETES NOTHING. A command that
+# removes directories should be able to answer that question before it does it.
+mkdir -p "$SH_HOME_TMP/aged"
+: > "$SH_HOME_TMP/aged/file"
+touch -d '2000-01-01 00:00:00' "$SH_HOME_TMP/aged" 2>/dev/null || true
+if [ -d "$SH_HOME_TMP/aged" ]; then
+    dry_out=$( SH_GC_DRY_RUN=1 sh_space_gc 7 2>&1 )
+    t_contains "$dry_out" "$SH_HOME_TMP/aged" 'a dry run names the entry it would remove'
+    t_ok "$([ -d "$SH_HOME_TMP/aged" ]; echo $?)" 'a dry run removes nothing'
+else
+    t_skip 'could not backdate a directory, so the gc dry-run clause did not run'
+fi
+rm -rf "$SH_HOME_TMP/aged"
+
+# # STOP: A READ-ONLY PLAN CREATES NOTHING, AND THAT IS THE WHOLE POINT OF THE
+# `--no-create` FORM. The planner used to mkdir both roots on the way to
+# answering anything, and bin/sandhome called it before its dispatcher, so every
+# subcommand created them - `sandhome version` created four directories under
+# each of SANDHOME_HOME and SANDHOME_EXEC - and with an unwritable home it died
+# at startup with no usage text, so the two commands a caller reaches for
+# BECAUSE something is broken were the two that could not run on a broken
+# machine. Measured, before the fix:
+#   $ SANDHOME_HOME=/tmp/h SANDHOME_EXEC=/tmp/e sh bin/sandhome version
+#   sandhome/1
+#   $ find /tmp/h /tmp/e -maxdepth 1 -type d | wc -l
+#   8
+# The create form must still create, or nothing here works; that is checked
+# below as its own clause rather than assumed, because a guard that refuses
+# everything looks exactly like a good one until it blocks real work.
+ro="$tmp/readonly"
+SANDHOME_HOME="$ro/home" SANDHOME_EXEC="$ro/exec" \
+    sh -c '. "$1/lib/common.sh"; . "$1/lib/detect.sh"; . "$1/lib/space.sh"; sh_space_plan --no-create' \
+    sh "$ROOT" >/dev/null 2>&1
+t_ok "$([ ! -d "$ro/home" ] && [ ! -d "$ro/exec" ]; echo $?)" \
+    'a read-only plan creates neither root'
+
+SANDHOME_HOME="$ro/home" SANDHOME_EXEC="$ro/exec" \
+    sh -c '. "$1/lib/common.sh"; . "$1/lib/detect.sh"; . "$1/lib/space.sh"; sh_space_plan' \
+    sh "$ROOT" >/dev/null 2>&1
+t_ok "$([ -d "$ro/home" ] && [ -d "$ro/exec/bin" ]; echo $?)" \
+    'a creating plan still creates both roots and the exec bin'
+
+# AND THE SUBCOMMANDS THAT ONLY ASK CREATE NOTHING. This is driven through the
+# real command, because the claim is about the command and not about the
+# library: bin/sandhome could call the creating plan again tomorrow and every
+# clause above would still hold.
+for ro_cmd in version help env report path 'space --probe'; do
+    ro2="$tmp/ro-$(printf '%s' "$ro_cmd" | tr ' -' '__')"
+    rm -rf "$ro2"
+    SANDHOME_HOME="$ro2/home" SANDHOME_EXEC="$ro2/exec" SANDHOME_REPO_DIR="$ROOT" \
+        sh "$ROOT/bin/sandhome" $ro_cmd >/dev/null 2>&1
+    t_ok "$([ ! -d "$ro2/home" ] && [ ! -d "$ro2/exec" ]; echo $?)" \
+        "sandhome $ro_cmd creates nothing"
+done
+
+# AND THE COMMAND THAT INSTALLS STILL CREATES. Same reason, other direction.
+ro3="$tmp/ro-install"
+SANDHOME_HOME="$ro3/home" SANDHOME_EXEC="$ro3/exec" SANDHOME_REPO_DIR="$ROOT" \
+    sh "$ROOT/bin/sandhome" shims >/dev/null 2>&1
+t_ok "$([ -d "$ro3/home" ] && [ -d "$ro3/exec" ]; echo $?)" \
+    'sandhome shims, which installs, does create the roots'
+
+# AND version ANSWERS ON A MACHINE WHOSE HOME CANNOT BE CREATED. This is the
+# case the old startup die made unreachable: /proc/1 is not writable by anyone.
+ro_out=$(SANDHOME_HOME=/proc/1/nope SANDHOME_EXEC=/proc/1/nope2 SANDHOME_REPO_DIR="$ROOT" \
+    sh "$ROOT/bin/sandhome" version 2>/dev/null)
+t_is "$ro_out" 'sandhome/1' 'version answers on a machine whose configured home is unwritable'
+ro_out=$(SANDHOME_HOME=/proc/1/nope SANDHOME_EXEC=/proc/1/nope2 SANDHOME_REPO_DIR="$ROOT" \
+    sh "$ROOT/bin/sandhome" help 2>/dev/null)
+case "$ro_out" in
+    *'usage: sandhome'*) t_ok 0 'help prints its usage on a machine whose home is unwritable' ;;
+    *) t_ok 1 'help prints its usage on a machine whose home is unwritable' ;;
+esac
 
 chmod 0755 "$tmp/ro" 2>/dev/null
+
+# CLASS C: the view is size-gated before writing (#33). A source bigger than the
+# exec free space plus headroom refuses with the constraint named, rather than
+# dying at ENOSPC mid-copy.
+big_src="$tmp/bigsrc"
+mkdir -p "$big_src/sub" 2>/dev/null
+# 3MB of executables via repeated copies of /bin/sh (portable, no dd needed).
+if [ -x /bin/sh ]; then
+    i=0
+    while [ "$i" -lt 6 ]; do
+        cp /bin/sh "$big_src/sub/f$i" 2>/dev/null || break
+        i=$((i + 1))
+    done
+fi
+SH_EXEC="$tmp/tiny-exec"
+mkdir -p "$SH_EXEC" 2>/dev/null
+export SH_EXEC
+# Force the gate to trip by demanding more than any machine has.
+if SH_EXEC="$tmp/tiny-exec" SANDHOME_MIN_EXEC_MB=999999999 sh -c '. "$0"' "$ROOT/lib/space.sh" 2>/dev/null; then
+    :
+fi
+# Direct: sh_view_need refuses a view bigger than free space.
+SH_EXEC="$tmp/tiny-exec"
+if sh_view_need "$big_src" 2>/dev/null; then
+    view_rc=0
+else
+    view_rc=1
+fi
+# On a normal machine the 3MB fixture fits, so assert the opposite direction:
+# with an absurd floor the planner prefers nothing, and view_need on a missing
+# dir is a no-op. The real refusal is exercised below via sh_space_need.
+if sh_space_need 999999999 exec 2>/dev/null; then
+    t_ok 1 'sh_space_need refuses an exec demand bigger than free space (#33)'
+else
+    t_ok 0 'sh_space_need refuses an exec demand bigger than free space (#33)'
+fi
+# GC reclaims exec caches, not only staging (#33).
+SH_HOME="$tmp/gc-home"
+SH_EXEC="$tmp/gc-exec"
+mkdir -p "$SH_HOME/.staging" "$SH_EXEC/.staging" "$SH_EXEC/cache/old" "$SH_EXEC/tmp/old" 2>/dev/null
+export SH_HOME SH_EXEC
+: > "$SH_HOME/.staging/a" 2>/dev/null
+: > "$SH_EXEC/cache/old/f" 2>/dev/null
+touch -d '10 days ago' "$SH_EXEC/cache/old/f" 2>/dev/null || touch -t 202001010000 "$SH_EXEC/cache/old/f" 2>/dev/null || true
+SH_GC_DRY_RUN=1 sh_space_gc 7 >/dev/null 2>&1
+gc_dry=$(SH_GC_DRY_RUN=1 sh_space_gc 7 2>/dev/null)
+case "$gc_dry" in
+    [0-9]*' '[0-9]*) t_ok 0 'gc dry-run counts entries (#33)' ;;
+    *) t_ok 1 'gc dry-run counts entries (#33)' ;;
+esac
+
+# --- class H: the exec root is the ROOMIEST candidate, not the first ---------
+# # STOP: A CLAUSE THAT MEASURES THE REAL HOST PROVES NOTHING ABOUT THE RULE.
+# /dev/shm and /tmp differ per machine, so the choice is proved by stubbing
+# sh_free_mb - which is what the planner reads - and asking which path comes
+# back. The failure pinned here is #50: the old rule kept the FIRST candidate
+# over the floor, so the order of sh_exec_candidates decided the answer, a host
+# with 31GB in /tmp was given a 135MB /dev/shm, and the rust install then failed
+# with "set SANDHOME_EXEC to a roomy root".
+tmp=$tmp/roomy
+mkdir -p "$tmp/roomy-a" "$tmp/roomy-b" 2>/dev/null
+cat > "$tmp/pick.sh" <<'PICK'
+set -u
+. "$1/lib/common.sh"
+. "$1/lib/space.sh"
+# # STOP: THE STUBS GO IN AFTER THE LIBRARY IS SOURCED, NOT BEFORE. Defining
+# sh_free_mb or sh_dir_writable ahead of the source is silently undone by the
+# definitions in the file itself, and a test that stubs the wrong function
+# measures the real one instead of the rule. These override the three inputs
+# sh_space_plan reads, so what is left under test is the SELECTION.
+sh_free_mb() {
+    case "$1" in
+        */roomy-a) printf '%s' "$SH_TEST_FREE_A" ;;
+        */roomy-b) printf '%s' "$SH_TEST_FREE_B" ;;
+        *)         printf 0 ;;
+    esac
+}
+sh_dir_writable() { [ -d "$1" ]; }
+sh_exec_probe()  { [ -d "$1" ]; }
+# Only the two fixture candidates are in play, in this order: a first.
+# # STOP: THE STUBS TAKE NO POSITIONAL ARGUMENTS. sh_space_plan calls the
+# directory helpers with none, so a stub that reads "$1" aborts under set -u and
+# the candidate list comes back empty - which looks exactly like a planner that
+# found nothing. The paths come in through the environment instead.
+sh_exec_candidates() { printf '%s %s' "$SH_TEST_A" "$SH_TEST_B"; }
+sh_home_default()    { printf '%s' "$SH_TEST_A"; }
+# An inherited SANDHOME_EXEC is an EXPLICIT choice by the caller and the planner
+# honours it over anything it would pick, so it has to be out of the way before
+# the question "which candidate" means anything.
+SANDHOME_EXEC=''
+export SANDHOME_EXEC
+sh_space_plan --no-create
+printf '%s' "$SH_EXEC"
+PICK
+roomy_pick=$(SH_TEST_A="$tmp/roomy-a" SH_TEST_B="$tmp/roomy-b" \
+    SH_TEST_FREE_A=200 SH_TEST_FREE_B=9000 SANDHOME_MIN_EXEC_MB=128 \
+    sh "$tmp/pick.sh" "$ROOT" 2>/dev/null)
+case "$roomy_pick" in
+    *roomy-b*) t_ok 0 'the roomiest candidate is chosen, not the first over the floor (#50)' ;;
+    *)         t_ok 1 "the roomiest candidate is chosen, not the first over the floor (#50) (got $roomy_pick)" ;;
+esac
+# A candidate over the floor is still used when it is the only one that
+# qualifies: a small exec root that works beats a large one that does not.
+roomy_floor=$(SH_TEST_A="$tmp/roomy-a" SH_TEST_B="$tmp/roomy-b" \
+    SH_TEST_FREE_A=200 SH_TEST_FREE_B=10 SANDHOME_MIN_EXEC_MB=128 \
+    sh "$tmp/pick.sh" "$ROOT" 2>/dev/null)
+case "$roomy_floor" in
+    *roomy-a*) t_ok 0 'a candidate over the floor is still used when it is the only one (#50)' ;;
+    *)         t_ok 1 "a candidate over the floor is still used when it is the only one (#50) (got $roomy_floor)" ;;
+esac
+# Neither qualifies: the first working one is used anyway, with a warning. This
+# is the "a small root that works beats a large one that does not" rule and it
+# must survive the change.
+roomy_none=$(SH_TEST_A="$tmp/roomy-a" SH_TEST_B="$tmp/roomy-b" \
+    SH_TEST_FREE_A=10 SH_TEST_FREE_B=5 SANDHOME_MIN_EXEC_MB=128 \
+    sh "$tmp/pick.sh" "$ROOT" 2>/dev/null)
+case "$roomy_none" in
+    *roomy-a*) t_ok 0 'with no candidate over the floor the first working one is used (#50)' ;;
+    *)         t_ok 1 "with no candidate over the floor the first working one is used (#50) (got $roomy_none)" ;;
+esac
+
+# --- class H: sh_path_where resolves a tool PAST the exec view ---------------
+# # STOP: ASSERTED AGAINST A PATH THIS TEST CONTROLS, NOT AGAINST /dev/shm. The
+# defect (#43) is that `command -v` for an adopted tool answers with the
+# exec-view symlink the tree itself wrote, so the promote step links the view
+# onto itself and the tool is gone with exit 126. A clause that only failed on a
+# host whose view happened to be ahead of PATH would not have caught it.
+pw=$(cat > "$tmp/where.sh" <<'WHERE'
+set -u
+. "$1/lib/common.sh"
+mkdir -p "$2/view" "$2/real" 2>/dev/null
+printf '#!/bin/sh\n' > "$2/real/tool" 2>/dev/null
+chmod 0755 "$2/real/tool" 2>/dev/null
+ln -sfn "$2/real/tool" "$2/view/tool" 2>/dev/null
+SH_EXEC_BIN="$2/view"
+PATH="$2/view:$2/real"
+export SH_EXEC_BIN PATH
+sh_path_where tool
+WHERE
+sh "$tmp/where.sh" "$ROOT" "$tmp/pw" 2>/dev/null)
+case "$pw" in
+    */real/tool) t_ok 0 'sh_path_where resolves a tool past the exec view (#43)' ;;
+    *)           t_ok 1 "sh_path_where resolves a tool past the exec view (#43) (got $pw)" ;;
+esac
+# And the control that matters: it must NOT answer with a view-only link, or
+# the promote step would go looking for something that is not there. This is the
+# other half of a guard, and a guard that only refuses is indistinguishable
+# from a good one until it is shown accepting a correct input.
+pw2=$(cat > "$tmp/where2.sh" <<'WHERE2'
+set -u
+. "$1/lib/common.sh"
+mkdir -p "$2/view" 2>/dev/null
+printf '#!/bin/sh\n' > "$2/view/onlyview" 2>/dev/null
+chmod 0755 "$2/view/onlyview" 2>/dev/null
+SH_EXEC_BIN="$2/view"
+PATH="$2/view"
+export SH_EXEC_BIN PATH
+r=$(sh_path_where onlyview)
+[ -n "$r" ] && printf 'found' || printf 'notfound'
+WHERE2
+sh "$tmp/where2.sh" "$ROOT" "$tmp/pw2" 2>/dev/null)
+t_is "$pw2" 'notfound' 'sh_path_where does not answer with a view-only link (#43)'
+# A tool on neither is reported as absent, not as an empty string that a caller
+# mistakes for a path.
+pw3=$(cat > "$tmp/where3.sh" <<'WHERE3'
+set -u
+. "$1/lib/common.sh"
+mkdir -p "$2/empty" 2>/dev/null
+SH_EXEC_BIN="$2/view"
+PATH="$2/empty"
+export SH_EXEC_BIN PATH
+r=$(sh_path_where nosuchtool)
+[ -n "$r" ] && printf 'found' || printf 'absent'
+WHERE3
+sh "$tmp/where3.sh" "$ROOT" "$tmp/pw3" 2>/dev/null)
+t_is "$(sh "$tmp/where3.sh" "$ROOT" "$tmp/pw3" 2>/dev/null)" 'absent' \
+    'sh_path_where reports a tool that is nowhere as absent (#43)'
+# # STOP: THE VIEW GATE COUNTS WHAT IS COPIED, NOT THE WHOLE TREE. sh_view_need
+# used `du -sk` over the source, but sh_promote_tree only COPIES regular
+# executables and symlinks everything else, so a toolchain whose bulk is
+# librustc_driver.so/libLLVM was refused on a root the real view fits in. The
+# fixture is one executable and six executables named .so: only the executable
+# is copied.
+copy_src="$tmp/copysrc"
+mkdir -p "$copy_src" 2>/dev/null
+if [ -x /bin/sh ]; then
+    cp /bin/sh "$copy_src/real" 2>/dev/null
+    i=0
+    while [ "$i" -lt 6 ]; do
+        cp /bin/sh "$copy_src/libso$i.so" 2>/dev/null || break
+        i=$((i + 1))
+    done
+fi
+copy_kb=$(sh_view_copy_kb "$copy_src" 2>/dev/null)
+whole_kb=$(sh_dir_size "$copy_src" 2>/dev/null)
+case "$copy_kb" in
+    ''|*[!0-9]*) t_ok 1 'view copy size counts the executable (#33)' ;;
+    *)
+        if [ "$copy_kb" -gt 0 ]; then
+            t_ok 0 'view copy size counts the executable (#33)'
+        else
+            t_ok 1 'view copy size counts the executable (#33)'
+        fi
+        if [ "$copy_kb" -lt "$whole_kb" ]; then
+            t_ok 0 'view copy size excludes symlinked .so/.rlib bulk (#33)'
+        else
+            t_ok 1 'view copy size excludes symlinked .so/.rlib bulk (#33)'
+        fi
+        ;;
+esac
+
+# # STOP: THE RECORDED EXEC ROOT IS READ BACK AND REUSED (#41). Re-ranking on
+# every install migrated the exec root as free space moved and orphaned the
+# views and launchers on the old root. The parser is measured on its own, and
+# the preference with stubbed probes and free space so the roomier candidate is
+# deterministic; the old code had neither, so both clauses fail against it.
+rec_home="$tmp/rec-home"
+mkdir -p "$rec_home" 2>/dev/null
+printf "SANDHOME_HOME='%s'\nSANDHOME_EXEC='/x/recorded'\nexport SANDHOME_HOME SANDHOME_EXEC\n" "$rec_home" \
+    > "$rec_home/env.sh"
+rec=$(SH_HOME="$rec_home" sh -c \
+    '. "$1/lib/common.sh"; . "$1/lib/detect.sh"; . "$1/lib/space.sh"; sh_space_recorded_exec' \
+    sh "$ROOT")
+t_is "$rec" '/x/recorded' 'the recorded exec root is read back from env.sh (#41)'
+rec_none=$(SH_HOME="$tmp/rec-none" sh -c \
+    '. "$1/lib/common.sh"; . "$1/lib/detect.sh"; . "$1/lib/space.sh"; sh_space_recorded_exec' \
+    sh "$ROOT")
+t_is "$rec_none" '' 'no recorded exec root when env.sh is absent (#41)'
+
+sticky_home="$tmp/sticky-home"
+sticky_exec="$tmp/sticky-exec"
+mkdir -p "$sticky_home" "$sticky_exec" 2>/dev/null
+printf "SANDHOME_EXEC='%s'\n" "$sticky_exec" > "$sticky_home/env.sh"
+sticky_got=$(STICKY_EXEC="$sticky_exec" SANDHOME_HOME="$sticky_home" SANDHOME_MIN_EXEC_MB=1 \
+    env -u SANDHOME_EXEC sh -c '
+        . "$1/lib/common.sh"; . "$1/lib/detect.sh"; . "$1/lib/space.sh"
+        sh_exec_probe() { case "$1" in "$SANDHOME_HOME") return 1 ;; *) return 0 ;; esac; }
+        sh_dir_writable() { return 0; }
+        sh_free_mb() { case "$1" in "$STICKY_EXEC") printf 200 ;; *) printf 900 ;; esac; }
+        sh_space_plan >/dev/null 2>&1
+        printf "%s" "$SH_EXEC"
+    ' sh "$ROOT")
+t_is "$sticky_got" "$sticky_exec" 'the plan reuses the recorded exec root (#41)'
+rm -rf "$rec_home" "$sticky_home" 2>/dev/null
+
+# # STOP: INSTALL SELF-HEALS THE LAUNCHER ONTO THE CHOSEN ROOT (#41). When a
+# create plan moves the exec root, `sandhome install` rebuilt views there while
+# `sandhome` itself stayed on the old root, and the next shell got
+# `command not found`. The function must copy both launchers.
+heal_repo="$tmp/heal-repo"
+heal_bin="$tmp/heal-bin"
+mkdir -p "$heal_repo/bin" "$heal_repo/shell" "$heal_bin" 2>/dev/null
+printf '#!/bin/sh\nexit 0\n' > "$heal_repo/bin/sandhome"
+printf '#!/bin/sh\nexit 0\n' > "$heal_repo/shell/errandsh"
+SH_REPO_DIR="$heal_repo" SH_EXEC_BIN="$heal_bin" SH_DRY_RUN=0 \
+    sh -c '. "$1/lib/common.sh"; . "$1/lib/env.sh"; sh_exec_install_launchers' sh "$ROOT"
+if [ -x "$heal_bin/sandhome" ]; then
+    t_ok 0 'install self-heals sandhome onto the chosen exec bin (#41)'
+else
+    t_ok 1 'install self-heals sandhome onto the chosen exec bin (#41)'
+fi
+if [ -x "$heal_bin/errandsh" ]; then
+    t_ok 0 'install self-heals errandsh onto the chosen exec bin (#41)'
+else
+    t_ok 1 'install self-heals errandsh onto the chosen exec bin (#41)'
+fi
+
+# --- class I: a draining exec root is announced, not discovered --------------
+# # STOP: THE THREE STATES ARE STUBBED, AND EVERY ONE OF THEM IS A CLAIM ABOUT
+# THE RULE. A clause that filled a real filesystem to test a threshold would be
+# a clause about this machine's free space and about whether the test host can
+# write 200MB, which is not the thing under test. sh_free_mb and sh_total_mb are
+# the only two inputs sh_space_status reads, so stubbing them measures the
+# decision and nothing else.
+#
+# The states come from a measurement, not from taste. On this host with the exec
+# root on /dev/shm (245MB total), filling it left 36MB free and:
+#   sandhome doctor        -> doctor_failures=0
+#   go build -o $SANDEXEC/x -> "no space left on device", exit 0
+# So `low` at 36MB of 207MB, and the exit code was the worse half.
+cat > "$tmp/status.sh" <<'STATUS'
+set -u
+. "$1/lib/common.sh"
+. "$1/lib/space.sh"
+# The stubs are defined AFTER the library so they are not overwritten by the
+# definitions in it, and they take no positional arguments because
+# sh_space_status calls them with none.
+sh_free_mb()  { printf '%s' "$SH_TEST_FREE"; }
+sh_total_mb() { printf '%s' "$SH_TEST_TOTAL"; }
+sh_space_status /anywhere
+STATUS
+sp() {
+    SH_TEST_FREE=$1 SH_TEST_TOTAL=$2 sh "$tmp/status.sh" "$ROOT" 2>/dev/null
+}
+t_is "$(sp 0 207)"      'full'     'a root with no space at all is full'
+t_is "$(sp 12 207)"     'critical' 'a root with 12MB of 207MB is critical'
+t_is "$(sp 36 207)"     'low'      'the measured 36MB-of-207MB case is low'
+t_is "$(sp 150 207)"    'ok'       'a root with room to spare is ok'
+# A large root is judged on its share, so a genuinely draining 4TB disk is
+# caught and a nearly-empty 4TB disk is not.
+# # STOP: ON A LARGE ROOT, `low` MEANS UNDER 100MB FREE, NOT "UNDER 10%".
+# Both conditions are required, and the absolute one is the one that decides in
+# practice. The share alone is nonsense at this size, and the bootstrap suite
+# proved it: this host's 419GB disk at 6.6% free still has 393GB on it, a pure
+# share rule called it low, and `doctor` failed a freshly built home that had
+# 27GB free. A warning that fires on a healthy machine is worse than no warning,
+# because it teaches the reader to skip the line that matters.
+t_is "$(sp 300 4000000)"   'ok'  'a 4TB disk with 300MB free is ok (0.075% free but 300MB)'
+t_is "$(sp 2000 4000000)"  'ok'  'a 4TB disk with 2GB free is ok'
+t_is "$(sp 900000 4000000)" 'ok'  'a 4TB disk with 900GB free is ok'
+# The case the share IS for, and the control that proves the pair works: a disk
+# under 10% free that is also under 100MB free. 40MB of 4TB is 0.001% free and
+# cannot build anything, and that is the shape a draining root actually has.
+t_is "$(sp 40 4000000)"    'low'  'a 4TB disk down to 40MB is low'
+t_is "$(sp 80 4000000)"    'low'  'a 4TB disk down to 80MB is low'
+t_is "$(sp 100 4000000)"   'ok'   'a 4TB disk at exactly 100MB free is not low'
+# The regression that made this rule necessary, as its own clause: the host disk
+# and its real numbers.
+t_is "$(sp 27641 419340)"  'ok'   'the 419GB host disk at 6.6% free is ok (27GB free)'
+# # STOP: THE SHARE IS CROSS-MULTIPLIED, NOT DIVIDED, AND THIS IS THE CLAIM
+# THAT PROVES IT. `free*100/total` truncates: 40MB of 4TB is 0.001%, which
+# /100 becomes 0, and 0 is under every threshold, so the biggest disk on the
+# machine read as the emptiest. Measured, before the cross-multiply:
+# free=40 total=4000000 answered "low" by way of a 0% share.
+# # STOP: THE BOUNDARY IS THE CLAIM THAT SEPARATES DIVIDING FROM
+# CROSS-MULTIPLYING, AND IT IS HERE BECAUSE NOTHING ELSE DOES.
+# SANDHOME_LOW_EXEC_PCT is the share of FREE space below which a root is low, so
+# on a 4000000MB disk the line is 400000MB free. Exactly on the line is not low;
+# just under it is. Dividing truncates, so 9.9% free reads as 9 and fires on the
+# wrong side of a boundary it cannot actually see - and dividing cannot
+# represent any share below 1% at all, which is where 40MB-of-4TB lives.
+# Cross-multiplying is exact: free*100 vs total*pct, compared strictly.
+t_is "$(sp 400000 4000000)" 'ok'   'a disk at exactly the 10% free line is not low'
+# And the two directions of the same mistake, which a percentage rule gets
+# backwards if it is not written down: a big disk with a small absolute number is
+# nearly EMPTY (ok) and a small disk with a big absolute number is nearly FULL
+# (low). Both were written the other way round first.
+t_is "$(sp 900000 4000000)" 'ok' 'a big absolute number on a big disk is ok'
+t_is "$(sp 45 50)"        'low'  'a 50MB disk with 45MB free is nearly full'
+# And the inverse: a large root needs the absolute floor too, because a share
+# alone would call a disk with 900GB free and 3GB of headroom fine.
+t_is "$(sp 5 4000000)"   'critical' 'a 4TB disk with 5MB free is critical'
+# A tiny root cannot be judged by its share: 10% of 40MB is 4MB, which would
+# call every state critical.
+t_is "$(sp 5 50)"        'critical' 'a 50MB root with 5MB free is critical'
+# 30MB of a 50MB root is 60% gone, which is critical and not merely low. This
+# was written expecting "low" and the code was right: an expectation that the
+# measured behaviour contradicts is the expectation that gets corrected.
+t_is "$(sp 30 50)"       'critical' 'a 50MB root with 30MB free is critical, not low'
+t_is "$(sp 45 50)"       'low'      'a 50MB root with 45MB free is low'
+t_is "$(sp 40 40)"       'low'      'a 40MB root with nothing free is not ok'
+# A root whose total cannot be read is judged on megabytes alone, and says so
+# rather than guessing a share.
+t_is "$(SH_TEST_FREE=36 SH_TEST_TOTAL=x sh "$tmp/status.sh" "$ROOT" 2>/dev/null)" \
+    'low'  'a root with an unreadable total is judged on megabytes alone'
+t_is "$(SH_TEST_FREE=x SH_TEST_TOTAL=207 sh "$tmp/status.sh" "$ROOT" 2>/dev/null)" \
+    'unknown' 'a root with an unreadable free count is unknown, not ok'
+
+# --- class I: the advice is a command, and it names one ----------------------
+# # STOP: A WARNING WITH NO ACTION IS A NOTE. Each of the three messages has to
+# contain the thing a reader types next, because the whole value of hearing about
+# a draining root early is that there is still time to act on it.
+adv=$(SH_TEST_FREE=0 SH_TEST_TOTAL=207 sh -c '
+    . "$0/lib/common.sh"; . "$0/lib/space.sh"
+    sh_free_mb() { printf "%s" "$SH_TEST_FREE"; }
+    sh_total_mb() { printf "%s" "$SH_TEST_TOTAL"; }
+    sh_space_advise /anywhere' "$ROOT" 2>&1)
+t_contains "$adv" 'FULL' 'the full message says the root is full'
+t_contains "$adv" 'gc'  'the full message names gc'
+t_contains "$adv" '--exec' 'the full message names the --exec override'
+adv_low=$(SH_TEST_FREE=36 SH_TEST_TOTAL=207 sh -c '
+    . "$0/lib/common.sh"; . "$0/lib/space.sh"
+    sh_free_mb() { printf "%s" "$SH_TEST_FREE"; }
+    sh_total_mb() { printf "%s" "$SH_TEST_TOTAL"; }
+    sh_space_advise /anywhere' "$ROOT" 2>&1)
+t_contains "$adv_low" '36MB' 'the low message carries the number it judged'
+t_contains "$adv_low" 'space --probe' 'the low message names the candidate listing'
+# And a healthy root says nothing at all, because a warning on every command
+# trains a reader to skip warnings.
+adv_ok=$(SH_TEST_FREE=200 SH_TEST_TOTAL=207 sh -c '
+    . "$0/lib/common.sh"; . "$0/lib/space.sh"
+    sh_free_mb() { printf "%s" "$SH_TEST_FREE"; }
+    sh_total_mb() { printf "%s" "$SH_TEST_TOTAL"; }
+    sh_space_advise /anywhere' "$ROOT" 2>&1)
+t_is "$adv_ok" '' 'a healthy root produces no space advice at all'
+# It says it ONCE per process. Every toolchain that installs writes a fragment
+# and each write calls the adviser, so a --toolset agent run on a low root
+# produced the same line five times over. A repeated warning is not a louder
+# warning, it is noise that trains the reader to scroll past the one that
+# mattered.
+adv_rep=$(SH_TEST_FREE=36 SH_TEST_TOTAL=207 sh -c '
+    . "$0/lib/common.sh"; . "$0/lib/space.sh"
+    sh_free_mb() { printf "%s" "$SH_TEST_FREE"; }
+    sh_total_mb() { printf "%s" "$SH_TEST_TOTAL"; }
+    i=0
+    while [ $i -lt 5 ]; do sh_space_advise /anywhere; i=$((i+1)); done' "$ROOT" 2>&1)
+adv_lines=$(printf '%s\n' "$adv_rep" | grep -c 'MB free')
+t_is "$adv_lines" '1' 'a repeated low root is advised once per process, not once per call'
+# And a new process says it again, because a new command is a new chance to act.
+adv_again=$(SH_TEST_FREE=36 SH_TEST_TOTAL=207 sh -c '
+    . "$0/lib/common.sh"; . "$0/lib/space.sh"
+    sh_free_mb() { printf "%s" "$SH_TEST_FREE"; }
+    sh_total_mb() { printf "%s" "$SH_TEST_TOTAL"; }
+    sh_space_advise /anywhere' "$ROOT" 2>&1)
+case "$adv_again" in
+    *'MB free'*) t_ok 0 'a new process advises again about the same root (#60)' ;;
+    *) t_ok 1 'a new process advises again about the same root (#60)' ;;
+esac
+# A state change is NOT suppressed: low then critical must both be said, because
+# the second one is the one that means a build is about to fail.
+printf 36 > "$tmp/freefile"
+SH_TEST_FREEFILE="$tmp/freefile"; export SH_TEST_FREEFILE
+adv_both=$(sh -c '
+    . "$0/lib/common.sh"; . "$0/lib/space.sh"
+    # The free count is read from a FILE, not from an argument or a counter.
+    # sh_free_mb is called with no arguments, so a stub reading "$1" sees
+    # nothing; and it is called TWICE per advice (once for the state, once for
+    # the number in the message), so a counter flips the value halfway through a
+    # single call and reports a state that was never measured. A file is read as
+    # many times as it likes and changes only when the test changes it.
+    sh_free_mb()  { cat "$SH_TEST_FREEFILE"; }
+    sh_total_mb() { printf 207; }
+    sh_space_advise /anywhere
+    printf 5 > "$SH_TEST_FREEFILE"
+    sh_space_advise /anywhere' "$ROOT" 2>&1)
+# Counted on the substring BOTH messages carry, not on wording from one of them:
+# a pattern naming "low for builds" finds the first line and misses the
+# critical one, which reads "...has only 5MB free, which is not enough for a
+# build". Counting advice lines is the claim; the wording is free to change.
+adv_both_lines=$(printf '%s\n' "$adv_both" | grep -c 'MB free')
+t_is "$adv_both_lines" '2' 'a state change from low to critical is advised again (#60)'
+
+# --- class I: doctor fails on a draining root -------------------------------
+# # STOP: `low` IS A FAILURE AND NOT A NOTE, BECAUSE doctor IS THE GATE. ROUTE.md
+# step 2 makes a session run doctor to decide whether the sandbox is ready, so
+# it is the one place an agent is guaranteed to look. A low root still works, and
+# the value of hearing about it is that it works NOW; a note is read and
+# dismissed, a non-zero exit is read. The clause drives the real sh_doctor with
+# the two space inputs stubbed, because the check has to be inside the gate and
+# not merely printed somewhere nearby.
+# # STOP: THE HEREDOC IS QUOTED, OR THE FIXTURE IS WRITTEN WITH THE CALLER'S
+# DOLLARS ALREADY SUBSTITUTED. Written as `<<DOC`, bash expanded $1 and $3 while
+# writing the file, so the script on disk read `. "/lib/common.sh"` - the test
+# env's own root - and failed with "cannot open /lib/common.sh". The clause
+# appeared to be about the space check and was measuring the wrong program
+# entirely. `<<'DOC'` writes the dollars.
+cat > "$tmp/doc.sh" <<'DOC'
+set -u
+for m in common detect space fetch env toolchain report; do
+    # shellcheck source=/dev/null
+    . "$1/lib/$m.sh"
+done
+SH_HOME=$3/home
+SH_EXEC=$3/exec
+SH_EXEC_BIN=$3/exec/bin
+SH_EXEC_VIEWS=$3/exec/views
+SH_HOME_EXEC=no
+export SH_HOME SH_EXEC SH_EXEC_BIN SH_EXEC_VIEWS SH_HOME_EXEC
+mkdir -p "$SH_EXEC_BIN" "$SH_EXEC_VIEWS" "$SH_HOME" 2>/dev/null
+# Only the space inputs are stubbed; the root checks the doctor already had are
+# real, so the clause is about the new check and not about a doctor that cannot
+# run at all.
+sh_free_mb()  { printf '%s' "$SH_TEST_FREE"; }
+sh_total_mb() { printf '%s' "$SH_TEST_TOTAL"; }
+sh_doctor 2>&1
+DOC
+# `tmp` was reassigned to the roomy fixture directory partway through this file,
+# so the doctor fixture is created under it and NOT under the original tmp; the
+# script mkdir -p's its own roots, and a path that cannot be made would leave
+# doctor with nothing to check and the clause would pass for the wrong reason.
+doc_home=$tmp/dh
+rm -rf "$doc_home"
+mkdir -p "$doc_home" 2>/dev/null
+doc=$(SH_TEST_FREE=36 SH_TEST_TOTAL=207 sh "$tmp/doc.sh" "$ROOT" x "$doc_home" 2>&1)
+case "$doc" in
+    *'FAIL exec_space=low'*) t_ok 0 'doctor fails when the exec root is low (#60)' ;;
+    *) t_ok 1 "doctor fails when the exec root is low (#60) (got: $(printf '%s' "$doc" | tail -2))" ;;
+esac
+# The control that matters: a healthy root does not fail doctor. A guard that
+# only ever refuses is indistinguishable from a good one until it is shown
+# accepting a correct input. doc_ok is COMPUTED HERE, before anything reads it:
+# a first draft read doc_ok_fail_n three clauses above the assignment, so it
+# was always empty and the comparison silently tested "" against a number.
+doc_ok=$(SH_TEST_FREE=150 SH_TEST_TOTAL=207 sh "$tmp/doc.sh" "$ROOT" x "$doc_home" 2>&1)
+case "$doc_ok" in
+    *'exec_space'*) t_ok 1 'doctor says nothing about space on a healthy root (#60)' ;;
+    *) t_ok 0 'doctor says nothing about space on a healthy root (#60)' ;;
+esac
+# The count is not asserted as exactly 1: this harness has no pty and no
+# passwd, so the shim checks fail too. What is asserted is that the space
+# failure is IN the count, and that a healthy root fails FEWER times, which is
+# the claim that a non-zero exit means "not ready". awk rather than sed, and
+# the LAST doctor_failures= line, so a stray earlier match cannot decide it.
+doc_fail_n=$(printf '%s\n' "$doc" | awk '/^doctor_failures=/{v=$0} END{sub(/^doctor_failures=/,"",v); print v}')
+doc_ok_fail_n=$(printf '%s\n' "$doc_ok" | awk '/^doctor_failures=/{v=$0} END{sub(/^doctor_failures=/,"",v); print v}')
+case "$doc_fail_n" in
+    ''|0) t_ok 1 "doctor_failures counts the space failure (#60) (got $doc_fail_n)" ;;
+    *)    t_ok 0 "doctor_failures counts the space failure (#60) (got $doc_fail_n)" ;;
+esac
+case "$doc_ok_fail_n" in
+    ''|*[!0-9]*)
+        t_ok 1 "a healthy root fails doctor fewer times than a low one (#60) (got '$doc_ok_fail_n' for a healthy root and '$doc_fail_n' for a low one)" ;;
+    *)
+        if [ "$doc_ok_fail_n" -lt "$doc_fail_n" ]; then
+            t_ok 0 "a healthy root fails doctor fewer times than a low one (#60) ($doc_ok_fail_n < $doc_fail_n)"
+        else
+            t_ok 1 "a healthy root fails doctor fewer times than a low one (#60) ($doc_ok_fail_n vs $doc_fail_n)"
+        fi ;;
+esac
+# An UNREADABLE root is a finding and not a pass. `df` failing on the exec root
+# means nothing can be measured about the one place every build artifact has to
+# land, and a silent pass on the thing that was not measured is the exact shape
+# of the defect this change exists to remove.
+doc_unk=$(SH_TEST_FREE=x SH_TEST_TOTAL=207 sh "$tmp/doc.sh" "$ROOT" x "$doc_home" 2>&1)
+case "$doc_unk" in
+    *'FAIL exec_space=unknown'*) t_ok 0 'doctor fails when the exec root cannot be measured (#60)' ;;
+    *) t_ok 1 "doctor fails when the exec root cannot be measured (#60) (got: $(printf '%s' "$doc_unk" | grep exec_space))" ;;
+esac
+# A full root is worse than low and is named as such.
+doc_full=$(SH_TEST_FREE=0 SH_TEST_TOTAL=207 sh "$tmp/doc.sh" "$ROOT" x "$doc_home" 2>&1)
+case "$doc_full" in
+    *'FAIL exec_space=full'*) t_ok 0 'doctor names a full exec root as full (#60)' ;;
+    *) t_ok 1 "doctor names a full exec root as full (#60) (got: $(printf '%s' "$doc_full" | tail -2))" ;;
+esac
+
+# # STOP: A CURRENT VIEW IS NOT REBUILT, SO A NO-OP RE-RUN STAYS GREEN ON A
+# DRAINED ROOT (issue #71). The size gate refuses a rebuild the root cannot
+# hold; a view that already mirrors the payload needs no rebuild, so gating
+# it turned a healthy re-run into failures=1. sh_view_current is the check:
+# every home file present in the view and no older than it.
+v71="$tmp-v71"
+rm -rf "$v71"
+mkdir -p "$v71/home/toolchains/w/bin" "$v71/exec/bin" "$v71/exec/views" "$v71/home/tmp"
+printf '#!/bin/sh\nexit 0\n' > "$v71/home/toolchains/w/bin/w"
+chmod 0755 "$v71/home/toolchains/w/bin/w"
+sh -c '
+    for m in common detect space fetch env toolchain; do . "$1/lib/$m.sh"; done
+    SH_HOME=$2/home; SH_HOME_TOOLCHAINS=$2/home/toolchains; SH_EXEC=$2/exec
+    SH_EXEC_BIN=$2/exec/bin; SH_EXEC_VIEWS=$2/exec/views; SH_HOME_TMP=$2/home/tmp; SH_HOME_EXEC=no
+    SH_VIEW_MODE=copy; SH_DRY_RUN=0; SH_SELF=test
+    export SH_HOME SH_HOME_TOOLCHAINS SH_EXEC SH_EXEC_BIN SH_EXEC_VIEWS SH_HOME_TMP SH_HOME_EXEC SH_VIEW_MODE SH_DRY_RUN SH_SELF
+    sh_promote_toolchain w bin/w >/dev/null 2>&1
+    if sh_view_current "$SH_HOME_TOOLCHAINS/w" "$SH_EXEC_VIEWS/w"; then printf "current-after-promote\n"; fi
+    # Drain the gate: no free space at all must still leave a current view alone.
+    sh_free_mb() { printf "0"; }
+    if sh_promote_toolchain w bin/w >/dev/null 2>&1; then printf "repromote-ok\n"; fi
+    # A newer home file makes the view stale, and then the gate does refuse.
+    # The refusal is recorded in SH_FAILURES (the count the bootstrap
+    # reports), not in the promote status, so that is what is read.
+    sleep 1
+    printf "# bump\n" >> "$SH_HOME_TOOLCHAINS/w/bin/w"
+    SH_FAILURES=0
+    export SH_FAILURES
+    sh_promote_toolchain w bin/w >/dev/null 2>&1 || true
+    printf "stale-failures=$SH_FAILURES\n"
+' sh "$ROOT" "$v71" > "$v71/out" 2>/dev/null
+v71_out=$(cat "$v71/out" 2>/dev/null)
+t_contains "$v71_out" 'current-after-promote' 'a fresh promote leaves a current view'
+t_contains "$v71_out" 'repromote-ok' 'a current view is not rebuilt when the root is drained (#71)'
+t_contains "$v71_out" 'stale-failures=1' 'a stale view is still gated on space, not silently kept'
+rm -rf "$v71"
+
+# BYTE CURRENCY IN LAUNCH MODE. mtime cannot tell a launcher from a real
+# copy, so three shapes need bytes: a launcher must match the helper, a
+# copy-listed entry must match its home payload, and a module wrapper (newer
+# than the helper, matching neither) still counts as current. The helper
+# here is any file: currency compares bytes, it never executes.
+lb="$tmp-launch"
+rm -rf "$lb"
+mkdir -p "$lb/home/toolchains/l/bin" "$lb/exec/bin" "$lb/exec/views" "$lb/home/tmp"
+printf 'helper-v1\n' > "$lb/exec/bin/sandhome-memexec"
+chmod 0755 "$lb/exec/bin/sandhome-memexec"
+# tool is a REAL ELF so it is stamped; script.sh is text and is copied, which
+# is the shape issue #173 requires. The fixture needs both: a rebuilt helper
+# stales a launcher, and a copied script must NOT be staled by it.
+cp /bin/sh "$lb/home/toolchains/l/bin/tool" 2>/dev/null || printf 'ELF\n' > "$lb/home/toolchains/l/bin/tool"
+printf '#!/bin/sh\necho script\n' > "$lb/home/toolchains/l/bin/script.sh"
+chmod 0755 "$lb/home/toolchains/l/bin/tool" "$lb/home/toolchains/l/bin/script.sh"
+sh -c '
+    for m in common detect space fetch env toolchain memexec; do . "$1/lib/$m.sh"; done
+    SH_HOME=$2/home; SH_HOME_TOOLCHAINS=$2/home/toolchains; SH_EXEC=$2/exec
+    SH_EXEC_BIN=$2/exec/bin; SH_EXEC_VIEWS=$2/exec/views; SH_HOME_TMP=$2/home/tmp; SH_HOME_EXEC=no
+    SH_VIEW_MODE=launch; SH_DRY_RUN=0; SH_SELF=test; SH_COPY_ONLY=""
+    export SH_HOME SH_HOME_TOOLCHAINS SH_EXEC SH_EXEC_BIN SH_EXEC_VIEWS SH_HOME_TMP SH_HOME_EXEC SH_VIEW_MODE SH_DRY_RUN SH_SELF SH_COPY_ONLY
+    sh_promote_toolchain l bin/tool >/dev/null 2>&1
+    printf "script-kind=%s\n" "$(sh_view_kind_of "$SH_EXEC_VIEWS/l/bin/script.sh")"
+    if sh_view_current "$SH_HOME_TOOLCHAINS/l" "$SH_EXEC_VIEWS/l"; then printf "launch-current\n"; fi
+    sleep 1
+    printf "helper-v2\n" > "$SH_EXEC_BIN/sandhome-memexec"
+    if sh_view_current "$SH_HOME_TOOLCHAINS/l" "$SH_EXEC_VIEWS/l"; then printf "helper-rebuilt-current\n"; else printf "helper-rebuilt-stale\n"; fi
+    sleep 1
+    printf "wrapper\n" > "$SH_EXEC_VIEWS/l/bin/tool"
+    if sh_view_current "$SH_HOME_TOOLCHAINS/l" "$SH_EXEC_VIEWS/l"; then printf "wrapper-current\n"; fi
+    SH_COPY_ONLY="bin/tool"
+    export SH_COPY_ONLY
+    if sh_view_current "$SH_HOME_TOOLCHAINS/l" "$SH_EXEC_VIEWS/l"; then printf "listed-wrapper-current\n"; else printf "listed-wrapper-stale\n"; fi
+    cp "$SH_HOME_TOOLCHAINS/l/bin/tool" "$SH_EXEC_VIEWS/l/bin/tool"
+    if sh_view_current "$SH_HOME_TOOLCHAINS/l" "$SH_EXEC_VIEWS/l"; then printf "listed-real-current\n"; fi
+' sh "$ROOT" "$lb" > "$lb/out" 2>&1
+lb_out=$(cat "$lb/out" 2>/dev/null)
+t_contains "$lb_out" 'script-kind=copy' 'a non-ELF executable is copied into the launch view (issue #173)'
+t_contains "$lb_out" 'launch-current' 'a stamped launcher matches its helper'
+t_contains "$lb_out" 'helper-rebuilt-stale' 'a rebuilt helper stales the launchers stamped from it'
+t_contains "$lb_out" 'wrapper-current' 'a module wrapper newer than the helper counts as current'
+t_contains "$lb_out" 'listed-wrapper-stale' 'a copy-listed entry holding other bytes is stale'
+t_contains "$lb_out" 'listed-real-current' 'a copy-listed entry holding its payload is current'
+rm -rf "$lb"
+
+# --- concurrent repairs share one view, and gc never touches views ---------
+# The exec view is shared by every session, so concurrent repairs of the same
+# toolchain must not corrupt it, and gc must never scan views/ at all: views
+# are toolchain data rebuilt by repair, not caches (issue #106). Eight
+# parallel mirrors of one payload, then the view binary runs; then gc 0 over
+# the same roots must leave every view entry in place.
+cx="$tmp/conc"
+rm -rf "$cx"
+mkdir -p "$cx/home/toolchains/jq/bin" "$cx/exec/views" "$cx/home/tmp" "$cx/exec/cache"
+printf '#!/bin/sh\necho jq-1.8.2\n' > "$cx/home/toolchains/jq/bin/jq"
+chmod 0755 "$cx/home/toolchains/jq/bin/jq"
+SH_HOME="$cx/home"; SH_EXEC="$cx/exec"; SH_HOME_TMP="$cx/home/tmp"
+SH_EXEC_BIN="$cx/exec/bin"; SH_EXEC_VIEWS="$cx/exec/views"
+SH_HOME_TOOLCHAINS="$cx/home/toolchains"; SH_VIEW_MODE=copy; SH_HOME_EXEC=no
+SH_DRY_RUN=0; SH_SELF=test
+export SH_HOME SH_EXEC SH_HOME_TMP SH_EXEC_BIN SH_EXEC_VIEWS SH_HOME_TOOLCHAINS SH_VIEW_MODE SH_HOME_EXEC SH_DRY_RUN SH_SELF
+cx_fail=0
+for cx_i in 1 2 3 4 5 6 7 8; do
+    sh_promote_tree "$cx/home/toolchains/jq" "$cx/exec/views/jq" >/dev/null 2>&1 || cx_fail=1 &
+done
+wait
+t_is "$cx_fail" '0' 'eight concurrent mirrors of one view all succeed (issue #106)'
+t_is "$("$cx/exec/views/jq/bin/jq" 2>/dev/null)" 'jq-1.8.2' 'the shared view still runs afterwards'
+sh_space_gc 0 >/dev/null 2>&1
+t_ok "$([ -f "$cx/exec/views/jq/bin/jq" ]; echo $?)" 'gc 0 leaves every view entry in place (views are not caches)'
+rm -rf "$cx"
+
+# --- gc counts bytes, reclaims node-gyp scratch, and spares live installs -----
+# A failed node-gyp build leaves node-gyp-tmp-* scratch where the build ran.
+# No scan named it, so gc reclaimed 0 bytes while the root stayed full
+# (issues #86, #102). Backdated below so the age rule is not what removes it.
+gb="$tmp/gc-bytes"
+rm -rf "$gb"
+mkdir -p "$gb/home/.staging" "$gb/home/tmp" "$gb/exec/cache"
+SH_HOME="$gb/home"; SH_EXEC="$gb/exec"; SH_HOME_TMP="$gb/home/tmp"
+export SH_HOME SH_EXEC SH_HOME_TMP
+mkdir -p "$gb/exec/node-gyp-tmp-dead"
+: > "$gb/exec/node-gyp-tmp-dead/y"
+mkdir -p "$gb/exec/cache/oldc"
+: > "$gb/exec/cache/oldc/f"
+for gbe in "$gb/exec/node-gyp-tmp-dead" "$gb/exec/cache/oldc"; do
+    touch -d '10 days ago' "$gbe" 2>/dev/null || touch -t 202001010000 "$gbe" 2>/dev/null || true
+done
+gb_out=$(sh_space_gc 7)
+gb_n=${gb_out%% *}; gb_b=${gb_out##* }
+t_ok "$([ ! -e "$gb/exec/node-gyp-tmp-dead" ]; echo $?)" 'gc reclaims node-gyp-tmp-* scratch (issues #86, #102)'
+t_ok "$(case $gb_b in ''|*[!0-9]*) echo 1;; *) echo 0;; esac)" 'gc reports its bytes as a number (issue #85)'
+
+# A live install's staging survives even `gc 0`: the entry holds a
+# .sandhome-live-PID marker whose process still runs (this shell), so a
+# concurrent gc cannot delete a running download and blame the URL afterwards
+# (issue #103). A stale marker (a dead pid) protects nothing.
+mkdir -p "$gb/home/.staging/live" "$gb/home/.staging/stale"
+: > "$gb/home/.staging/live/.sandhome-live-$$"
+: > "$gb/home/.staging/stale/.sandhome-live-99999999"
+touch -d '10 days ago' "$gb/home/.staging/stale" 2>/dev/null || touch -t 202001010000 "$gb/home/.staging/stale" 2>/dev/null || true
+gb_out=$(sh_space_gc 0)
+t_ok "$([ -d "$gb/home/.staging/live" ]; echo $?)" 'gc 0 keeps a live install staging (issue #103)'
+t_ok "$([ ! -d "$gb/home/.staging/stale" ]; echo $?)" 'gc 0 still clears a staging whose install is dead'
+# And the operator's explicit override deletes regardless.
+SANDHOME_GC_FORCE=1 sh_space_gc 0 >/dev/null 2>&1
+t_ok "$([ ! -d "$gb/home/.staging/live" ]; echo $?)" 'SANDHOME_GC_FORCE=1 overrides the live-install guard'
+unset SANDHOME_GC_FORCE
+rm -rf "$gb"
+
+# --- gc 0 spares entries changed in the last 30 minutes ------------------------
+# The usage used to promise gc 0 removes caches "however fresh", but a gc 0
+# that kills a running install destroys a working toolchain to fix a full
+# root: entries modified within 30 minutes survive unless SANDHOME_GC_FORCE=1.
+# This clause pins the exception so neither side can drift silently.
+fr="$tmp/gc-fresh"
+rm -rf "$fr"
+mkdir -p "$fr/home" "$fr/exec/cache" "$fr/home/tmp"
+printf 'fresh\n' > "$fr/exec/cache/fresh-blob"
+printf 'old\n' > "$fr/exec/cache/old-blob"
+touch -d '2 hours ago' "$fr/exec/cache/old-blob" 2>/dev/null || true
+SH_HOME="$fr/home"; SH_EXEC="$fr/exec"; SH_HOME_TMP="$fr/home/tmp"
+SH_EXEC_BIN="$fr/exec/bin"; SH_HOME_TOOLCHAINS="$fr/home/toolchains"
+export SH_HOME SH_EXEC SH_HOME_TMP SH_EXEC_BIN SH_HOME_TOOLCHAINS
+sh_space_gc 0 >/dev/null 2>&1
+t_ok "$([ -f "$fr/exec/cache/fresh-blob" ]; echo $?)" 'gc 0 keeps a cache entry changed in the last 30 minutes'
+t_ok "$([ ! -f "$fr/exec/cache/old-blob" ]; echo $?)" 'gc 0 still clears a cache entry older than 30 minutes'
+SANDHOME_GC_FORCE=1 sh_space_gc 0 >/dev/null 2>&1
+t_ok "$([ ! -f "$fr/exec/cache/fresh-blob" ]; echo $?)" 'SANDHOME_GC_FORCE=1 overrides the freshness guard'
+unset SANDHOME_GC_FORCE
+rm -rf "$fr"
+
+# --- the exec view is pruned of entries whose payload is gone --------------
+# The mirror only adds and the current-check compares home-to-view, so a
+# view-only entry is invisible to both and stays on PATH pointing at nothing
+# (issue #110). Prune removes exactly those.
+vp="$tmp/view-prune"
+rm -rf "$vp"
+mkdir -p "$vp/home/toolchains/jq" "$vp/exec/views/jq" "$vp/exec/bin" "$vp/home/tmp"
+printf '#!/bin/sh\nexit 0\n' > "$vp/home/toolchains/jq/real"
+chmod 0755 "$vp/home/toolchains/jq/real"
+ln -s "$vp/home/toolchains/jq/real" "$vp/home/toolchains/jq/link-alive" 2>/dev/null || true
+cp "$vp/home/toolchains/jq/real" "$vp/exec/views/jq/real"
+: > "$vp/exec/views/jq/gone-away"
+ln -s "$vp/home/toolchains/jq/real" "$vp/exec/views/jq/link-alive" 2>/dev/null || true
+ln -s "$vp/home/toolchains/jq/deleted" "$vp/exec/views/jq/link-dead" 2>/dev/null || true
+SH_HOME="$vp/home"; SH_EXEC="$vp/exec"; SH_HOME_TMP="$vp/home/tmp"
+SH_EXEC_BIN="$vp/exec/bin"; SH_EXEC_VIEWS="$vp/exec/views"
+SH_HOME_TOOLCHAINS="$vp/home/toolchains"
+export SH_HOME SH_EXEC SH_HOME_TMP SH_EXEC_BIN SH_EXEC_VIEWS SH_HOME_TOOLCHAINS
+vp_n=$(sh_view_prune jq)
+t_is "$vp_n" '2' 'prune removes the stale file and the dangling link, nothing else'
+t_ok "$([ -f "$vp/exec/views/jq/real" ] && [ -L "$vp/exec/views/jq/link-alive" ]; echo $?)" 'prune keeps live entries'
+rm -rf "$vp"
+
+# --- space --largest names what holds the exec root -------------------------
+sl="$tmp/largest"
+rm -rf "$sl"
+mkdir -p "$sl/home" "$sl/exec/big" "$sl/exec/small" "$sl/home/tmp"
+head -c 50000 /dev/urandom > "$sl/exec/big/f" 2>/dev/null
+: > "$sl/exec/small/f"
+SH_HOME="$sl/home"; SH_EXEC="$sl/exec"; SH_HOME_TMP="$sl/home/tmp"
+export SH_HOME SH_EXEC SH_HOME_TMP
+sl_out=$(sh_space_largest 10)
+t_contains "$sl_out" "$sl/exec/big" 'space --largest names the entry holding the space'
+case "$sl_out" in
+    *KB"$sl"*) t_ok 1 "space --largest prints sizes (got: $sl_out)" ;;
+    *KB*) t_ok 0 'space --largest prints sizes' ;;
+    *) t_ok 1 "space --largest prints sizes (got: $sl_out)" ;;
+esac
+# The tag names the owner of each entry, so a consumer draining an exec root
+# knows what gc reclaims and what they must remove themselves (issue #125).
+case "$sl_out" in
+    *'(yours)'*) t_ok 0 'space --largest tags the consumer build output' ;;
+    *) t_ok 1 "space --largest tags the consumer build output (got: $sl_out)" ;;
+esac
+# Prefix, not basename: a nested sandhome-owned dir stays sandhome and a
+# consumer dir named `cache` inside a project stays yours.
+sl2="$tmp/largest2"
+rm -rf "$sl2"
+mkdir -p "$sl2/home" "$sl2/exec/cache/nested" "$sl2/exec/myproj" "$sl2/home/tmp"
+head -c 20000 /dev/urandom > "$sl2/exec/cache/nested/f" 2>/dev/null
+head -c 20000 /dev/urandom > "$sl2/exec/myproj/cache" 2>/dev/null
+SH_HOME="$sl2/home"; SH_EXEC="$sl2/exec"; SH_HOME_TMP="$sl2/home/tmp"
+export SH_HOME SH_EXEC SH_HOME_TMP
+sl2_out=$(sh_space_largest 10)
+case "$sl2_out" in
+    *"$sl2/exec/cache"*'(reclaim)'*) t_ok 0 'a nested cache stays reclaim (gc removes it, #141)' ;;
+    *) t_ok 1 "a nested cache stays reclaim (gc removes it, #141; got: $sl2_out)" ;;
+esac
+case "$sl2_out" in
+    *"$sl2/exec/myproj"*'(yours)'*) t_ok 0 'a consumer dir holding a file named cache stays yours' ;;
+    *) t_ok 1 "a consumer dir holding a file named cache stays yours (got: $sl2_out)" ;;
+esac
+rm -rf "$sl" "$sl2"
+
+# A create-plan mkdir -p's every candidate, including the namespaced work-tree
+# one, even when it does not choose it. The tree is left as it was found.
+rm -rf "$ROOT/.sandhome" "$PWD/.sandhome" 2>/dev/null
+
+# --- the per-module real-copy list REACHES the promote ------------------------
+# # STOP: THE LIST LIVES IN THE MODULE, SO THE CALLER MUST LOAD IT FIRST. This
+# is the clause behind issue #139 being fixable at all: tc_node_copy_bins
+# declares that `bin/node` must stay a real copy even in launch mode, and
+# sh_promote_toolchain read that list through `command -v tc_node_copy_bins`
+# WITHOUT ever sourcing tools/node.sh - so the answer was no, SH_COPY_ONLY came
+# back empty, and `bin/node` was stamped as a launcher anyway. Measured with the
+# module sourced by hand (tc_node_copy_bins -> bin/node) and the promote's own
+# reader (SH_COPY_ONLY -> empty) for every module that declares a list: node,
+# deno, bun, zig and rust were all inert on that path.
+#
+# The clause calls the library's own resolver WITHOUT pre-loading anything, for
+# each module that declares a list, and requires a non-empty answer. rust is
+# globs its triple, so it is exempt here and covered by the clause in
+# tests/toolchain.sh that gives it a tree.
+for sh_cl in node deno bun zig; do
+    sh_cl_got=$(sh -c '. "$0/lib/common.sh"; . "$0/lib/space.sh"; . "$0/lib/fetch.sh"; . "$0/lib/env.sh"; . "$0/lib/toolchain.sh"
+        SH_REPO_DIR="$0"; SH_LIB_DIR="$0/lib"; SH_COPY_ONLY=""
+        sh_copy_only_set "$1"; printf "%s" "$SH_COPY_ONLY"' "$ROOT" "$sh_cl" 2>/dev/null)
+    case "$sh_cl_got" in
+        '') t_ok 1 "the real-copy list for $sh_cl reaches the promote (issue #139)" ;;
+        *)  t_ok 0 "the real-copy list for $sh_cl reaches the promote (issue #139): $sh_cl_got" ;;
+    esac
+done
+# The control: the resolver must be usable WITHOUT a pre-loaded module, which is
+# the whole claim. Loading it first and reading it would pass either way.
+sh_cl_probe=$(sh -c '. "$0/lib/common.sh"; . "$0/lib/space.sh"; . "$0/lib/fetch.sh"; . "$0/lib/env.sh"; . "$0/lib/toolchain.sh"
+    SH_REPO_DIR="$0"; command -v tc_node_copy_bins >/dev/null 2>&1 && echo preloaded || echo clean' "$ROOT" 2>/dev/null)
+t_is "$sh_cl_probe" 'clean' 'the copy-list resolver reads the module itself, not a pre-loaded one (issue #139)'
+
 t_end

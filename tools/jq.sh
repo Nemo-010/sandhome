@@ -3,6 +3,7 @@
 # complete test of the install -> promote -> exec path.
 TC_jq_DESC='jq, the command-line JSON processor (single static binary)'
 TC_jq_BINS='bin/jq'
+TC_jq_EXEC_MB=8
 
 tc_jq_probe() {
     sh_have jq && jq --version >/dev/null 2>&1
@@ -20,7 +21,7 @@ tc_jq_install() {
     sh_space_need 16 home || return 1
     mkdir -p "$sh_ji_root/bin" 2>/dev/null || return 1
     sh_ji_url="https://github.com/jqlang/jq/releases/latest/download/$sh_ji_asset"
-    if ! sh_fetch_verified "$sh_ji_url" "$sh_ji_root/bin/jq" "${SANDHOME_SHA256:-}"; then
+    if ! sh_fetch_verified "$sh_ji_url" "$sh_ji_root/bin/jq" "$(sh_pin_for "$sh_ji_url" jq)"; then
         return 1
     fi
     chmod 0755 "$sh_ji_root/bin/jq" 2>/dev/null || true
@@ -41,7 +42,11 @@ tc_jq_version() {
 # so this is what `$SANDHOME_EXEC/bin` links against, and what the promote step
 # mirrors through an exec view when the copy cannot run from where it sits.
 tc_jq_adopted() {
-    sh_jq_which=$(command -v jq 2>/dev/null)
+    # sh_path_where, not command -v: the exec view is on PATH by the time an
+    # install runs, so command -v answers with the view this tool is being
+    # linked INTO and the promote step then links the view onto itself (issue
+    # #43). The exec view is not a working copy and is not consulted.
+    sh_jq_which=$(sh_path_where jq)
     [ -n "$sh_jq_which" ] || return 0
     sh_jq_dir=${sh_jq_which%/*}
     [ -n "$sh_jq_dir" ] || sh_jq_dir=.

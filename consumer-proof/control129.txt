@@ -1,0 +1,76 @@
+=== FAILING-BEFORE CONTROLS (pristine merged tree, pre-#129) ===
+bootstrap: [-] unknown toolset none
+rc=2
+usage: sh bootstrap.sh [options]
+
+  --toolset NAME      minimal | cli | developer | project | languages | agent.
+                      Default developer.
+  --with NAME         add a toolchain. Repeatable, and also takes a
+                      comma-separated list.
+  --without NAME      leave a toolchain out. Repeatable, and also takes a
+                      comma-separated list.
+  --no-detect         do not add toolchains implied by project markers in the
+                      working directory (Cargo.toml, go.mod, package.json, ...)
+  --list-toolchains   print the known names and exit
+  --home DIR          persistent data root. Default $XDG_DATA_HOME/sandhome
+  --exec DIR          exec-capable root. Default: detected (see sandhome space)
+  --no-shims          do not build the LD_PRELOAD shims
+  --require-shims     refuse to finish when a needed shim could not be built
+  --no-shell          do not install errandsh
+  --no-skills         do not install the skills into ~/.agents/skills
+  --no-profile        do not install the profile fragment or touch login files
+  --no-path-line      do not add the exec bin directory to the login files
+  --dry-run           print what would be done and change nothing
+  --json              print the report as one JSON object
+  --doh-url URL       DNS-over-HTTPS resolver for a confirmed no-resolver
+                      cage, e.g. https://1.1.1.1/dns-query. Off unless set;
+                      used only after curl answers exit 6 twice (see
+                      SANDHOME_DOH_URL below).
+  --version           print the schema version (sandhome/1) and exit
+  -h, --help          this text
+
+  SANDHOME_REPO       owner/name to fetch when run from a pipe.
+                      Default talaria0101/sandhome.
+  SANDHOME_REF        branch or tag to fetch. Default main. Export it before
+                      the pipe, or set it on the sh side
+                      (curl ... | SANDHOME_REF=X sh -s -- ...): a VAR=value
+                      prefix on curl never reaches the piped sh.
+  SANDHOME_FORCE      install toolchains locally even when the host already
+                      carries a working copy, which is otherwise adopted.
+                      1 (or all) forces every requested toolchain; a comma
+                      list forces the names in it (SANDHOME_FORCE=rust,go).
+                      Same placement rule as SANDHOME_REF. `sandhome install
+                      --force NAME` is the same decision per command.
+  SANDHOME_VIEW_MODE  copy forces real-copy views (`/proc/self/exe` stays a
+                      real path, at the price of exec-root room); launch
+                      demands the memfd helper with a copy fallback; empty or
+                      anything else decides per machine. Same placement rule
+                      as SANDHOME_REF.
+  SANDHOME_SHA256     a default digest for any download that has no pin of its
+                      own. Same placement rule as SANDHOME_REF: export it or
+                      set it on the sh side. Prefer the per-download forms below, which do not
+                      apply to a download the caller did not name.
+  SANDHOME_SHA256_<NAME>    pin one toolchain, e.g. SANDHOME_SHA256_RIPGREP.
+                      <NAME> is the toolchain name, upper-cased.
+  SANDHOME_SHA256_<ASSET>   pin one url asset, e.g.
+                      SANDHOME_SHA256_JQ_LINUX_AMD64. <ASSET> is the url's
+                      last path segment, upper-cased, without its extension,
+                      with hyphens written as underscores.
+                      Resolution order per download: <NAME>, then <ASSET>, then
+                      a digest the publisher published, then SANDHOME_SHA256.
+                      See docs/decisions/pinning.md.
+  SANDHOME_DOH_URL    DNS-over-HTTPS resolver, e.g. https://1.1.1.1/dns-query.
+                      Unset, and the fallback is off until it is set. Used
+                      only after the system resolver fails twice with curl
+                      exit 6; the retry pins the resolver by IP literal so it
+                      cannot itself need DNS.
+  SANDHOME_MIRROR_URL Mirror base tried once when plain downloaders fail for
+                      a non-DNS reason, e.g. a 403-blocked origin. Default
+                      https://api.rv.pkgforge.dev/ (the origin URL is appended).
+                      Empty opts out. The pin still applies: mirrored bytes are
+                      the origin's bytes under another route.
+  SANDHOME_MIRROR_GH_URL
+                      Same, for https://api.github.com/ paths. Default
+                      https://api.gh.pkgforge.dev/. Empty opts out.
+bootstrap: [-] unknown argument --only
+rc=2

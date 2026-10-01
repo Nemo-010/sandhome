@@ -23,29 +23,59 @@ sandhome_profile_main() {
     return 0
   fi
 
-  # # STOP: INTERACTIVE, NOT LOGIN. A tool that sends commands to a LOGIN shell would
-  # otherwise have its environment changed silently and after the caller's own
-  # setup. `$-` carries `i` only for a shell a person is typing at.
+  # # STOP: THE ENVIRONMENT IS LOADED BEFORE THE INTERACTIVE GUARD, BECAUSE A
+  # NON-INTERACTIVE LOGIN SHELL IS THE HARNESS SHAPE. `bash -lc`, `sh -l -c` and
+  # anything that reads ~/.profile without an interactive `$-` got the
+  # bootstrap's unconditional `PATH=$SANDHOME_EXEC/bin:...` line but never the
+  # exec and home roots, so a launch-mode view resolved to its own copies and
+  # every one of them died with "cannot map this copy back to its payload"
+  # while `doctor` stayed green (issue #131). Measured: on a launch-mode install
+  # `bash -lc 'node --version'` answered exactly that, and the same shell
+  # reported SANDHOME_EXEC unset, which is the whole mechanism in one line.
+  #
+  # Only the environment is loaded. History, the PATH tidy and the WSL move stay
+  # interactive-only below, because those DO change what a person sees and
+  # nothing about a tool call needs them. A harness that reads neither profile
+  # nor rc still uses entry.sh, so the two paths stay independent (issue #122).
+  #
+  # THE READ IS THE SAFE ONE, AND IT APPLIES THE WHOLE FILE. env.sh is the
+  # single source of truth and the dispatcher and entry point already source it;
+  # this fragment used to re-export a hard-coded five-name subset (the roots,
+  # SANDHOME_REPO_DIR, the wanted list and PATH), so every other name env.sh
+  # exports - ASAN_OPTIONS/LSAN_OPTIONS, TMPDIR, XDG_RUNTIME_DIR, the toolchain
+  # roots and the browser caches - was dropped in a login shell while the
+  # toolchain itself still worked through the hook. An ASan build then died
+  # with `LeakSanitizer has encountered a fatal error` even though env.sh sets
+  # detect_leaks=0 (issue #155, reopening #144). Sourcing the file applies
+  # everything the contract says it applies; the read is guarded so a file that
+  # cannot be read changes nothing, and stderr is discarded so a login is never
+  # prefixed with noise.
+  if [ -z "${SANDHOME_HOME:-}" ]; then
+    _shp_envcand=''
+    for _shp_env in "${SANDHOME_HOME:-}/env.sh" \
+                    "$HOME/.local/share/sandhome/env.sh" \
+                    "$HOME/.sandhome/env.sh" \
+                    "${XDG_DATA_HOME:-$HOME/.local/share}/sandhome/env.sh"
+    do
+      [ -n "${_shp_env:-}" ] || continue
+      [ -r "$_shp_env" ] || continue
+      _shp_envcand=$_shp_env
+      break
+    done
+    if [ -n "$_shp_envcand" ]; then
+      # shellcheck source=/dev/null
+      . "$_shp_envcand" 2>/dev/null || true
+      [ -n "${SANDHOME_HOME:-}" ] || SANDHOME_HOME=${_shp_envcand%/env.sh}
+    fi
+  fi
+
+  # # NOTE: INTERACTIVE-ONLY FROM HERE. A tool that sends commands to a LOGIN
+  # shell would have the rest of its environment changed silently and after the
+  # caller's own setup. `$-` carries `i` only for a shell a person is typing at.
   case "$-" in
     *i*) ;;
     *)   return 0 ;;
   esac
-
-  # -- the environment, if a shell has not read it already ---------------------
-  # # NOTE: LOADING env.sh IS WHY THIS FILE IS INSTALLED. It puts the exec view on
-  # PATH and every toolchain fragment into the environment, in one place. The
-  # guard is that the file exists; a login shell that already sourced it has
-  # SANDHOME_HOME set.
-  if [ -z "${SANDHOME_HOME:-}" ] && [ -n "${HOME:-}" ]; then
-    for _shp_env in "$HOME/.local/share/sandhome/env.sh" \
-                    "$HOME/.sandhome/env.sh" \
-                    "${XDG_DATA_HOME:-$HOME/.local/share}/sandhome/env.sh"; do
-      if [ -r "$_shp_env" ]; then
-        . "$_shp_env"
-        break
-      fi
-    done
-  fi
 
   # -- PATH, de-duplicated and nothing else ------------------------------------
   # # NOTE: A login shell inside a login shell runs /etc/profile again, and /etc/profile
@@ -137,6 +167,6 @@ sandhome_profile_main() {
 }
 
 sandhome_profile_main
-unset _shp_env _shp_new _shp_rest _shp_one _shp_release _shp_pwd _shp_root
+unset _shp_env _shp_envcand _shp_envout _shp_new _shp_rest _shp_one _shp_release _shp_pwd _shp_root
 unset -f sandhome_profile_main
 :

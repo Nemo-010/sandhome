@@ -3,9 +3,21 @@
 A portable home for agents that run inside a sealed sandbox: one bootstrap, one
 environment, POSIX `sh` throughout.
 
-**An agent setting up a sandbox should read
-[`skills/sandhome/SKILL.md`](skills/sandhome/SKILL.md) and nothing else.**
-An agent working on this repository should read
+## Paste this to any agent, then give it your task
+
+> Setup your env as per
+> https://raw.githubusercontent.com/talaria0101/sandhome/main/ROUTE.md
+> and then <the task>.
+
+That one instruction is the whole contract: [`ROUTE.md`](ROUTE.md) sets up
+the sandbox, confirms `sandhome doctor` exits 0, and routes any failure to
+the one page that answers it. So the agent stops setting up and starts
+working without asking you anything.
+
+**An agent setting up a sandbox should read [`ROUTE.md`](ROUTE.md) and
+nothing else.** Harnesses that discover skills from a `skills/` directory
+use [`skills/sandhome/SKILL.md`](skills/sandhome/SKILL.md) instead, which
+carries the same fast path. An agent working on this repository should read
 [`AGENTS.md`](AGENTS.md), which routes to the rest.
 
 ## Start working
@@ -16,13 +28,22 @@ sh bootstrap.sh --toolset developer        # from a clone
 curl -fsSL https://raw.githubusercontent.com/talaria0101/sandhome/main/bootstrap.sh \
   | sh -s -- --toolset developer
 
-. "$HOME/.local/share/sandhome/env.sh"     # in this shell
 sandhome doctor                            # exits 0 when every invariant holds
 ```
 
+The bootstrap installs a **global hook** into every `PATH` directory that is
+writable and runs binaries, so a fresh shell knows `sandhome` and the toolchains
+with nothing sourced in front of a command. If the host has no writable,
+exec-capable `PATH` directory, the
+report says `global=none`; then source the entry point beside the home, once per
+shell: `. "${XDG_DATA_HOME:-$HOME/.local/share}/sandhome/entry.sh"`.
+
 Toolsets: `minimal` (jq), `cli` (+ ripgrep, fd), `developer` (+ python, node,
 the default), `languages` and `agent` (both + rust, go). `--with rust` adds one,
-`--without node` drops one; both flags repeat. Exit `0` done, `1` something
+`--without node` drops one; both flags repeat. `--only rust` asks for exactly
+that list with no preset and no auto-detection (it is `--toolset none --with
+rust`); an explicit request never auto-detects, and `--detect` opts back in.
+Exit `0` done, `1` something
 could not be done, `2` could not run at all.
 
 Every flag, variable and command: [`docs/reference.md`](docs/reference.md),
@@ -56,16 +77,17 @@ the four cases the mirror has to get right, are in
 
 | path | what it is |
 | --- | --- |
+| [`ROUTE.md`](ROUTE.md) | **the consumer entry point**: one paste that sets up, checks, and routes. A human pastes its raw URL and the task, and nothing else. |
 | [`AGENTS.md`](AGENTS.md) | orientation for an agent working on this repository |
 | [`skills/sandhome/SKILL.md`](skills/sandhome/SKILL.md) | **the entry point for an agent setting up a sandbox** |
-| [`skills/errandsh/SKILL.md`](skills/errandsh/SKILL.md) | a line discipline for a session with no pty |
+| [`skills/errandsh/SKILL.md`](skills/errandsh/SKILL.md) | a line discipline for a session with no pty, with full-screen programs via a userspace pty |
 | [`skills/sealed-sandbox/SKILL.md`](skills/sealed-sandbox/SKILL.md) | operating inside a cage: no bind, no pty, no passwd |
 | `bootstrap.sh` | the installer. Self-fetching when piped. |
 | `bin/sandhome` | the command. A bootstrap copies it to `$SANDHOME_EXEC/bin`. |
 | `lib/` | the POSIX-sh library: `common`, `detect`, `space`, `fetch`, `env`, `toolchain`, `shim`, `report`, `profile`. |
-| `tools/` | one module per toolchain: `jq`, `ripgrep`, `fd`, `python`, `node`, `rust`, `go`. |
-| `shims/` | `fakepty` (an isatty/termios interposer) and `fakepwd` (a synthetic passwd database). |
-| `shell/errandsh` | a POSIX-sh line discipline for a pty-less SSH session. |
+| `tools/` | one module per toolchain. `sandhome toolchains --json` is the live list; at the time of writing: `bun clang cmake deno emscripten fd gh go jq meson mold ninja node perl pkgconf python qemuuser ripgrep rust shellcheck shfmt yq zig`. `tests/docs.sh` fails when a module exists and this sentence does not name it. |
+| `shims/` | seven `LD_PRELOAD` interposers, each built only when its detector says the machine needs it: `fakepty` (a userspace pty), `fakepwd` (a synthetic passwd database), `antiptrace`, and the headless enumeration shims `fakedrm`, `fakeinput`, `fakexenv`, `fakedisplay`. All of them: [`docs/guide.md` section 5](docs/guide.md). |
+| `shell/errandsh` | a POSIX-sh line discipline for a pty-less SSH session, with `shell/faketty` as the userspace-pty wrapper. |
 | [`docs/reference.md`](docs/reference.md) | **generated**: every command, flag and variable, extracted from the code. |
 | [`docs/architecture.md`](docs/architecture.md) | how the pieces fit and why they are shaped this way. |
 | [`docs/guide.md`](docs/guide.md) | the long form: every option, every failure mode. |
@@ -83,6 +105,13 @@ bootstrap whose job is to install the missing tools cannot require them first.
   every terminal-aware program colourise a *pipe*, which breaks `jq -r` and
   `git`. `SANDHOME_SHIMS=1` turns them on for one shell. The measurement is in
   [`docs/architecture.md`](docs/architecture.md) section 6.
+- **A language runtime cannot run from memory.** `node`, `deno` and `bun` are
+  real copies in the exec view, because `process.execPath` is read by every
+  worker and download helper the runtime spawns, and an anonymous memfd path
+  (`/memfd:sandhome (deleted)`) is gone by the time they read it. `doctor`
+  checks it and reports `toolchain_node_spawn`. A *compiler* is the opposite
+  case and stays a 20KB launcher. See
+  [`docs/architecture.md`](docs/architecture.md) section 1.
 
 ## Tests
 

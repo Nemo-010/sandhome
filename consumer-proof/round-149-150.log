@@ -1,0 +1,147 @@
+# consumer proof for #141-#150 (this branch, rebased on PR #148)
+
+One host, real installs, every check run as a consumer with nothing
+pre-sourced where it matters. Read the command, then the answer: each
+section is what was typed and what the machine printed back.
+
+## The host, because exec permissions differ by sandbox
+
+Linux x86_64, glibc, uid 0. Probed, not assumed:
+
+- `/workspace`: exec=yes, 77GB free (the roomy root)
+- `/tmp`: exec=no (rc=126: a writable mount refusing execve)
+- `/dev/shm`: exec=no
+- `$HOME` (`/state/home`): exec=no
+
+So this sandbox is the split shape with the large root on `/workspace`:
+HOME cannot run files, `/workspace` can and has room. The planner picks
+`/workspace/.sandhome/exec`-style roots on its merits, and `--exec` names
+one explicitly. Proxy egress only (`http_proxy=http://169.254.169.1:40295`);
+hosts outside the proxy fail, which the npm and go-install sections show.
+
+## Setup: fresh bootstrap with an explicit exec root
+
+```sh
+rm -rf /workspace/.consumer && mkdir -p /workspace/.consumer/home /workspace/.consumer/exec
+env -i HOME=/workspace/.consumer/home PATH=/usr/bin:/bin TMPDIR=/workspace/.consumer/tmp \
+  sh bootstrap.sh --toolset minimal --exec /workspace/.consumer/exec
+# failures=0, adopted=jq, memexec=unneeded (the home runs its own files)
+```
+
+```sh
+sandhome space
+# home=/workspace/.consumer/home/.local/share/sandhome home_exec=yes
+# exec=/workspace/.consumer/exec exec_reason=split exec_space=ok exec_ceiling=roomy
+# payloads=none
+sandhome doctor
+# ok home_writable=yes, exec_writable=yes, exec_runs=yes, ... toolchain_jq=yes
+# doctor_failures=0 (rc=0)
+```
+
+## Go: force install, real payload on home, real view on exec, builds
+
+```sh
+sandhome install --force go
+# Downloaded from: https://go.dev/dl/go1.27.1.linux-amd64.tar.gz with curl
+# sha256 matches the value from the published digest
+ls -la toolchains/go/go/bin/go views/go/go/bin/go
+# 17142188 .../toolchains/go/go/bin/go (payload, home)
+# 17142188 .../exec/views/go/go/bin/go (view, exec: a real copy, not a launcher)
+. env.sh && go build -o hello . && ./hello
+# build rc=0, "hello from sandhome go"
+go env GOROOT GOBIN GOCACHE
+# .../exec/views/go/go, .../exec/go-bin, .../exec/cache/go-build
+sandhome doctor | grep -E 'toolchain_go|split_views'
+# ok split_views=ok, ok toolchain_go=yes, doctor_failures=0
+```
+
+## Node: browser caches on exec, hook serves a fresh shell
+
+```sh
+sandhome install node   # v26.10.0, prefix+cache on the exec root
+PUPPETEER_CACHE_DIR=.../exec/puppeteer PLAYWRIGHT_BROWSERS_PATH=.../exec/ms-playwright
+mkdir -p /workspace/.consumer/pathbin   # writable PATH dir on the exec volume
+sandhome global
+# installed the global hook at 1 of 1 directory, verified in a fresh shell
+env -i PATH=.../pathbin:/usr/bin:/bin HOME=... sh -c 'command -v node; node --version'
+# .../pathbin/node, v26.10.0 (nothing sourced)
+```
+
+## #142: installer runs through the hook, next shell needs nothing
+
+```sh
+# NOTE: the first attempt installed cowsay from a SOURCED shell, where
+# $SANDHOME_EXEC/bin shadows the hook, so no link was made. That path still
+# needs one `sandhome global`, as the guide says. Through the hook:
+env -i PATH=.../pathbin:... HOME=... SANDHOME_EXEC=... sh -c 'npm install -g cowthink'
+ls .../pathbin
+# cowsay cowthink go gofmt jq node npm npx sandhome (both CLIs linked on return)
+env -i PATH=.../pathbin:/usr/bin:/bin HOME=... sh -c 'command -v cowsay; cowsay "hook works"'
+# .../pathbin/cowsay, prints the cow (nothing sourced, no manual global)
+```
+
+The npm registry needed the proxy variables passed into `env -i`;
+without them npm answers EAI_AGAIN while curl works. That is the sandbox,
+not the tree.
+
+## #141: gc keeps a real go-install binary, reclaims the cache
+
+```sh
+go install golang.org/x/tools/cmd/stringer@latest   # 8573159 bytes in go-bin
+touch -d '2 hours ago' $SANDHOME_EXEC/go-bin/stringer
+sandhome gc 0
+# removed 0 entries (the CLI survives); a backdated cache blob: removed, 21KB reclaimed
+ls $SANDHOME_EXEC/go-bin/stringer && stringer -help
+# present, runs, rc=0
+sandhome space --largest 8
+# views (sandhome), cache (reclaim), npm-global (sandhome), tmp (reclaim),
+# .sandhome-lib (sandhome), bin (sandhome)
+# tag: reclaim = gc removes this; sandhome = this tree owns it and gc keeps it;
+#      yours = you installed or built it, remove it yourself
+```
+
+## #147: env -i works straight after setup, no repair
+
+```sh
+ls $SANDHOME_EXEC/.sandhome-lib/lib/common.sh   # present
+env -i $SANDHOME_EXEC/bin/sandhome version       # sandhome/1, rc=0
+```
+
+## #145: pty names a terminal; #144: sanitizers keep their output
+
+```sh
+env -u TERM sandhome pty less -F /tmp/f.txt    # prints line1 line2 (was 'unknown')
+env -u TERM sandhome pty sh -c 'printf $TERM'  # TERM=xterm-256color
+# SANDHOME_PTRACE=no, ASAN_OPTIONS=detect_leaks=0 LSAN_OPTIONS=detect_leaks=0 (from env.sh)
+clang -fsanitize=address -g hello.c -o h_asan && ./h_asan
+# hello from C: asan, rc=0
+env -u ASAN_OPTIONS -u LSAN_OPTIONS ./h_asan
+# LeakSanitizer has encountered a fatal error ... does not work under ptrace, rc=1
+```
+
+## #146: qemu guests, one message, archive kept
+
+```sh
+sandhome install qemuuser --extra aarch64
+# toolchain qemuuser: not present; installing ...; Downloaded ... 11.1.1.1 ...
+# no "rebuilding without downloading" / "does not run" contradiction
+ls toolchains/qemuuser/qu.tar.xz   # kept for the next --extra
+sandhome install qemuuser --extra arm   # second guest from the kept bytes
+```
+
+A later `--extra aarch64 --extra arm` run re-resolved the tag while codeberg
+stalled and hung on the 63MB fetch; the kept archive had already been
+deleted on the pin mismatch, which is why the install now records `qu.tag`
+beside the archive, reuses the recorded release without the network, and
+falls back to it when tag resolution fails. The guest set is per-install by
+design (a clean bin each run, so BINS never promises a dropped guest):
+name every wanted guest on one command.
+
+## Failing-before controls (unit, no network)
+
+`tests/regressions-149-150.sh` against the PR #148 tree as filed:
+35 run, 18 failed, 0 skipped. Against this branch: 46 run, 0 failed.
+The qemu reuse clauses against the old module: 4 failed. Full suite on
+this branch: every file green (harness unit space fetch toolchain memexec
+shims docs bootstrap global consumer errandsh-posix regressions-141-147
+regressions-149-150).

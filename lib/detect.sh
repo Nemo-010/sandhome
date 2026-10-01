@@ -45,15 +45,34 @@ sh_detect_provider() {
 
 # OpenBSD, NetBSD and MidnightBSD have no /etc/os-release; the kernel fallback
 # is what keeps their `os:` rows from being dead.
+#
+# # STOP: BOTH LOCATIONS ARE READ, AND /usr/lib IS NOT AN AFTERTHOUGHT. The
+# os-release specification names /etc/os-release as a symlink INTO /usr/lib on
+# every merged-/usr distribution, and /usr/lib/os-release as the real file. The
+# old code read /etc only, so on any image that ships the file WITHOUT the
+# symlink - a container that bind-mounts it, a minimal rootfs, a foreign
+# distribution - `os_id` answered `unknown`, and the first line of every report
+# and every bootstrap was wrong on a machine that had already told us exactly
+# what it was. Measured on the machine these fixes were made on, whose
+# /etc/os-release does not exist and whose /usr/lib/os-release reads ID="void":
+#   sh -c '. ./lib/common.sh; . ./lib/detect.sh; sh_detect_os_id'   ->  unknown
+# /etc is still tried FIRST, because a distribution that overrides the file
+# there is overriding it deliberately.
+#
+# The file is NOT SOURCED. A distribution's os-release is data, and it may
+# carry PATH= or LD_PRELOAD=; sourcing it into the caller's shell would let a
+# file that was only read as a document rewrite the process that read it. Only
+# the one ID= line is extracted, and the quotes come off with parameter
+# expansion rather than with sed, because this tree does not depend on sed for a
+# transformation the shell already does.
 sh_detect_os_id() {
-    if [ -r /etc/os-release ]; then
-        # shellcheck disable=SC1091
-        . /etc/os-release
-        if [ -n "${ID:-}" ]; then
-            printf '%s' "$ID"
-            return 0
-        fi
-    fi
+    for sh_do_file in /etc/os-release /usr/lib/os-release; do
+        [ -r "$sh_do_file" ] || continue
+        sh_do_id=$(sh_do_read_id "$sh_do_file")
+        [ -n "$sh_do_id" ] || continue
+        printf '%s' "$sh_do_id"
+        return 0
+    done
     case "$(uname -s)" in
         FreeBSD)   printf 'freebsd' ;;
         NetBSD)    printf 'netbsd' ;;
@@ -61,6 +80,31 @@ sh_detect_os_id() {
         DragonFly) printf 'dragonfly' ;;
         Darwin)    printf 'darwin' ;;
         *)         printf 'unknown' ;;
+    esac
+}
+
+# sh_do_read_id FILE -> the value of ID= in FILE, or nothing. grep is used when
+# it is present and the line is read with the shell when it is not, because
+# this file is loaded on userlands that carry no grep at all.
+sh_do_read_id() {
+    sh_dri_line=''
+    if sh_have grep; then
+        sh_dri_line=$(grep -m1 '^ID=' "$1" 2>/dev/null) || sh_dri_line=''
+    fi
+    if [ -z "$sh_dri_line" ] && [ -r "$1" ]; then
+        while IFS= read -r sh_dri_raw || [ -n "$sh_dri_raw" ]; do
+            case "$sh_dri_raw" in
+                ID=*) sh_dri_line=$sh_dri_raw; break ;;
+            esac
+        done < "$1"
+    fi
+    case "$sh_dri_line" in
+        ID=\"*\")
+            sh_dri_val=${sh_dri_line#ID=\"}
+            printf '%s' "${sh_dri_val%\"}"
+            ;;
+        ID=*)  printf '%s' "${sh_dri_line#ID=}" ;;
+        *)     printf '' ;;
     esac
 }
 
@@ -142,6 +186,58 @@ sh_detect_pty() {
     printf 'no'
 }
 
+# sh_detect_dri -> yes when a GPU device node answers. Presence is the whole
+# question: fakedrm interposes the enumeration opens a renderer makes, and a
+# machine that has /dev/dri needs no help answering them.
+#
+# # WHY EACH HEADLESS FACT IS A DETECTOR AND NOT AN INLINE `[ -e ]`. The four
+# headless facts were read directly inside sh_shim_need, which made them
+# unforceable, and a need-rule that cannot be asked "what would you answer for
+# facts X" cannot be tested off the running host. Every other fact (pty, passwd,
+# ptrace, bind) was already a detector writing an SH_* variable, and the shim
+# test forces those to build machine shapes. These four join that set so the
+# same table-driven test covers all seven shims and the runner shape that used
+# to fail only in CI becomes reproducible anywhere (issue #121).
+sh_detect_dri() {
+    if [ -e /dev/dri ]; then
+        printf 'yes'
+        return 0
+    fi
+    printf 'no'
+}
+
+# sh_detect_input -> yes when input device nodes answer. /dev/uinput counts:
+# a machine with the uinput interface can create an input device, so fakeinput
+# has nothing to supply.
+sh_detect_input() {
+    if [ -e /dev/input ] || [ -e /dev/uinput ]; then
+        printf 'yes'
+        return 0
+    fi
+    printf 'no'
+}
+
+# sh_detect_xenv -> yes when an X display is named. A set DISPLAY means
+# something already answered the client probe, real or not, and fakexenv is not
+# the one to second-guess it.
+sh_detect_xenv() {
+    if [ -n "${DISPLAY:-}" ]; then
+        printf 'yes'
+        return 0
+    fi
+    printf 'no'
+}
+
+# sh_detect_display -> yes when a Wayland socket is named, the fakedisplay
+# counterpart of sh_detect_xenv.
+sh_detect_display() {
+    if [ -n "${WAYLAND_DISPLAY:-}" ]; then
+        printf 'yes'
+        return 0
+    fi
+    printf 'no'
+}
+
 # sh_detect_passwd -> yes when a passwd database answers. `getent` is absent on
 # some cages; reading /etc/passwd is the fallback. A cage with neither gets no,
 # which is the case fakepwd exists for.
@@ -159,24 +255,208 @@ sh_detect_passwd() {
     printf 'no'
 }
 
+# sh_detect_probe_out SECS CMD... -> run CMD with its stdout in a FILE rather
+# than a command-substitution pipe, bounded by SECS, and answer its first line.
+#
+# # STOP: A PIPE IS THE WRONG CAPTURE FOR A PROBE THAT FORKS. A command
+# substitution waits for EVERY writer of the pipe to close, not merely for CMD
+# to exit. The ptrace probe below forks a child that stops itself; on a host
+# where the attach succeeds (measured: a GitHub ubuntu-latest runner) that child
+# can outlive the parent, keep the write end open, and block the reading shell
+# forever -- CI sat on this for its six-hour limit. A file has no such
+# rendezvous: the caller waits for CMD, the timeout bounds CMD, and a stray
+# descendant can only hold a file nobody is reading. Every probe that spawns
+# externally goes through here.
+sh_detect_probe_out() {
+    sh_dpo_secs=$1
+    shift
+    # REDUNDANCY: SIX DIRS, UNIQUE NAME, ALWAYS CLEANED. /tmp alone fails on
+    # a sandbox where /tmp is read-only or full; each dir is tried in turn
+    # and the name carries both PID and a counter so two concurrent probes
+    # never share a file. A stale file from a killed run is removed before
+    # use and after read, so a second probe never reads the first one's
+    # answer. Falling back to /dev/null (no capture) is the last resort, not
+    # the second choice: it answers empty rather than a wrong line.
+    sh_dpo_file=''
+    sh_dpo_n=0
+    for sh_dpo_dir in ${SH_HOME_TMP:-} ${TMPDIR:-} /tmp ${SH_HOME:-} ${XDG_RUNTIME_DIR:-} /dev/shm; do
+        [ -n "$sh_dpo_dir" ] || continue
+        { [ -d "$sh_dpo_dir" ] && [ -w "$sh_dpo_dir" ]; } || continue
+        sh_dpo_n=$((sh_dpo_n + 1))
+        sh_dpo_file="$sh_dpo_dir/.sandhome-probe.$$.${sh_dpo_n}.out"
+        rm -f "$sh_dpo_file" 2>/dev/null
+        : > "$sh_dpo_file" 2>/dev/null && break
+        sh_dpo_file=''
+    done
+    [ -n "$sh_dpo_file" ] || sh_dpo_file=/dev/null
+    sh_run_bounded "$sh_dpo_secs" "$@" > "$sh_dpo_file" 2>/dev/null
+    sh_dpo_line=''
+    if [ "$sh_dpo_file" != /dev/null ]; then
+        IFS= read -r sh_dpo_line < "$sh_dpo_file" || :
+        rm -f "$sh_dpo_file" 2>/dev/null
+    fi
+    printf '%s' "$sh_dpo_line"
+}
+
+# sh_detect_ptrace -> yes when the ptrace syscall class works here, no when it is
+# denied, unknown when it cannot be probed.
+#
+# # WHY A BOGUS REQUEST IS SENT TOO. A blanket EPERM from ptrace is answered by
+# several different things, and they mean different things for a tracee:
+#   - a seccomp filter refuses the whole syscall class BEFORE the kernel looks at
+#     the request, so even a request number that does not exist answers EPERM;
+#   - YAMA and an LSM answer AFTER argument validation, so a bogus request gets
+#     EIO/ESRCH instead.
+# The distinction decides which shim answers it: a filter cannot be interposed
+# into at all (it runs before libc), but a program that only SELF-CHECKS with
+# PTRACE_TRACEME can still be satisfied by shims/antiptrace.so. Sending the bogus
+# request is what tells the two apart. The method is the one strace-appimage's
+# experiments/10-probe-host.sh uses; this is the same measurement, in the shape
+# sandhome needs it (no compiler on the host, so python3 spawns a child that
+# stops itself).
+sh_detect_ptrace() {
+    if sh_have python3; then
+        _sh_dp=$(sh_detect_probe_out 10 python3 -c 'import os,ctypes,signal,errno
+libc = ctypes.CDLL("libc.so.6", use_errno=True)
+pid = os.fork()
+if pid == 0:
+    # The fork inherits the caller capture; close it BEFORE the stop, so a child
+    # left stopped past our exit can never be why a reader waits.
+    os.close(1)
+    os.close(2)
+    os.kill(os.getpid(), signal.SIGSTOP)
+    os._exit(0)
+os.waitpid(pid, os.WUNTRACED)
+results = []
+for req in (0, 16, 0x4206, 0x9999):
+    ctypes.set_errno(0)
+    target = 0 if req == 0 else pid
+    libc.ptrace(req, target, 0, 0)
+    results.append(ctypes.get_errno())
+# Reap to a real death: a SIGKILL to a tracee is reported as a ptrace stop
+# before the exit status, so a single waitpid would return while the child is
+# still alive and about to be left behind.
+os.kill(pid, signal.SIGKILL)
+while True:
+    wpid, st = os.waitpid(pid, 0)
+    if os.WIFEXITED(st) or os.WIFSIGNALED(st):
+        break
+    os.kill(pid, signal.SIGKILL)
+if all(e == 0 for e in results):
+    print("yes")
+elif all(e == errno.EPERM for e in results):
+    print("no")
+else:
+    print("partial")
+')
+        case "$_sh_dp" in
+            yes|no|partial) printf '%s' "$_sh_dp"; return 0 ;;
+        esac
+    fi
+    # FALLBACK: no python3, but a C compiler answers the same question with
+    # the same rule. The child stops itself; the parent sends TRACEME (request
+    # 0), a real attach (16) and the bogus request (0x9999), and reports
+    # yes/no/partial off errno exactly like the python probe above. A host
+    # with neither gets unknown, and says so rather than guessing.
+    if sh_have cc || sh_have gcc; then
+        _sh_dp_cc=cc
+        sh_have cc || _sh_dp_cc=gcc
+        _sh_dp_dir=${SH_HOME_TMP:-${TMPDIR:-/tmp}}
+        _sh_dp_src="$_sh_dp_dir/.ptrace-probe.$$.c"
+        _sh_dp_bin="$_sh_dp_dir/.ptrace-probe.$$"
+        if cat > "$_sh_dp_src" 2>/dev/null <<'EOF'
+#include <stdio.h>
+#include <unistd.h>
+#include <errno.h>
+#include <signal.h>
+#include <sys/ptrace.h>
+#include <sys/wait.h>
+int main(void){
+    pid_t pid = fork();
+    int st, e0, e1, e2;
+    if (pid < 0) return 2;
+    if (pid == 0) { close(1); close(2); kill(getpid(), SIGSTOP); _exit(0); }
+    if (waitpid(pid, &st, WUNTRACED) < 0) return 2;
+    errno = 0; ptrace((enum __ptrace_request)0, 0, 0, 0); e0 = errno;
+    errno = 0; ptrace((enum __ptrace_request)16, pid, 0, 0); e1 = errno;
+    errno = 0; ptrace((enum __ptrace_request)0x9999, pid, 0, 0); e2 = errno;
+    kill(pid, SIGKILL);
+    while (waitpid(pid, &st, 0) > 0 && !WIFEXITED(st) && !WIFSIGNALED(st)) kill(pid, SIGKILL);
+    if (e0 == 0 && e1 == 0 && e2 == 0) puts("yes");
+    else if (e0 == EPERM && e1 == EPERM && e2 == EPERM) puts("no");
+    else puts("partial");
+    return 0;
+}
+EOF
+        then
+            _sh_dp=$(sh_detect_probe_out 10 sh -c \
+                '"$1" -O2 -o "$2" "$3" 2>/dev/null && "$2" 2>/dev/null' \
+                sh "$_sh_dp_cc" "$_sh_dp_bin" "$_sh_dp_src")
+            rm -f "$_sh_dp_src" "$_sh_dp_bin" 2>/dev/null
+            case "$_sh_dp" in
+                yes|no|partial) printf '%s' "$_sh_dp"; return 0 ;;
+            esac
+            return 1
+        fi
+        rm -f "$_sh_dp_src" "$_sh_dp_bin" 2>/dev/null
+    fi
+    printf 'unknown'
+}
+
 # sh_detect_bind -> yes when a socket can be bound at all. A seccomp profile can
 # deny bind(2) while allowing connect(2), which is the whole reason podssh dials
 # out and never listens.
+#
+# # STOP: TCP IS THE WRONG PROBE, AND IT ANSWERED `no` ON A MACHINE THAT CAN
+# BIND. This asked for AF_INET on 127.0.0.1 and nothing else. Measured here: that
+# bind is refused (EACCES) while AF_UNIX stream and dgram binds both succeed, and
+# AF_UNIX is the transport X11, Wayland, sshd, a dev server and every local
+# socket in the Electrosphere actually use. A `no` from that probe was then read
+# as "nothing here listens", which is false. The probe now reports WHAT binds, so
+# a caller can tell "no sockets at all" from "only TCP is denied".
 sh_detect_bind() {
     if sh_have python3; then
-        if python3 -c 'import socket,sys
-s=socket.socket()
-try:
-    s.bind(("127.0.0.1",0))
-except OSError:
-    sys.exit(1)
-finally:
-    s.close()
-' >/dev/null 2>&1; then
-            printf 'yes'
-            return 0
-        fi
-        printf 'no'
+        _sh_db=$(sh_detect_probe_out 10 python3 -c 'import socket,errno,os,tempfile
+def probe(fam, typ, addr, alt=None):
+    try:
+        s = socket.socket(fam, typ)
+    except OSError:
+        return "nosock"
+    try:
+        s.bind(addr)
+        return "yes"
+    except OSError as e:
+        if alt is not None and e.errno not in (errno.EACCES, errno.EPERM):
+            try:
+                s.close()
+                s = socket.socket(fam, typ)
+                s.bind(alt)
+                try: os.unlink(alt)
+                except OSError: pass
+                return "yes"
+            except OSError as e2:
+                try: os.unlink(alt)
+                except OSError: pass
+                return "denied" if e2.errno in (errno.EACCES, errno.EPERM) else "error"
+        return "denied" if e.errno in (errno.EACCES, errno.EPERM) else "error"
+    finally:
+        s.close()
+tmp = tempfile.gettempdir()
+unix = probe(socket.AF_UNIX, socket.SOCK_STREAM, "\0sandhome-detect-bind", os.path.join(tmp, "sandhome-bind-probe"))
+unixd = probe(socket.AF_UNIX, socket.SOCK_DGRAM, "\0sandhome-detect-bind-d")
+tcp = probe(socket.AF_INET, socket.SOCK_STREAM, ("127.0.0.1", 0))
+if unix == "yes" or unixd == "yes":
+    print("unix" if tcp != "yes" else "yes")
+elif tcp == "yes":
+    print("tcp")
+else:
+    print("no")
+')
+        case "$_sh_db" in
+            yes|unix|tcp) printf '%s' "$_sh_db"; return 0 ;;
+            no)           printf 'no'; return 0 ;;
+        esac
+        printf 'unknown'
         return 0
     fi
     printf 'unknown'
@@ -194,8 +474,15 @@ sh_detect_all() {
     SH_PROVIDER=$(sh_detect_provider)
     SH_PTY=$(sh_detect_pty)
     SH_PASSWD=$(sh_detect_passwd)
+    SH_PTRACE=$(sh_detect_ptrace)
+    SH_BIND=$(sh_detect_bind)
+    SH_DRM=$(sh_detect_dri)
+    SH_INPUT=$(sh_detect_input)
+    SH_XENV=$(sh_detect_xenv)
+    SH_DISPLAY=$(sh_detect_display)
     export SH_OS_ID SH_KERNEL SH_ARCH SH_LIBC SH_WSL SH_PRIVILEGE SH_PROVIDER
-    export SH_PTY SH_PASSWD
+    export SH_PTY SH_PASSWD SH_PTRACE SH_BIND
+    export SH_DRM SH_INPUT SH_XENV SH_DISPLAY
 }
 
 # sh_arch_go -> the GOARCH spelling of this machine.
