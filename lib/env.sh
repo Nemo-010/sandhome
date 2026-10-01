@@ -152,6 +152,31 @@ sh_env_body() {
         printf 'fi\n'
     fi
     printf 'if [ -n "${TMPDIR:-}" ]; then mkdir -p "$TMPDIR" 2>/dev/null || true; fi\n'
+    # # STOP: LEAKSANITIZER NEEDS ptrace, AND THIS CAGE DENIES IT. An
+    # `-fsanitize=address` build compiles and links, then loses every byte of
+    # its own stdout and exits 1 at exit, because LSan stops threads with
+    # ptrace and dies with `LeakSanitizer has encountered a fatal error ...
+    # does not work under ptrace`. The programme's output is lost with it
+    # (stdout is block-buffered and LSan calls _exit on its fatal path), so the
+    # failure reads as "my binary produced nothing" (issue #144). The answer is
+    # `detect_leaks=0`, measured on this tree and the shape dropssh's sanitizer
+    # run settled on; ASan and UBSan keep working. Only written when the
+    # measured ptrace answer says the leak checker cannot work, and written as
+    # a guarded default so a caller who sets ASAN_OPTIONS keeps it.
+    if [ -z "${SH_PTRACE:-}" ]; then
+        SH_PTRACE=$(sh_ptrace_from_file)
+    fi
+    if [ -n "${SH_PTRACE:-}" ]; then
+        printf 'SANDHOME_PTRACE=%s\n' "$(sh_sq_quote "$SH_PTRACE")"
+        printf 'export SANDHOME_PTRACE\n'
+    fi
+    case "${SH_PTRACE:-}" in
+        ''|yes) ;;
+        *)
+            printf 'ASAN_OPTIONS="${ASAN_OPTIONS:-detect_leaks=0}"\n'
+            printf 'LSAN_OPTIONS="${LSAN_OPTIONS:-detect_leaks=0}"\n'
+            printf 'export ASAN_OPTIONS LSAN_OPTIONS\n' ;;
+    esac
     printf 'if [ -d "$SANDHOME_HOME/env.d" ]; then\n'
     printf '  for _sh_env_f in "$SANDHOME_HOME"/env.d/*.sh; do\n'
     printf '    [ -r "$_sh_env_f" ] && . "$_sh_env_f"\n'
@@ -239,6 +264,34 @@ sh_wanted_from_file() {
         esac
     done < "$SH_HOME/env.sh"
     printf '%s' "$sh_wff_out"
+}
+
+# sh_ptrace_from_file -> the ptrace answer recorded in env.sh, or nothing. The
+# bootstrap measures it once; a later install or repair regenerates env.sh
+# without having run the probe, so the recorded value is read back and
+# rewritten rather than dropped. Same shape as sh_wanted_from_file, for the
+# same reason: a fact this process does not hold must not be erased by a
+# routine write.
+sh_ptrace_from_file() {
+    sh_pff_out=''
+    [ -r "$SH_HOME/env.sh" ] || {
+        printf ''
+        return 0
+    }
+    sh_pff_cr=$(printf '\r')
+    while IFS= read -r sh_pff_l || [ -n "$sh_pff_l" ]; do
+        sh_pff_l=${sh_pff_l%"$sh_pff_cr"}
+        case "$sh_pff_l" in
+            SANDHOME_PTRACE=*)
+                sh_pff_out=${sh_pff_l#SANDHOME_PTRACE=}
+                sh_pff_out=${sh_pff_out#\'}
+                sh_pff_out=${sh_pff_out%\'}
+                sh_pff_out=${sh_pff_out#\"}
+                sh_pff_out=${sh_pff_out%\"}
+                ;;
+        esac
+    done < "$SH_HOME/env.sh"
+    printf '%s' "$sh_pff_out"
 }
 
 # sh_wanted_merge NAMES... -> fold NAMES into SH_WANTED_TOOLCHAINS, each once.
@@ -1179,6 +1232,45 @@ _sh_gwd_end
         printf '%s\n' '  printf "sandhome-dispatch loaded=%s exec=%s\n" "$_sandhome_loaded" "${SANDHOME_EXEC:-unset}"'
         printf '%s\n' '  exit 0'
         printf '%s\n' 'fi'
+        cat <<'_sandhome_installer_end'
+# # STOP: A CLI INSTALLED AFTER THE SETUP IS REACHABLE IN THE NEXT FRESH
+# SHELL. The hook's names are a fixed list written by `sandhome global`, so
+# `npm install -g cowsay` left cowsay in npm-global/bin but not in the hook,
+# and a later `cowsay` was "command not found" until the operator remembered
+# to run `sandhome global` (issue #142). When the name is an installer, run it
+# as a CHILD (never exec: there is no "after an exec"), then expose every new
+# executable in the sandbox bins as a hook link beside this script. The four
+# sandboxes are the same ones env.sh prepends; a name already exposed is left
+# alone, and a failure to link never changes the installer's exit status.
+case "$_sandhome_name" in
+  npm|npx|pnpm|yarn|corepack|go|cargo|rustup|uv|uvx|pip|pip3|pipx) _sandhome_install=yes ;;
+  *) _sandhome_install=no ;;
+esac
+if [ "$_sandhome_install" = yes ]; then
+  _sandhome_rc=127
+  _sandhome_ran=no
+  for _sandhome_p in "${SANDHOME_EXEC:-/nonexistent}/bin/$_sandhome_name" "${_sandhome_view:-/nonexistent}/$_sandhome_name"; do
+    [ -x "$_sandhome_p" ] || continue
+    "$_sandhome_p" "$@"
+    _sandhome_rc=$?
+    _sandhome_ran=yes
+    break
+  done
+  if [ "$_sandhome_ran" = yes ] && [ -n "${SANDHOME_EXEC:-}" ]; then
+    for _sandhome_sb in uv-bin npm-global/bin go-bin cargo-install/bin; do
+      [ -d "$SANDHOME_EXEC/$_sandhome_sb" ] || continue
+      for _sandhome_x in "$SANDHOME_EXEC/$_sandhome_sb"/*; do
+        [ -x "$_sandhome_x" ] || continue
+        _sandhome_b=${_sandhome_x##*/}
+        [ -e "${0%/*}/$_sandhome_b" ] && continue
+        ln -sf .sandhome-dispatch "${0%/*}/$_sandhome_b" 2>/dev/null || true
+      done
+    done
+    unset _sandhome_sb _sandhome_x _sandhome_b
+  fi
+  [ "$_sandhome_ran" = yes ] && exit "$_sandhome_rc"
+fi
+_sandhome_installer_end
         printf '%s\n' 'if [ -n "${SANDHOME_EXEC:-}" ] && [ -x "$SANDHOME_EXEC/bin/$_sandhome_name" ]; then'
         printf '%s\n' '  exec "$SANDHOME_EXEC/bin/$_sandhome_name" "$@"'
         printf '%s\n' 'fi'
@@ -1194,7 +1286,14 @@ _sh_gwd_end
         printf '%s\n' '  done'
         printf '%s\n' '  unset _sandhome_sb'
         printf '%s\n' 'fi'
-        printf '%s\n' 'printf "%s\n" "sandhome: $_sandhome_name is not installed; run: sandhome install $_sandhome_name" >&2'
+        # # STOP: THE REMEDY MUST FIT THE NAME. This said `sandhome install
+        # $_sandhome_name` for every name, but the names the hook exposes are
+        # not all toolchains: a `go install`ed CLI whose payload `gc` removed
+        # got told to run `sandhome install stringer`, which answers "unknown
+        # toolchain" and then still rewrote env.sh and the hook before exiting
+        # 1 (issue #141). The message now names both real paths: reinstall the
+        # CLI and refresh the hook, or install the toolchain by name.
+        printf '%s\n' 'printf "%s\n" "sandhome: $_sandhome_name is not installed; run: reinstall the CLI then '\''sandhome global'\'', or, if it is a toolchain, '\''sandhome install $_sandhome_name'\''" >&2'
         printf '%s\n' 'exit 127'
     } > "$sh_gwd_tmp" 2>/dev/null || { rm -f "$sh_gwd_tmp" 2>/dev/null; return 1; }
     chmod 0755 "$sh_gwd_tmp" 2>/dev/null || true

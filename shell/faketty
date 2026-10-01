@@ -22,6 +22,12 @@
 #
 #   SANDHOME_FAKEPTY        the .so to load. Default: found from the home.
 #   SANDHOME_FAKEPTY_SIZE   COLSxROWS. Default: COLUMNSxLINES, then 80x24.
+#   SANDHOME_FAKEPTY_TERM   the TERM to present when TERM is unset or dumb.
+#                           Default: xterm-256color. A userspace pty that
+#                           reports isatty but names no terminal still fails
+#                           every terminfo lookup, so `less` answered
+#                           "'unknown': I need something more specific"
+#                           under it (issue #145).
 #   SANDHOME_FAKEPTY_CRLF   set to 0 to stop \n -> \r\n translation.
 #
 # Exit: the command's status, or 2 when called with no command, or 127 when the
@@ -72,6 +78,20 @@ fi
 if [ -z "${SANDHOME_FAKEPTY_SIZE:-}" ] && [ -n "${COLUMNS:-}" ] && [ -n "${LINES:-}" ]; then
     SANDHOME_FAKEPTY_SIZE="${COLUMNS}x${LINES}"
 fi
+
+# # STOP: A PTY WITH NO TERM IS NOT A TERMINAL TO A TERMINFO PROGRAM. isatty
+# answers yes and the window size answers 80x24, but a caller whose TERM is
+# unset or `dumb` still gets `'unknown': I need something more specific.` from
+# less, because a name a terminal database cannot resolve is the same problem
+# as no terminal at all (issue #145). Only an unusable value is replaced, so a
+# caller who named xterm-256color, screen, tmux or a real terminal keeps it;
+# SANDHOME_FAKEPTY_TERM names the replacement.
+case "${TERM:-}" in
+    ''|dumb|unknown)
+        TERM=${SANDHOME_FAKEPTY_TERM:-xterm-256color}
+        ;;
+esac
+export TERM
 
 case ":${LD_PRELOAD:-}:" in
     *":$shim:"*) ;;

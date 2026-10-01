@@ -130,6 +130,25 @@ tc_qemuuser_probe() {
     sh_have qemu-x86_64 && qemu-x86_64 --version >/dev/null 2>&1
 }
 
+# tc_qemuuser_payload_satisfies -> 1 when the on-disk payload is missing a
+# guest the current request names. sh_toolchain_ensure asks this BEFORE taking
+# the "payload already present; rebuilding the view without downloading" path,
+# because that message is only true when the payload can answer the request.
+# The probe cannot be used here: it needs the promoted view, and the whole
+# question is whether to build that view without a download (issue #146).
+tc_qemuuser_payload_satisfies() {
+    [ -n "${SANDHOME_QEMUUSER_EXTRA:-}" ] || return 0
+    tc_qemuuser_bins_from_disk >/dev/null 2>&1 || true
+    for sh_qps_x in ${SANDHOME_QEMUUSER_EXTRA:-}; do
+        case "$sh_qps_x" in qemu-*) sh_qps_n=$sh_qps_x ;; *) sh_qps_n=qemu-$sh_qps_x ;; esac
+        case " $TC_qemuuser_BINS " in
+            *" bin/$sh_qps_n "*) ;;
+            *) return 1 ;;
+        esac
+    done
+    return 0
+}
+
 # tc_qemuuser_guests -> the guest arches present on disk (aarch64, arm, ...),
 # one per line, or nothing. The host emulator is excluded: it is always
 # present when the probe passes, and listing it as a guest would read as
@@ -253,11 +272,31 @@ tc_qemuuser_install() {
     sh_qu_pin=$(sh_pin_for "https://codeberg.org/$sh_qu_rel" qemuuser)
 
     mkdir -p "$sh_qu_root" 2>/dev/null || return 1
-    # Direct first, mirror second: either serves identical bytes, and the pin
-    # below holds whichever answered, so a fallback never weakens the check.
-    if ! sh_fetch_verified "https://codeberg.org/$sh_qu_rel" "$sh_qu_root/qu.tar.xz" "$sh_qu_pin"; then
-        if ! sh_fetch_verified "https://api.rv.pkgforge.dev/https://codeberg.org/$sh_qu_rel" "$sh_qu_root/qu.tar.xz" "$sh_qu_pin"; then
-            return 1
+    # # STOP: A KEPT ARCHIVE IS REUSED BEFORE THE NETWORK IS TOUCHED. Adding a
+    # guest to an existing payload (`install qemuuser --extra aarch64`) used to
+    # re-download the same 63MB archive, because the install deleted it after
+    # the first extraction: the run printed "rebuilding the view without
+    # downloading" for a view that could not serve the guest, then "downloading
+    # a fresh copy" (issue #146). The archive holds every guest, so keeping it
+    # costs one file on the home side and makes the second run a local extract.
+    # It is verified against the same pin before reuse, so a truncated or
+    # altered file is discarded and fetched again.
+    if [ -f "$sh_qu_root/qu.tar.xz" ]; then
+        sh_qu_kept=$(sh_sha256 "$sh_qu_root/qu.tar.xz" 2>/dev/null)
+        if [ -n "$sh_qu_kept" ] && sh_digest_matches "$sh_qu_kept" "$sh_qu_pin"; then
+            sh_say "reusing the kept qemu-static archive at $sh_qu_root/qu.tar.xz"
+        else
+            rm -f "$sh_qu_root/qu.tar.xz" 2>/dev/null || true
+        fi
+    fi
+    if [ ! -f "$sh_qu_root/qu.tar.xz" ]; then
+        # Direct first, mirror second: either serves identical bytes, and the
+        # pin below holds whichever answered, so a fallback never weakens the
+        # check.
+        if ! sh_fetch_verified "https://codeberg.org/$sh_qu_rel" "$sh_qu_root/qu.tar.xz" "$sh_qu_pin"; then
+            if ! sh_fetch_verified "https://api.rv.pkgforge.dev/https://codeberg.org/$sh_qu_rel" "$sh_qu_root/qu.tar.xz" "$sh_qu_pin"; then
+                return 1
+            fi
         fi
     fi
     if ! tc_qemuuser_extract "$sh_qu_root/qu.tar.xz" "$sh_qu_root"; then
@@ -320,7 +359,9 @@ tc_qemuuser_install() {
         }
     fi
     chmod 0755 "$sh_qu_root/bin/"* 2>/dev/null || true
-    rm -rf "$sh_qu_dir" "$sh_qu_root/qu.tar.xz"
+    # The extracted tree is 280MB and is dropped; qu.tar.xz (63MB) is kept so
+    # the next `--extra` is a local extract rather than a second download.
+    rm -rf "$sh_qu_dir"
     return 0
 }
 

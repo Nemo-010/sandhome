@@ -578,7 +578,16 @@ sh_bootstrap_install_command() {
         sh_fail 'could not install sandhome onto the exec root'
         return 1
     fi
+    # # STOP: THE BOOTSTRAP WRITES THE PRIVATE MIRROR TOO. bin/sandhome's
+    # comment claims the bootstrap mirrors lib/ and bin/ into
+    # $SANDHOME_EXEC/.sandhome-lib, but only install and repair called
+    # sh_exec_mirror_library, so a fresh pipe setup had no mirror and
+    # `env -i <exec>/bin/sandhome` failed while the docs said it works
+    # (issue #147). Mirrored here from the tree in hand; bootstrap re-bakes and
+    # re-mirrors from the durable repo after sh_repo_persist.
+    sh_exec_mirror_library || true
     sh_step "installed $SH_EXEC_BIN/sandhome"
+    sh_step "mirrored the library beside it at $SH_EXEC/.sandhome-lib"
     # # A STABLE ABSOLUTE WAY IN, BECAUSE A NON-LOGIN SHELL HAS NO PATH. The exec
     # bin is on PATH only through ~/.profile, which a login shell reads; an agent
     # harness spawns a non-login shell per tool call, so nothing sources the
@@ -925,6 +934,12 @@ sandhome_bootstrap_main() {
     # tree under /tmp that the reaper, a reboot, or gc removes, after which
     # every `sandhome` call exits 2. See sh_repo_persist in lib/env.sh.
     sh_repo_persist || true
+    # sh_repo_persist repoints SH_REPO_DIR at the durable copy under the home
+    # when it ran from scratch. Re-bake the command and the private mirror from
+    # THERE, so the bake names a tree that survives the /tmp cleanup below
+    # instead of the scratch extraction dir that is about to be removed
+    # (issue #147: the pipe bootstrap baked /tmp/sandhome-bootstrap.*/sandhome-main).
+    sh_exec_install_launchers || true
     sh_env_write
     sh_env_load
     sh_bootstrap_path_line

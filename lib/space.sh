@@ -1659,7 +1659,7 @@ sh_space_gc() {
     # toolchain data rebuilt by `repair`, not caches, and deleting them would
     # break every toolchain to reclaim the root they run from.
     if sh_have find; then
-        for sh_gc_dir in "$SH_EXEC/cache" "$SH_EXEC/tmp" "$SH_EXEC/go-bin"; do
+        for sh_gc_dir in "$SH_EXEC/cache" "$SH_EXEC/tmp"; do
             [ -n "$sh_gc_dir" ] || continue
             [ -d "$sh_gc_dir" ] || continue
             for sh_gc_e in "$sh_gc_dir"/* "$sh_gc_dir"/.[!.]*; do
@@ -1807,14 +1807,13 @@ sh_space_largest() {
         # them would be the wrong advice.
         sh_sl_tag=yours
         case "$sh_sl_e" in
-            "$SH_EXEC"/views|"$SH_EXEC"/views/*|"$SH_EXEC"/cache|"$SH_EXEC"/cache/*|"$SH_EXEC"/staging|"$SH_EXEC"/staging/*|"$SH_EXEC"/tmp|"$SH_EXEC"/tmp/*) sh_sl_tag=sandhome ;;
-            "$SH_EXEC"/npm-global|"$SH_EXEC"/npm-global/*|"$SH_EXEC"/uv-bin|"$SH_EXEC"/uv-bin/*|"$SH_EXEC"/uv-tools|"$SH_EXEC"/uv-tools/*|"$SH_EXEC"/go-bin|"$SH_EXEC"/go-bin/*|"$SH_EXEC"/cargo-install|"$SH_EXEC"/cargo-install/*|"$SH_EXEC"/projects|"$SH_EXEC"/projects/*|"$SH_EXEC"/bin|"$SH_EXEC"/bin/*) sh_sl_tag=sandhome ;;
+            "$SH_EXEC"/views|"$SH_EXEC"/views/*|"$SH_EXEC"/cache|"$SH_EXEC"/cache/*|"$SH_EXEC"/staging|"$SH_EXEC"/staging/*|"$SH_EXEC"/tmp|"$SH_EXEC"/tmp/*|"$SH_EXEC"/bin|"$SH_EXEC"/bin/*) sh_sl_tag=sandhome ;;
         esac
         # Fallback for an SH_EXEC that is unset in a test harness: match the
         # leaf the old way so the tag still answers rather than going silent.
         if [ "$sh_sl_tag" = yours ]; then
             case "${sh_sl_e##*/}" in
-                views|cache|staging|tmp|npm-global|uv-bin|uv-tools|go-bin|cargo-install|projects|bin) sh_sl_tag=sandhome ;;
+                views|cache|staging|tmp|bin) sh_sl_tag=sandhome ;;
             esac
         fi
         printf '%s\t%s\t%s\n' "$sh_sl_k" "$sh_sl_e" "$sh_sl_tag"
@@ -1826,7 +1825,7 @@ sh_space_largest() {
             printf '%sKB\t%s\t(%s)\n' "$sh_sl_k" "$sh_sl_p" "$sh_sl_tag"
         done
     }
-    printf '%s\n' 'tag: sandhome = a cache gc/prune can reclaim; yours = build output you remove when the root drains'
+    printf '%s\n' 'tag: sandhome = this tree owns it (gc reclaims cache/, staging/, tmp/); yours = you installed or built it, remove it yourself'
     return 0
 }
 
