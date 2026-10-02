@@ -171,11 +171,18 @@ t_contains "$r190_exec" 'CTD=none' \
     'an exec-capable project keeps cargo target dir unset, so ./target/debug/<bin> works (#190)'
 # Noexec project: the wrapper must redirect.
 chmod 0555 "$r190/noexec-proj" 2>/dev/null || true
-r190_noexec=$(cd "$r190/noexec-proj" && SANDHOME_EXEC="$r190/exec" \
-    timeout 10 "$r190/exec/bin/cargo" 2>/dev/null)
-chmod 0755 "$r190/noexec-proj" 2>/dev/null || true
-t_contains "$r190_noexec" 'target-noexec-proj' \
-    'a noexec project still gets a target dir under the exec root (#190)'
+if [ -w "$r190/noexec-proj" ]; then
+    # Root can write a 0555 directory, so the probe would run and the clause
+    # would fail while mislabelling the directory noexec. Skip, do not lie.
+    chmod 0755 "$r190/noexec-proj" 2>/dev/null || true
+    t_skip 'cannot make the project directory refuse exec here (running as root); the #190 noexec clause did not run'
+else
+    r190_noexec=$(cd "$r190/noexec-proj" && SANDHOME_EXEC="$r190/exec" \
+        timeout 10 "$r190/exec/bin/cargo" 2>/dev/null)
+    chmod 0755 "$r190/noexec-proj" 2>/dev/null || true
+    t_contains "$r190_noexec" 'target-noexec-proj' \
+        'a noexec project still gets a target dir under the exec root (#190)'
+fi
 
 # The env.sh DEFAULT is probed too: the fragment env.sh writes must not set
 # CARGO_TARGET_DIR on an exec-capable PWD, or the naive cargo path is broken
@@ -248,6 +255,29 @@ env -i HOME="$r192b/home" PATH=/usr/bin:/bin SANDHOME_LOGIN=1 SANDHOME_GLOBAL=0 
         >/dev/null 2>&1
 t_ok "$(grep -q 'sandhome-home/profile.sh' "$r192b/home/.profile" 2>/dev/null && echo 0 || echo 1)" \
     'SANDHOME_LOGIN=1 still installs the login fragment for a named root (#192)'
+
+# =====================================================================  #196
+# A NAMED ROOT STILL INSTALLS THE GLOBAL HOOK, BY DESIGN, AND NOTHING SAID SO.
+# #192 disabled the profile and PATH lines for a --home/--exec run; the hook is
+# independent (tests/global.sh and tests/consumer.sh rely on a named --exec run
+# installing it, and SANDHOME_GLOBAL=install is an explicit ask). But the hook
+# writes .sandhome-dispatch into a directory on the caller's real PATH, bakes
+# the named exec root into it, and REPOINTS a previous working hook at that
+# root - so a throwaway root leaves a dead hook in every new shell. The clause
+# installs the hook into a scratch PATH entry (the behaviour is intended) and
+# requires the run to say so and name --no-global.
+r196=$tmp/r196
+mkdir -p "$r196/home/.local/bin" "$r196/sandhome-home" "$r196/sandhome-exec"
+r196_out=$(env -i HOME="$r196/home" PATH="$r196/home/.local/bin:/usr/bin:/bin" \
+    SANDHOME_REPO_DIR="$ROOT" \
+    sh "$ROOT/bootstrap.sh" --home "$r196/sandhome-home" --exec "$r196/sandhome-exec" \
+        --no-skills --no-shell --no-shims --toolset none 2>&1)
+t_ok "$([ -e "$r196/home/.local/bin/.sandhome-dispatch" ] && echo 0 || echo 1)" \
+    'a named-root run with the hook on installs it, which is intended (#196)'
+case "$r196_out" in
+    *'global hook'*'--no-global'*) t_ok 0 'a named-root run says the global hook points at the named root, and names --no-global (#196)' ;;
+    *) t_ok 1 'a named-root run says the global hook points at the named root, and names --no-global (#196)' ;;
+esac
 
 # =====================================================================  #194
 # agent WAS A BYTE-IDENTICAL ALIAS FOR languages, so choosing an "agent"

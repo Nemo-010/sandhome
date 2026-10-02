@@ -105,14 +105,22 @@ r176_stale="$r176/exec/target-stale"
 # skipped where the directory is not the caller's to chmod (uid 0 or a foreign
 # mount), so a run that cannot stage the condition does not report a false red.
 chmod 0555 "$r176/b/dup" 2>/dev/null || true
-sh176_b=$(cd "$r176/b/dup" && SANDHOME_EXEC="$r176/exec" \
-    CARGO_TARGET_DIR="$r176_stale" SANDHOME_CARGO_TARGET_DEFAULT="$r176_stale" \
-    timeout 10 "$r176/exec/bin/cargo" 2>/dev/null)
-chmod 0755 "$r176/b/dup" 2>/dev/null || true
-case "$sh176_b" in
-    *target-dup*) t_ok 0 'a wrapper in a noexec project re-derives the target dir from the project (#176)' ;;
-    *) t_ok 1 'a wrapper in a noexec project re-derives the target dir from the project (#176)' ;;
-esac
+if [ -w "$r176/b/dup" ]; then
+    # A root user can write a 0555 directory, so the probe would run and this
+    # clause would assert the exec-capable answer while calling it noexec. The
+    # condition cannot be staged here; say so instead of reporting a false red.
+    chmod 0755 "$r176/b/dup" 2>/dev/null || true
+    t_skip 'cannot make the project directory refuse exec here (running as root); the #176 noexec clause did not run'
+else
+    sh176_b=$(cd "$r176/b/dup" && SANDHOME_EXEC="$r176/exec" \
+        CARGO_TARGET_DIR="$r176_stale" SANDHOME_CARGO_TARGET_DEFAULT="$r176_stale" \
+        timeout 10 "$r176/exec/bin/cargo" 2>/dev/null)
+    chmod 0755 "$r176/b/dup" 2>/dev/null || true
+    case "$sh176_b" in
+        *target-dup*) t_ok 0 'a wrapper in a noexec project re-derives the target dir from the project (#176)' ;;
+        *) t_ok 1 'a wrapper in a noexec project re-derives the target dir from the project (#176)' ;;
+    esac
+fi
 # The override rule is the other half: a caller who points cargo somewhere else
 # must keep it, and the recorded default must not be mistaken for a stale value.
 sh176_custom=$(cd "$r176/b/dup" && SANDHOME_EXEC="$r176/exec" \

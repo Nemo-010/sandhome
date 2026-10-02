@@ -828,6 +828,32 @@ for ts_name in minimal cli developer project languages agent; do
     done
 done
 t_is "$ts_bad" '' 'every toolchain in every toolset is named in the guide'
+# # STOP: THE GUIDE'S "DECLARED SUM" COLUMN IS ARITHMETIC, AND NOBODY ADDED IT
+# UP. #194 removed clang/zig/rust/go/cmake/meson from `agent` and wrote 760 for
+# its row; the architecture figures for the tools agent does carry add to 772.
+# A sum nobody recomputes rots exactly like the names above, so this guard adds
+# the architecture table up per toolset and requires the guide's number to be
+# that sum. It is computed here, not compared to a second hand-written table.
+ts_sum_bad=''
+for ts_name in minimal cli developer project languages agent; do
+    ts_line=$(printf '%s\n' "$ts_body" | sed -n "s/^ *$ts_name) *printf '\([^']*\)'.*/\1/p" |
+              tr '\\' ' ')
+    ts_sum=0
+    for ts_tool in $ts_line; do
+        # The trailing \n of the printf string becomes a lone `n` here; it is
+        # not a toolchain and must not be looked up.
+        [ "$ts_tool" = n ] && continue
+        ts_mb=$(sed -n "s/^| $ts_tool | \([0-9][0-9]*\) |.*/\1/p" \
+                    "$ROOT/docs/architecture.md" 2>/dev/null | head -1)
+        [ -n "$ts_mb" ] || continue
+        ts_sum=$((ts_sum + ts_mb))
+    done
+    ts_claim=$(grep -E "^\| .$ts_name. \|" "$ROOT/docs/guide.md" 2>/dev/null |
+               sed -n 's/.*| \([0-9][0-9]*\) |$/\1/p' | head -1)
+    [ -n "$ts_claim" ] || ts_claim=missing
+    [ "$ts_claim" = "$ts_sum" ] || ts_sum_bad="$ts_sum_bad $ts_name:guide=$ts_claim:architecture=$ts_sum"
+done
+t_is "$ts_sum_bad" '' 'the guide toolset sums equal the architecture figures'
 # The reverse: clang is deliberately in no toolset, and the guide must say so
 # rather than let a consumer assume `languages` includes it.
 if grep -q 'FAKEPTY_SIZE' "$ROOT/docs/guide.md" 2>/dev/null; then

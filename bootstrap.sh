@@ -994,6 +994,16 @@ sandhome_bootstrap_main() {
     # a run that names either root is isolated and touches no login file unless
     # the caller also asks for it with SANDHOME_LOGIN=1 (or --login). The
     # default run, and any run with no --home/--exec, is unchanged.
+    #
+    # # STOP: THE GLOBAL HOOK IS A PATH CHANGE TOO, AND IT WAS LEFT ON (issue
+    # #196). Disabling the profile and the PATH line was the whole of the first
+    # fix, but sh_bootstrap_install_global still ran, so a named-root run wrote
+    # .sandhome-dispatch and a baked `sandhome` into the FIRST writable
+    # directory on the caller's real PATH (measured: $HOME/.local/bin), with the
+    # dispatcher carrying the throwaway exec root. Removing the root left a dead
+    # hook in every new shell - the same harm as the dead profile line, one
+    # directory over. A named root is isolated, so the hook is skipped with the
+    # login files unless SANDHOME_LOGIN=1 asks for the whole login change.
     if [ -n "$SH_HOME_ARG" ] || [ -n "$SH_EXEC_ARG" ]; then
         : "${SANDHOME_LOGIN:=0}"
         case "$SANDHOME_LOGIN" in
@@ -1005,6 +1015,28 @@ sandhome_bootstrap_main() {
                 esac
                 SH_PROFILE=none
                 SH_PATH_LINE=none
+                ;;
+        esac
+        # # STOP: THE GLOBAL HOOK IS OUTSIDE THE NAMED ROOT, AND IT IS STILL
+        # INSTALLED (issue #196). The #192 isolation covers the login FILES;
+        # the hook is independent, and tests/global.sh and tests/consumer.sh
+        # rely on a named --exec run installing it (SANDHOME_GLOBAL=install is
+        # also an explicit ask, so it must be honoured). What was missing is a
+        # word: the run writes .sandhome-dispatch into a directory on the
+        # caller's real PATH, bakes the named exec root into it, and REPOINTS a
+        # previous working hook at that root. When the named root is a
+        # throwaway, removing it leaves a dead hook in every new shell - the
+        # same harm as the dead profile line, one directory over - and nothing
+        # in the output says `--no-global` is the way to avoid it. The warning
+        # is the fix; the behaviour stays, because forbidding it would break
+        # the caller who named a persistent root and asked for the hook.
+        case "${SH_GLOBAL:-install}" in
+            none) : ;;
+            *)
+                case "$SANDHOME_LOGIN" in
+                    1|yes|on|true) : ;;
+                    *) sh_say 'named --home/--exec: the global hook is still installed and will point at the named exec root; pass --no-global (or SANDHOME_GLOBAL=none) to leave the caller PATH alone' ;;
+                esac
                 ;;
         esac
     fi
