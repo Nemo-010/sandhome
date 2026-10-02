@@ -47,6 +47,24 @@ sh_regr_lib() {
         _ "$2" 2>/dev/null
 }
 
+# A DEDICATED HELPER, BECAUSE THE AMBIENT EGRESS HAS TO GO BEFORE THE LIBRARY
+# LOADS. env -u around sh_regr_lib would scrub the suite's own environment
+# correctly but the helper passes its snippet as an argument, so the unset
+# would have to live inside the snippet and would then run after the
+# environment was already in place. This runs the same shell with the same
+# pinned roots and with the eight names absent from the start.
+sh_regr_lib_clean() {
+    env -u http_proxy -u https_proxy -u no_proxy -u HTTP_PROXY -u HTTPS_PROXY \
+        -u NO_PROXY -u all_proxy -u ALL_PROXY \
+        SANDHOME_HOME=$1/home SANDHOME_EXEC=$1/exec SH_HOME=$1/home \
+        SH_HOME_TOOLCHAINS=$1/home/toolchains SH_HOME_TMP=$1/home/tmp \
+        SH_HOME_EXEC=no SH_EXEC=$1/exec SH_EXEC_BIN=$1/exec/bin \
+        SH_EXEC_VIEWS=$1/exec/views SH_REPO_DIR=$ROOT SH_LIB_DIR=$ROOT/lib \
+        SH_SELF=test SH_DRY_RUN=0 SH_VIEW_MODE=copy \
+        sh -c 'for m in common detect space env fetch toolchain shim memexec report; do . "$SH_REPO_DIR/lib/$m.sh"; done; eval "$1"' \
+            _ "$2" 2>/dev/null
+}
+
 # sh_rust_fragment -> the real generated env.d/rust.sh for a given root, with a
 # stub tc_rust_ld_fragment so no linker is needed. It is the FILE a shell
 # sources, so the clauses below can hand it to a real shell and ask PATH a
@@ -118,11 +136,23 @@ sh_rust_fragment() {
 r181=$tmp/r181
 mkdir -p "$r181/home/toolchains" "$r181/home/tmp" "$r181/exec/bin" "$r181/exec/views"
 PROXY_IN='http://169.254.169.1:40295'
-sh_regr_lib "$r181" '
-    http_proxy='"$PROXY_IN"' https_proxy='"$PROXY_IN"' no_proxy=169.254.169.1 \
-    HTTP_PROXY='"$PROXY_IN"' HTTPS_PROXY='"$PROXY_IN"' NO_PROXY=169.254.169.1 \
-    sh_env_write >/dev/null && sh_env_write_proxy && printf written
-' >/dev/null 2>&1
+# THE VARIABLES ARE IN THE CHILD'S ENVIRONMENT, NOT ASSIGNED IN ITS SCRIPT. The
+# first version of this clause ran `http_proxy=... sh_env_write` inside the
+# snippet, where the assignment is a shell variable and not an exported one, so
+# the writer's own ${http_proxy:-} read it as unset and recorded nothing. It
+# passed here and failed on the CI runner, which has a proxy of its own in its
+# environment, because here the suite's ambient proxy was the thing that
+# accidentally made it work. The value has to arrive the way a real install
+# delivers it: in the process environment, exported.
+env http_proxy="$PROXY_IN" https_proxy="$PROXY_IN" no_proxy=169.254.169.1 \
+    HTTP_PROXY="$PROXY_IN" HTTPS_PROXY="$PROXY_IN" NO_PROXY=169.254.169.1 \
+    SANDHOME_HOME=$r181/home SANDHOME_EXEC=$r181/exec SH_HOME=$r181/home \
+    SH_HOME_TOOLCHAINS=$r181/home/toolchains SH_HOME_TMP=$r181/home/tmp \
+    SH_HOME_EXEC=no SH_EXEC=$r181/exec SH_EXEC_BIN=$r181/exec/bin \
+    SH_EXEC_VIEWS=$r181/exec/views SH_REPO_DIR=$ROOT SH_LIB_DIR=$ROOT/lib \
+    SH_SELF=test SH_DRY_RUN=0 SH_VIEW_MODE=copy \
+    sh -c 'for m in common detect space env fetch toolchain shim memexec report; do . "$SH_REPO_DIR/lib/$m.sh"; done
+        sh_env_write >/dev/null && sh_env_write_proxy' >/dev/null 2>&1
 t_ok "$([ -r "$r181/home/env.sh" ] && echo 0 || echo 1)" \
     'env.sh is written alongside the egress file (#181)'
 t_ok "$([ -r "$r181/home/proxy.env" ] && echo 0 || echo 1)" \
@@ -161,11 +191,14 @@ t_is "$(env -i PATH="$r181/exec/global:/usr/bin:/bin" node 2>/dev/null)" \
     'the hook applies the egress configuration to the process it dispatches (#181)'
 
 # A machine with no proxy must leave no artefact naming one, or the file
-# becomes a claim about a host that does not exist.
+# becomes a claim about a host that does not exist. The eight names are removed
+# from the child's ENVIRONMENT, not unset inside its script, and the helper
+# that does that is the one that scrubs the whole process - an `env -u` wrapped
+# around sh_regr_lib would scrub correctly and then pass no arguments, so the
+# snippet never ran and the clause passed for the wrong reason.
 r181b=$tmp/r181b
-mkdir -p "$r181b/home" "$r181b/exec/bin"
-env -u http_proxy -u https_proxy -u no_proxy -u HTTP_PROXY -u HTTPS_PROXY -u NO_PROXY -u all_proxy -u ALL_PROXY \
-    sh_regr_lib "$r181b" 'sh_env_write >/dev/null; sh_env_write_proxy; printf done' >/dev/null 2>&1
+mkdir -p "$r181b/home/toolchains" "$r181b/home/tmp" "$r181b/exec/bin"
+sh_regr_lib_clean "$r181b" 'sh_env_write >/dev/null; sh_env_write_proxy; printf done' >/dev/null 2>&1
 t_ok "$([ ! -e "$r181b/home/proxy.env" ] && echo 0 || echo 1)" \
     'a machine with no proxy records no egress file rather than an empty one (#181)'
 
@@ -478,24 +511,15 @@ t_ok "$(grep -q '"egress":"%s"' "$ROOT/lib/report.sh" && echo 0 || echo 1)" \
 r188=$tmp/r188
 mkdir -p "$r188/home/toolchains" "$r188/home/tmp" "$r188/exec/bin"
 printf 'http_proxy=http://9.9.9.9:1\nexport http_proxy\n' > "$r188/home/proxy.env"
-# A DEDICATED HELPER, BECAUSE THE AMBIENT EGRESS HAS TO GO BEFORE THE LIBRARY
-# LOADS. env -u around sh_regr_lib would scrub the suite's own environment
-# correctly but the helper passes its snippet as an argument, so the unset
-# would have to live inside the snippet and would then run after the
-# environment was already in place. This runs the same shell with the same
-# pinned roots and with the eight names absent from the start.
-sh_regr_lib_clean() {
-    env -u http_proxy -u https_proxy -u no_proxy -u HTTP_PROXY -u HTTPS_PROXY \
-        -u NO_PROXY -u all_proxy -u ALL_PROXY \
-        SANDHOME_HOME=$1/home SANDHOME_EXEC=$1/exec SH_HOME=$1/home \
-        SH_HOME_TOOLCHAINS=$1/home/toolchains SH_HOME_TMP=$1/home/tmp \
-        SH_HOME_EXEC=no SH_EXEC=$1/exec SH_EXEC_BIN=$1/exec/bin \
-        SH_EXEC_VIEWS=$1/exec/views SH_REPO_DIR=$ROOT SH_LIB_DIR=$ROOT/lib \
-        SH_SELF=test SH_DRY_RUN=0 SH_VIEW_MODE=copy \
-        sh -c 'for m in common detect space env fetch toolchain shim memexec report; do . "$SH_REPO_DIR/lib/$m.sh"; done; eval "$1"' \
-            _ "$2" 2>/dev/null
-}
-
+r188=$tmp/r188
+mkdir -p "$r188/home/toolchains" "$r188/home/tmp" "$r188/exec/bin"
+printf 'http_proxy=http://9.9.9.9:1\nexport http_proxy\n' > "$r188/home/proxy.env"
+r188=$tmp/r188
+mkdir -p "$r188/home/toolchains" "$r188/home/tmp" "$r188/exec/bin"
+printf 'http_proxy=http://9.9.9.9:1\nexport http_proxy\n' > "$r188/home/proxy.env"
+r188=$tmp/r188
+mkdir -p "$r188/home/toolchains" "$r188/home/tmp" "$r188/exec/bin"
+printf 'http_proxy=http://9.9.9.9:1\nexport http_proxy\n' > "$r188/home/proxy.env"
 r188=$tmp/r188
 mkdir -p "$r188/home/toolchains" "$r188/home/tmp" "$r188/exec/bin"
 printf 'http_proxy=http://9.9.9.9:1\nexport http_proxy\n' > "$r188/home/proxy.env"
