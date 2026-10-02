@@ -249,4 +249,78 @@ env -i HOME="$r192b/home" PATH=/usr/bin:/bin SANDHOME_LOGIN=1 SANDHOME_GLOBAL=0 
 t_ok "$(grep -q 'sandhome-home/profile.sh' "$r192b/home/.profile" 2>/dev/null && echo 0 || echo 1)" \
     'SANDHOME_LOGIN=1 still installs the login fragment for a named root (#192)'
 
+# =====================================================================  #194
+# agent WAS A BYTE-IDENTICAL ALIAS FOR languages, so choosing an "agent"
+# sandbox downloaded the >1GB clang chain. The clause expands both presets from
+# the code and asserts they differ and that agent carries no heavy compiler.
+r194_agent=$(sh -c 'eval "$(sed -n "/^sh_toolset_names() {/,/^}/p" "$1/bootstrap.sh")"; sh_toolset_names agent' \
+    _ "$ROOT" 2>/dev/null)
+r194_lang=$(sh -c 'eval "$(sed -n "/^sh_toolset_names() {/,/^}/p" "$1/bootstrap.sh")"; sh_toolset_names languages' \
+    _ "$ROOT" 2>/dev/null)
+t_ok "$([ "$r194_agent" != "$r194_lang" ] && echo 0 || echo 1)" \
+    'agent is not a byte-identical copy of languages (#194)'
+r194_bad=''
+for r194_heavy in clang zig rust go cmake meson; do
+    case " $r194_agent " in
+        *" $r194_heavy "*) r194_bad="$r194_bad $r194_heavy" ;;
+    esac
+done
+t_is "$r194_bad" '' 'agent carries none of the multi-gigabyte compilers (#194)'
+r194_missing=''
+for r194_light in deno bun yq shellcheck shfmt; do
+    case " $r194_agent " in
+        *" $r194_light "*) : ;;
+        *) r194_missing="$r194_missing $r194_light" ;;
+    esac
+done
+t_is "$r194_missing" '' 'agent carries the runtimes and CLIs it is named for (#194)'
+
+# =====================================================================  #195
+# THE GLOBAL HOOK WAS INSTALLED UNDER $SANDHOME_HOME/toolchains, which is on
+# PATH only after env.sh loads, so a fresh non-login shell could not reach it.
+# The clause asks the skip rule about the exact directory the rust fragment
+# prepends, and about a neutral directory (the control).
+r195=$tmp/r195
+mkdir -p "$r195/home/toolchains/rust/cargo/bin" "$r195/home/plain-bin" "$r195/exec/bin"
+sh -c '
+    . "$1/lib/common.sh"; . "$1/lib/space.sh"; . "$1/lib/env.sh"
+    SH_HOME=$2/home; SH_EXEC=$2/exec; export SH_HOME SH_EXEC
+    sh_global_skip_entry "$SH_HOME/toolchains/rust/cargo/bin" && printf refused || printf taken
+' _ "$ROOT" "$r195" > "$r195/skip" 2>/dev/null
+t_is "$(cat "$r195/skip" 2>/dev/null)" refused \
+    'a toolchain-internal bin under the home is refused as a hook directory (#195)'
+sh -c '
+    . "$1/lib/common.sh"; . "$1/lib/space.sh"; . "$1/lib/env.sh"
+    SH_HOME=$2/home; SH_EXEC=$2/exec; export SH_HOME SH_EXEC
+    sh_global_skip_entry "$SH_HOME/plain-bin" && printf refused || printf taken
+' _ "$ROOT" "$r195" > "$r195/plain" 2>/dev/null
+t_is "$(cat "$r195/plain" 2>/dev/null)" taken \
+    'a neutral directory under the home is still a hook candidate (#195)'
+# And no code path may RECORD a hook under the toolchain store: the bootstrap's
+# post-setup report names the directory it recorded, so the clause builds the
+# report from a real setup and asserts the recorded dir is not under it.
+sh -c '
+    . "$1/lib/common.sh"; . "$1/lib/space.sh"; . "$1/lib/env.sh"
+    SH_HOME=$2/home; SH_EXEC=$2/exec; SH_EXEC_BIN=$2/exec/bin
+    export SH_HOME SH_EXEC SH_EXEC_BIN
+    PATH="$2/home/toolchains/rust/cargo/bin:/usr/bin:/bin"
+    sh_global_choose_dirs 2>/dev/null
+' _ "$ROOT" "$r195" > "$r195/chosen" 2>/dev/null
+t_ok "$(grep -q 'toolchains/rust/cargo/bin' "$r195/chosen" 2>/dev/null && echo 1 || echo 0)" \
+    'the hook chooser never picks a directory under the toolchain store (#195)'
+# The refusal is scoped to THIS tree's home: a `toolchains` directory under a
+# DIFFERENT home is a consumer's own store and is still a hook candidate, so
+# the rule did not become "any path named toolchains is refused".
+mkdir -p "$r195/other-toolchains/bin"
+sh -c '
+    . "$1/lib/common.sh"; . "$1/lib/space.sh"; . "$1/lib/env.sh"
+    SH_HOME=$2/home; SH_EXEC=$2/exec; SH_EXEC_BIN=$2/exec/bin
+    export SH_HOME SH_EXEC SH_EXEC_BIN
+    PATH="$2/other-toolchains/bin:/usr/bin:/bin"
+    sh_global_choose_dirs 2>/dev/null
+' _ "$ROOT" "$r195" > "$r195/other" 2>/dev/null
+t_ok "$(grep -q 'other-toolchains/bin' "$r195/other" 2>/dev/null && echo 0 || echo 1)" \
+    'a toolchains directory under a different home is still a hook candidate (#195)'
+
+
 t_end

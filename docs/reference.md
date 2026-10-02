@@ -211,7 +211,7 @@ usage: sh bootstrap.sh [options]
 | `cli` | jq ripgrep fd |
 | `developer` | jq ripgrep fd python node |
 | `languages` | jq ripgrep fd python node rust go zig deno bun mold clang cmake meson ninja pkgconf perl |
-| `agent` | jq ripgrep fd python node rust go zig deno bun mold clang cmake meson ninja pkgconf perl |
+| `agent` | jq ripgrep fd python node deno bun yq gh shellcheck shfmt qemuuser mold ninja pkgconf perl |
 | `project` | jq ripgrep fd python node go rust clang cmake meson ninja mold pkgconf perl |
 
 ## Environment variables

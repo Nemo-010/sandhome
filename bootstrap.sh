@@ -370,7 +370,20 @@ sh_toolset_names() {
         # drive them. The build tools are small beside the compilers, so they
         # ride with both compiler toolsets as well as with project.
         languages) printf 'jq ripgrep fd python node rust go zig deno bun mold clang cmake meson ninja pkgconf perl\n' ;;
-        agent)     printf 'jq ripgrep fd python node rust go zig deno bun mold clang cmake meson ninja pkgconf perl\n' ;;
+        # agent IS NOT A SYNONYM FOR languages (issue #194). It was written as
+        # the same line, so the name promised a modest step up from developer
+        # and delivered the whole compiler set - including clang, a >1GB
+        # download and ~16GB on the home root - for a caller who never asked to
+        # build C++. An agent at work wants the RUNTIMES and the CLI/analysis
+        # tools it actually runs, not a source-build chain: deno and bun beside
+        # node, yq for structured data, shellcheck and shfmt for the shell it
+        # writes, gh for the forge, and qemu-user for a foreign-arch artifact.
+        # The small build pieces (mold, ninja, pkgconf, perl) ride along so a
+        # configure step still works, but the multi-gigabyte compilers
+        # (rust, go, zig, clang, cmake, meson) are named only by languages,
+        # project, or an explicit --with. A caller who wants the compilers asks
+        # for them, and a caller who asked for agent gets what the name says.
+        agent)     printf 'jq ripgrep fd python node deno bun yq gh shellcheck shfmt qemuuser mold ninja pkgconf perl\n' ;;
         # The union a from-source C/C++ build needs, in one command, so an agent
         # that pasted a CMake or meson project does not hand-assemble the list
         # before the first configure (issue #123). meson pulls python through its

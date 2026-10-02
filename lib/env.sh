@@ -1745,6 +1745,28 @@ sh_global_skip_entry() {
             "$SH_EXEC"/views|"$SH_EXEC"/views/*) return 0 ;;
         esac
     fi
+    # # STOP: A TOOLCHAIN-INTERNAL bin UNDER THE HOME IS THE SAME KIND OF
+    # INDIRECTION (issue #195). The rust fragment prepends
+    # $SANDHOME_HOME/toolchains/rust/cargo/bin ahead of the exec bin, so after
+    # sh_env_load that directory is on PATH, writable and exec-capable and looks
+    # like the best hook candidate on the machine. The hook was written into it
+    # and the report read global=on:<...>/toolchains/rust/cargo/bin, which passes
+    # the report's own probe (it puts the recorded directory on PATH) and serves
+    # NOBODY: a non-login shell with the host PATH cannot reach the directory at
+    # all, so every tool the hook advertised was invisible in exactly the shell
+    # the hook exists for. Measured after a full setup:
+    #   env -i PATH=/usr/local/bin:/usr/bin:/bin sh -c 'command -v deno' -> NOT FOUND
+    # Every module may prepend its own bin under the toolchain root, and the
+    # root is this tree's own store, not a PATH entry a consumer had before
+    # setup, so the whole $SH_HOME/toolchains tree is refused. A neutral
+    # directory under the HOME that this tree did not create is still a
+    # candidate, which is the control that this must not become "everything
+    # under HOME is a skip" (tests/global.sh keeps that case).
+    if [ -n "${SH_HOME:-}" ]; then
+        case "$1" in
+            "$SH_HOME"/toolchains|"$SH_HOME"/toolchains/*) return 0 ;;
+        esac
+    fi
     sh_global_is_sandbox "$1" && return 0
     return 1
 }

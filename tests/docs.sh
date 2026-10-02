@@ -862,13 +862,36 @@ else
 fi
 # clang rides with the build toolsets, and the guide must say so rather than let
 # a consumer assume `languages` is compilers only. The old rule (clang in no
-# toolset) rotted when project shipped it; the new rule is that project,
-# languages and agent all carry the from-source chain, and the guide names it.
-if grep -q 'clang.*project.*languages.*agent\|languages.*clang\|project.*clang' "$ROOT/docs/guide.md" 2>/dev/null; then
+# toolset) rotted when project shipped it. `agent` deliberately does NOT carry
+# clang (issue #194), so the clause names the two toolsets that do.
+if grep -q 'clang.*project.*languages\|languages.*clang\|project.*clang' "$ROOT/docs/guide.md" 2>/dev/null; then
     t_ok 0 'the guide names clang in the build toolsets'
 else
     t_ok 1 'the guide names clang in the build toolsets'
 fi
+# # STOP: agent IS NOT A SYNONYM FOR languages (issue #194). The two presets
+# were the same line, so `--toolset agent` downloaded clang (>1GB) for a caller
+# who never asked to build C++. The clause compares the two expansions FROM THE
+# CODE and asserts agent carries no multi-gigabyte compiler, so the alias cannot
+# return without failing here.
+ts_agent=$(printf '%s\n' "$ts_body" | sed -n "s/^ *agent) *printf '\([^']*\)'.*/\1/p" | tr '\\' ' ')
+ts_lang=$(printf '%s\n' "$ts_body" | sed -n "s/^ *languages) *printf '\([^']*\)'.*/\1/p" | tr '\\' ' ')
+t_ok "$([ "$ts_agent" != "$ts_lang" ] && echo 0 || echo 1)" \
+    'agent is not a byte-identical copy of languages (#194)'
+for ts_heavy in clang zig rust go cmake meson; do
+    case " $ts_agent " in
+        *" $ts_heavy "*) ts_bad="$ts_bad agent-carries-$ts_heavy" ;;
+    esac
+done
+t_is "$ts_bad" '' 'agent carries none of the multi-gigabyte compilers (#194)'
+# And the shell/analysis tools the name promises really are there.
+for ts_light in deno bun yq shellcheck shfmt; do
+    case " $ts_agent " in
+        *" $ts_light "*) : ;;
+        *) ts_bad="$ts_bad agent-missing-$ts_light" ;;
+    esac
+done
+t_is "$ts_bad" '' 'agent carries the runtimes and CLIs it is named for (#194)'
 # # STOP: THE GENERATED errandsh TABLE AND THE HAND-WRITTEN SKILL TABLE MUST
 # AGREE. The reference published `(unset)` for all five errandsh variables
 # because the generator's pattern needed an `=` straight after the name and the

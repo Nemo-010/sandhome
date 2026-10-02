@@ -174,20 +174,23 @@ The six toolsets, and the difference between them is the compilers:
 | `developer` | `jq ripgrep fd python node` | 286 |
 | `project` | `developer` plus `go rust clang cmake meson ninja mold pkgconf perl` | 3766 |
 | `languages` | `developer` plus `rust go zig deno bun mold clang cmake meson ninja pkgconf perl` | 4316 |
-| `agent` | the same as `languages` | 4316 |
+| `agent` | `developer` plus `deno bun yq gh shellcheck shfmt qemuuser mold ninja pkgconf perl` | 760 |
 
 The sums are the declared copy-mode figures added up; launch mode costs less
 per the per-toolchain table in `docs/architecture.md`, which owns every
 figure here. `--dry-run` prices the actual request against the actual root
 before spending anything.
 
-`clang` is in `project`, `languages` and `agent`, and is asked for by name otherwise:
+`clang` is in `project` and `languages`, and is asked for by name otherwise:
 `sandhome install clang` or `bootstrap.sh --with clang`. Its download is above
 1GB and its tree wants ~16GB on the home root; in launch mode its exec view
-is launcher copies, so a small exec root holds it. `cmake`, `meson`, `pkgconf`
-and `perl` ride with the same three toolsets and are folded in by work-tree
-detection (`CMakeLists.txt`, `meson.build`, `configure.ac`) on any toolset, so
-a C/C++ checkout configures without hand-assembling the chain. A toolchain already on
+is launcher copies, so a small exec root holds it. `agent` deliberately does
+NOT carry clang, rust or zig: it is the runtime-and-CLI set an agent uses at
+work, so choosing it never pays for a compiler chain. `cmake`, `meson`,
+`pkgconf` and `perl` ride with `project` and `languages`, and the C/C++ build
+chain is folded in by work-tree detection (`CMakeLists.txt`, `meson.build`,
+`configure.ac`) on any toolset, so a C/C++ checkout configures without
+hand-assembling the chain. A toolchain already on
 `PATH` is adopted, not downloaded; `SANDHOME_FORCE=1` (or a comma list of
 names, or `sandhome install --force NAME`) installs locally regardless.
 
