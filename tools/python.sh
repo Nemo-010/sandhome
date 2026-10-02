@@ -183,6 +183,23 @@ EOF
             break
         fi
     done
+    # # STOP: THE INTERPRETER MUST BE ON THE EXEC BIN, NOT ONLY ON THE FRAGMENT
+    # PATH. A shell that never sourced env.sh is served by the global hook, and
+    # the hook only knows the names present in $SH_EXEC_BIN. The fragment put
+    # $sh_pe_bin on PATH, which such a shell never reads, so python3 was missing
+    # there while doctor and `sandhome toolchains` called python present
+    # (issue #178). The link lives under the module's own bin/, and the promote
+    # sweep keeps it on later installs the same way it keeps uv/uvx.
+    if [ -n "$sh_pe_bin" ]; then
+        sh_pe_rel=${sh_pe_bin#"$sh_pe_view"/}
+        [ "$sh_pe_rel" = "$sh_pe_bin" ] && sh_pe_rel=${sh_pe_bin#"$sh_pe_root"/}
+        for sh_pe_n in python3 python; do
+            [ -x "$sh_pe_bin/$sh_pe_n" ] || continue
+            ln -sfn "../$sh_pe_rel/$sh_pe_n" "$sh_pe_root/bin/$sh_pe_n" 2>/dev/null || true
+            ln -sfn "../$sh_pe_rel/$sh_pe_n" "$sh_pe_view/bin/$sh_pe_n" 2>/dev/null || true
+        done
+        sh_promote_toolchain python bin/uv bin/uvx bin/python3 bin/python >/dev/null 2>&1
+    fi
     mkdir -p "$SH_HOME/cache/uv" 2>/dev/null || true
     # Self-sufficient under `set -u`: see tools/go.sh. Which fragment aborts
     # first depends on host state (uv present or not), so the fix is the binding

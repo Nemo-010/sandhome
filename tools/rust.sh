@@ -215,12 +215,13 @@ sh_toolchain_rust_target_wrapper() {
     [ -x "$sh_rw2_real" ] || return 0
     mkdir -p "$sh_rw2_bin" 2>/dev/null || return 0
     sh_rw2_out=$sh_rw2_bin/cargo
+    sh_rw2_tmp="$sh_rw2_out.tmp.$$"
     sh_rw2_real_q=$(sh_sq_quote "$sh_rw2_real")
     {
         printf '#!/bin/sh\n'
         printf '# written by sandhome: resolve CARGO_TARGET_DIR for the directory\n'
         printf '# cargo is run in, then run the real cargo (issue #167).\n'
-        printf 'if [ -z "${CARGO_TARGET_DIR:-}" ] && [ -n "${SANDHOME_EXEC:-}" ]; then\n'
+        printf 'if [ -n "${SANDHOME_EXEC:-}" ] && { [ -z "${CARGO_TARGET_DIR:-}" ] || [ "${CARGO_TARGET_DIR:-}" = "${SANDHOME_CARGO_TARGET_DEFAULT:-}" ]; }; then\n'
         printf '  _sh_cw_d=$PWD\n'
         printf '  while [ -n "$_sh_cw_d" ] && [ "$_sh_cw_d" != / ] && [ ! -f "$_sh_cw_d/Cargo.toml" ]; do\n'
         printf '    case "$_sh_cw_d" in */*) _sh_cw_d=${_sh_cw_d%%/*} ;; *) _sh_cw_d=/ ;; esac\n'
@@ -261,12 +262,37 @@ sh_toolchain_rust_target_wrapper() {
         printf '  fi\n'
         printf '  CARGO_TARGET_DIR="$SANDHOME_EXEC/target-${_sh_cw_b}"\n'
         printf '  export CARGO_TARGET_DIR\n'
+        printf '  SANDHOME_CARGO_TARGET_DEFAULT=$CARGO_TARGET_DIR\n'
+        printf '  export SANDHOME_CARGO_TARGET_DEFAULT\n'
         printf '  unset _sh_cw_d _sh_cw_b _sh_cw_s _sh_cw_o _sh_cw_r _sh_cw_c _sh_cw_w _sh_cw_t\n'
         printf 'fi\n'
         printf 'exec %s "$@"\n' "$sh_rw2_real_q"
-    } > "$sh_rw2_out" 2>/dev/null || return 0
-    chmod 0755 "$sh_rw2_out" 2>/dev/null || true
+    } > "$sh_rw2_tmp" 2>/dev/null || { rm -f "$sh_rw2_tmp" 2>/dev/null; return 0; }
+    chmod 0755 "$sh_rw2_tmp" 2>/dev/null || true
+    # STOP: rm BEFORE mv, BECAUSE $sh_rw2_out IS A SYMLINK. The promote step
+    # links $SH_EXEC_BIN/cargo onto the view, which links onto the real cargo
+    # in the toolchain; a plain `> "$sh_rw2_out"` follows that chain and
+    # truncates the real cargo, then the wrapper execs the chain that is now
+    # itself and every `cargo` invocation recurses forever. Removing the link
+    # first keeps the payload untouched (issue #175).
+    rm -f "$sh_rw2_out" 2>/dev/null || true
+    mv -f "$sh_rw2_tmp" "$sh_rw2_out" 2>/dev/null || {
+        rm -f "$sh_rw2_tmp" 2>/dev/null
+        sh_warn "could not write the cargo target-dir wrapper into $sh_rw2_out"
+        return 0
+    }
     [ -x "$sh_rw2_out" ] || { rm -f "$sh_rw2_out" 2>/dev/null; return 0; }
+    # A SECOND ENTRY POINT, BECAUSE THE FRAGMENT PUTS THE TOOLCHAIN BIN FIRST.
+    # The rust fragment prepends $sh_re_bin ahead of $SH_EXEC_BIN, so a shell
+    # that sourced env.sh resolved `cargo` straight to the real binary and
+    # never reached this wrapper - #167 stayed live in exactly the login shell
+    # it was measured in (issue #176). The fragment now prepends this
+    # directory first; a symlink keeps one artifact rather than two copies.
+    if [ -n "${SH_EXEC:-}" ]; then
+        mkdir -p "$SH_EXEC/cargo-wrap" 2>/dev/null || true
+        ln -sfn "$sh_rw2_out" "$SH_EXEC/cargo-wrap/cargo" 2>/dev/null || \
+            cp -f "$sh_rw2_out" "$SH_EXEC/cargo-wrap/cargo" 2>/dev/null || true
+    fi
     return 0
 }
 
@@ -301,7 +327,12 @@ sh_rust_target_resolver() {
 #   . /path/to/env.d/rust.sh   # already done by env.sh
 #   sandhome_cargo_target      # then cargo build
 sandhome_cargo_target() {
-    [ -n "${CARGO_TARGET_DIR:-}" ] && return 0
+    # env.sh sets CARGO_TARGET_DIR once at shell start, from the $PWD at that
+    # moment. That value is a DEFAULT, not a caller's choice, so recompute it
+    # per call; a value the caller set themselves is kept (issue #176).
+    if [ -n "${CARGO_TARGET_DIR:-}" ] && [ "${CARGO_TARGET_DIR:-}" != "${SANDHOME_CARGO_TARGET_DEFAULT:-}" ]; then
+        return 0
+    fi
     [ -n "${SANDHOME_EXEC:-}" ] || return 0
     _sh_ctr_d=$PWD
     _sh_ctr_r=$PWD
@@ -393,6 +424,8 @@ sandhome_cargo_target() {
     fi
     CARGO_TARGET_DIR="$SANDHOME_EXEC/target-${_sh_ctr_b}"
     export CARGO_TARGET_DIR
+    SANDHOME_CARGO_TARGET_DEFAULT=$CARGO_TARGET_DIR
+    export SANDHOME_CARGO_TARGET_DEFAULT
     unset _sh_ctr_d _sh_ctr_b _sh_ctr_s _sh_ctr_o _sh_ctr_r _sh_ctr_c _sh_ctr_w _sh_ctr_t
     return 0
 }
@@ -1208,6 +1241,14 @@ esac
 case ":\$PATH:" in
   *":$sh_re_bin:"*) ;;
   *) PATH="$sh_re_bin:\$PATH" ;;
+esac
+# The cargo target-dir wrapper wins over the real cargo. It is a directory of
+# its own because the toolchain bin is prepended above, so a plain
+# $SH_EXEC_BIN/cargo would be shadowed and cargo itself would bypass the
+# wrapper in every sourced shell (issue #176).
+case ":\$PATH:" in
+  *":$SH_EXEC/cargo-wrap:"*) ;;
+  *) PATH="$SH_EXEC/cargo-wrap:\$PATH" ;;
 esac
 export PATH
 $(sh_rust_target_resolver)

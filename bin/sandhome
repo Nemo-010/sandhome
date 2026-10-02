@@ -1092,7 +1092,15 @@ cmd_repair() {
         # is what sh_toolchain_load is for.
         sh_toolchain_load "$sh_rp_name" || continue
         eval "sh_rp_bins=\${TC_${sh_rp_name}_BINS:-}"
-        [ -n "$sh_rp_bins" ] || continue
+        # # STOP: AN EMPTY BIN LIST IS NOT "NO ENV STEP". python declares no bins
+        # because its interpreter lives behind a fragment PATH entry, and its
+        # tc_python_env both promotes uv/uvx and links the interpreter into the
+        # exec bin. The old `[ -n "$sh_rp_bins" ] || continue` skipped that
+        # module on repair, so the links a fresh install made were never
+        # restored and a repaired tree had no python3 on the global hook
+        # (issue #178). The no-arg promote is safe by design (issue #152): it
+        # links nothing and sweeps nothing, so a module that only needs its env
+        # step still gets it.
         # shellcheck disable=SC2086
         if sh_promote_toolchain "$sh_rp_name" $sh_rp_bins; then
             # The module gets its post-promote step, as it does on install:

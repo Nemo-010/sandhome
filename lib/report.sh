@@ -280,6 +280,17 @@ sh_report_json() {
 # shim that is present but was built for the wrong libc is named.
 sh_doctor() {
     sh_doc_fail=0
+    # # STOP: THE READINESS GATE'S SUBPROCESS PROBES NEED A HOME, AND ONLY IT
+    # MAY SET ONE (issue #179). `env -i /tmp/bin/sandhome doctor` ran the deno
+    # self-exec probe with no HOME and failed with "Could not resolve global
+    # Deno cache directory", and npm with "uv_os_homedir returned ENOENT".
+    # The default lives HERE and not in sh_env_load because every command calls
+    # that, and a read-only command must create nothing: setting HOME for
+    # `sandhome report` made its `go version` probe write telemetry under
+    # $SANDHOME_EXEC (measured by tests/space.sh: "sandhome report creates
+    # nothing" went from pass to fail). The gate is the caller that runs the
+    # spawn probes, so the gate is where the scratch HOME belongs.
+    sh_env_scratch_home
     # SH_DOCTOR_JSON=1 collects machine-readable members instead of prose:
     # each check appends "name":"got" to SH_DOCTOR_MEMBERS and each miss
     # appends its name to SH_DOCTOR_FAILED; the tail wraps the object.

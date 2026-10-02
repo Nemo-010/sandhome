@@ -133,7 +133,14 @@ sys.exit(main())')"
     # launcher whose python cannot import the package it names is the same
     # broken-name-on-PATH state issue #172 is about, and finding it at install
     # time is the difference between a warning and a mystery in a build log.
-    if ! "$sh_me_launcher" --version >/dev/null 2>&1; then
+    # STOP: THE LAUNCHER IS TESTED THROUGH `sh`, NOT BY EXEC'ING ITS HOME
+    # PATH (issue #177). The home refuses execve on a split root, so
+    # `"$sh_me_launcher" --version` failed with Permission denied and every
+    # first `sandhome install meson` reported "unpacked but does not answer"
+    # and needed the documented `repair` second command. `sh file` reads the
+    # script and runs it, which is the contract's rule (never test a binary by
+    # its home path) and the same test from a mount that runs the file.
+    if ! sh "$sh_me_launcher" --version >/dev/null 2>&1; then
         sh_warn "meson was unpacked but $sh_me_launcher does not answer --version; re-run 'sandhome repair meson' after the python toolchain is present"
         return 1
     fi

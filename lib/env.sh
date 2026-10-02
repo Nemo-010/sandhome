@@ -136,6 +136,19 @@ sh_env_body() {
             printf 'fi\n' ;;
     esac
     printf 'export PATH\n'
+    # # STOP: A MISSING HOME IS NOT A REASON FOR THE TOOLCHAIN TO DIE
+    # (issue #179). `env -i $SANDHOME_EXEC/bin/sandhome doctor` is documented
+    # to work with no HOME, and it did not: npm's JS dies with
+    # `uv_os_homedir returned ENOENT` and Deno refuses to resolve its global
+    # cache, so two module doctor hooks reported healthy toolchains as broken.
+    # A scratch home on the exec root is writable and runs, and HOME being
+    # unset means there is no real one to shadow, so this yields to any HOME
+    # the caller has.
+    printf 'if [ -z "${HOME:-}" ]; then\n'
+    printf '  HOME="$SANDHOME_EXEC/home"\n'
+    printf '  export HOME\n'
+    printf 'fi\n'
+    printf 'if [ -n "${HOME:-}" ]; then mkdir -p "$HOME" 2>/dev/null || true; fi\n'
     # XDG_RUNTIME_DIR first: every headless GL/EGL/Wayland/pipewire tool
     # errors when it is unset, and the setup knows exactly where writable
     # scratch is (issue #95). Set only when no valid one exists, so an
@@ -319,6 +332,14 @@ sh_env_body() {
     printf '  fi\n'
     printf '  CARGO_TARGET_DIR="$SANDHOME_EXEC/target-${_sh_ctd}"\n'
     printf '  export CARGO_TARGET_DIR\n'
+    # STOP: THE ENV.SH VALUE IS A DEFAULT, NOT A CALLER'S CHOICE (issue #176).
+    # The cargo wrapper recomputes the project dir per invocation; it has to be
+    # able to tell this value (derived from the $PWD at shell start, and stale
+    # the moment the shell cds) from one an operator set on purpose. The marker
+    # is the value env.sh wrote, so the wrapper overrides exactly that and
+    # yields to anything else.
+    printf '  SANDHOME_CARGO_TARGET_DEFAULT=$CARGO_TARGET_DIR\n'
+    printf '  export SANDHOME_CARGO_TARGET_DEFAULT\n'
     printf '  unset _sh_ctd_p _sh_ctd_d _sh_ctd_s _sh_ctd_o _sh_ctd_r _sh_ctd_c _sh_ctd_w _sh_ctd_t _sh_ctd_k _sh_ctd_l\n'
     printf '  unset _sh_ctd\n'
     printf 'fi\n'
@@ -1037,6 +1058,36 @@ sh_exec_install_launchers() {
     done
     unset sh_eil_rel sh_eil_src sh_eil_dst
     sh_exec_mirror_library
+    return 0
+}
+
+# sh_env_scratch_home -> give a HOME-less process the same scratch HOME a
+# sourced shell gets from env.sh.
+#
+# # STOP: AN IN-PROCESS COMMAND MUST SEE THE SAME HOME A SOURCED SHELL DOES
+# (issue #179). env.sh sets one when the caller has none, but doctor and the
+# other commands that call sh_env_load never source it, so
+#   env -i /tmp/bin/sandhome doctor
+# ran the deno self-exec probe with no HOME and failed with "Could not resolve
+# global Deno cache directory", and node's npm probe failed with
+# "uv_os_homedir returned ENOENT", while both passed in a shell. A subprocess
+# probe inherits this process's environment, so the default belongs here too.
+#
+# # STOP: THE VARIABLE IS SET AND THE DIRECTORY IS NOT CREATED, BECAUSE A
+# READ-ONLY COMMAND MUST CREATE NOTHING. `sandhome report` and its siblings
+# promise to touch no root when they only answer a question, and a `mkdir -p`
+# for HOME/TMPDIR here made them create $SANDHOME_EXEC on the way to printing
+# (measured by tests/space.sh: "sandhome report creates nothing" went from pass
+# to fail). The probes that need the directory make it themselves - deno
+# creates the cache root under HOME on first use - so setting the variable is
+# the whole of the fix.
+sh_env_scratch_home() {
+    sh_esh_exec=${SANDHOME_EXEC:-${SH_EXEC:-}}
+    [ -n "$sh_esh_exec" ] || return 0
+    if [ -z "${HOME:-}" ]; then
+        HOME="$sh_esh_exec/home"
+        export HOME
+    fi
     return 0
 }
 
