@@ -57,6 +57,48 @@ sh_env_body() {
     printf '  *":$SANDHOME_EXEC/bin:"*) ;;\n'
     printf '  *) PATH="$SANDHOME_EXEC/bin:$PATH" ;;\n'
     printf 'esac\n'
+    # # STOP: A DIRECTORY THIS TREE PUTS ON PATH IS MARKED, AND A MARKED
+    # DIRECTORY CANNOT HOST THE GLOBAL HOOK (issues #184, #185). The hook is
+    # what serves a shell that sourced nothing, so a hook directory is only
+    # useful to a shell that ALREADY has it on PATH. A directory that only
+    # appears on PATH after env.sh is read cannot do that job, and taking one
+    # is worse than useless: the global hook installer reads this shell's PATH
+    # after calling sh_env_load, so a directory a fragment has just prepended
+    # looks like the best writable candidate on the machine and the hook is
+    # written into it. It then serves nobody, because the next session does
+    # not have it on PATH.
+    #
+    # That is measured, not hypothetical. PR #180 added $SANDHOME_EXEC/cargo-wrap
+    # and the rust fragment prepends it; on the next run the hook was installed
+    # into it ("global=on:/workspace/sandexec/cargo-wrap"), every tool the hook
+    # advertises there became invisible to the next fresh shell, and the
+    # fragment's own "already on PATH" guard then stopped prepending, so the
+    # real cargo shadowed the wrapper and two same-basename crates shared one
+    # target dir again.
+    #
+    # A MARKER FILE PER DIRECTORY rather than another name in this list,
+    # because the list is exactly what went wrong: a directory created after
+    # the list was written was taken by mistake. Each directory this tree puts
+    # on PATH is marked inside itself, where the prepend that puts it there is
+    # written, and this function reads the mark off the directory. A directory
+    # this tree invents tomorrow is refused without anybody remembering to
+    # add it, and a neutral directory under the exec root that this tree did
+    # not create is still a candidate. The installer reads it from disk rather
+    # than from a list, which is the same rule sh_global_hook_names already
+    # follows for the same reason (issue #138): both change without this tree
+    # running.
+    #
+    # Measured: PR #180 added $SANDHOME_EXEC/cargo-wrap, the rust fragment
+    # prepends it, and the hook was installed into it on the next run
+    # ("global=on:/workspace/sandexec/cargo-wrap"). Every tool the hook
+    # advertises there then became invisible to the next fresh shell, and the
+    # fragment's own "already on PATH" guard stopped prepending, so the real
+    # cargo shadowed the wrapper. (Issues #184, #185.)
+    printf 'if [ -d "$SANDHOME_EXEC" ] && [ ! -e "$SANDHOME_EXEC/bin/.sandhome-on-path" ]; then\n'
+    printf '  if ( umask 022; : > "$SANDHOME_EXEC/bin/.sandhome-on-path" ) 2>/dev/null; then :; else\n'
+    printf '    printf "%%s\\n" "$SANDHOME_EXEC/bin" >> "$SANDHOME_HOME/on-path.dirs" 2>/dev/null || true\n'
+    printf '  fi\n'
+    printf 'fi\n'
     # # NOTE: THE CHECKOUT'S bin IS NOT ON PATH, AND ITS COPY IS. `sandhome` is the
     # command every other line in every document tells a caller to run, and it
     # lives in the checkout - which is frequently on a root that refuses
@@ -136,6 +178,45 @@ sh_env_body() {
             printf 'fi\n' ;;
     esac
     printf 'export PATH\n'
+    # # STOP: THE PROXY CONFIGURATION THE INSTALLING SHELL HAD IS A PROPERTY
+    # OF THIS MACHINE, SO IT IS WRITTEN DOWN AND RE-APPLIED (issue #181).
+    #
+    # A sandbox that reaches the network only through a proxy named in the
+    # environment loses the network the moment the environment is scrubbed, and
+    # every form this project documents scrubs it: `env -i
+    # $SANDHOME_EXEC/bin/sandhome doctor`, `sh -c 'eval "$(sandhome env)"'`, a
+    # shell with no PATH at all sourcing entry.sh, and above all the global
+    # hook, which exists precisely to serve a shell that sourced nothing. The
+    # hook loads env.sh for the process it runs, so a tool invoked by name in a
+    # fresh shell got the whole environment except the one thing that made the
+    # network reachable.
+    #
+    # Measured on a host whose only egress is http://169.254.169.1:40295 with
+    # direct UDP to its resolvers refused, from a fresh hook-only shell:
+    #   curl  https://nodejs.org/dist/index.json        -> 000
+    #   npm   install left-pad   -> getaddrinfo EAI_AGAIN registry.npmjs.org
+    #   pip   install requests  -> "from versions: none"
+    #   go    install .../@latest -> "operation not permitted" on the resolver
+    # The same four commands with the variables carried through all succeed,
+    # which is what isolates the scrub as the cause rather than the registries.
+    # Worse, the setup run the same way reported "this sandbox has no working
+    # resolver" and sent the reader to SANDHOME_DOH_URL, which cannot help on
+    # a host whose refusal is a policy on direct UDP.
+    #
+    # Both halves of curl's rule are recorded, because a client reads either:
+    # the lowercase names for curl and git, the uppercase names for wget and
+    # everything written against them. Each is written as a guarded assignment,
+    # so a shell that already has one keeps its own, exactly like
+    # XDG_RUNTIME_DIR above.
+    for sh_ep_v in http_proxy https_proxy no_proxy HTTP_PROXY HTTPS_PROXY NO_PROXY all_proxy ALL_PROXY; do
+        eval "sh_ep_val=\${$sh_ep_v:-}"
+        [ -n "$sh_ep_val" ] || continue
+        printf 'if [ -z "${%s:-}" ]; then\n' "$sh_ep_v"
+        printf '  %s=%s\n' "$sh_ep_v" "$(sh_sq_quote "$sh_ep_val")"
+        printf '  export %s\n' "$sh_ep_v"
+        printf 'fi\n'
+    done
+    unset sh_ep_v sh_ep_val
     # # STOP: A MISSING HOME IS NOT A REASON FOR THE TOOLCHAIN TO DIE
     # (issue #179). `env -i $SANDHOME_EXEC/bin/sandhome doctor` is documented
     # to work with no HOME, and it did not: npm's JS dies with
@@ -581,6 +662,100 @@ sh_wanted_drop() {
     export SH_WANTED_TOOLCHAINS SH_WANTED_REPLACE
 }
 
+# sh_env_mark_onpath DIR -> mark DIR as a directory this tree put on PATH.
+#
+# A directory that only reaches PATH because a fragment or env.sh put it there
+# cannot serve a shell that has not read the environment, so the global hook
+# must not be installed into it (issue #185). The mark lives inside the
+# directory and is written here, at the point the directory joins PATH, so the
+# two cannot drift: a new directory is marked by construction rather than by
+# somebody remembering to add a name to a list.
+#
+# The mark is a file, not a directory entry or a symlink, so nothing resolves
+# through it, `sh_promote_tree` has nothing to mirror, and a read-only
+# directory is a no-op rather than a failure. A toolchain view is never marked
+# by this function; the view is refused by sh_global_skip_entry by its own path
+# pattern, and marking a view would put a file inside a tree the promote step
+# mirrors.
+sh_env_mark_onpath() {
+    [ -n "${1:-}" ] || return 0
+    case "$1" in
+        */*) ;;
+        *) return 0 ;;
+    esac
+    [ -d "$1" ] || return 0
+    if [ -n "${SH_EXEC:-}" ]; then
+        case "$1" in
+            "$SH_EXEC"/views|"$SH_EXEC"/views/*) return 0 ;;
+        esac
+    fi
+    if [ -e "$1/.sandhome-on-path" ]; then
+        return 0
+    fi
+    if ( umask 022; : > "$1/.sandhome-on-path" ) 2>/dev/null; then
+        return 0
+    fi
+    # # STOP: A SECOND RECORD, BESIDE THE MARK, BECAUSE A MARK CANNOT ALWAYS BE
+    # WRITTEN. A read-only exec root refuses the file, and a directory this tree
+    # put on PATH that is then taken as a hook directory is the whole of issue
+    # #185. The home is writable on every host this tree supports, because
+    # env.sh itself lives there, so the same list is appended there and read back
+    # by sh_global_is_onpath_dir. Two records rather than one because the two
+    # failure modes are different: the mark is fast and needs no read, the list
+    # works when the directory cannot be written at all. (Issue #185.)
+    [ -n "${SH_HOME:-}" ] || return 0
+    [ -d "$SH_HOME" ] || return 0
+    while IFS= read -r sh_em_l || [ -n "$sh_em_l" ]; do
+        [ "$sh_em_l" = "$1" ] && return 0
+    done < "$SH_HOME/on-path.dirs" 2>/dev/null
+    printf '%s\n' "$1" >> "$SH_HOME/on-path.dirs" 2>/dev/null || true
+    return 0
+}
+
+# sh_env_write_proxy -> write $SH_HOME/proxy.env, the egress variables this
+# machine was reached through, and remove the file when there are none.
+#
+# ONE FILE, READ BY TWO CONSUMERS. env.sh inlines the values (so a sourced
+# shell has them) and the global hook dispatcher sources this file (so the
+# process it dispatches has them). Both are written from the same block in
+# sh_env_body, and this file is generated from the same variable list, so the
+# two cannot disagree about what the machine had.
+#
+# The file is REMOVED when nothing is set, rather than written empty, so a
+# machine that genuinely has no proxy leaves no artefact naming one, and a
+# machine whose proxy went away stops exporting it on the next install.
+# (Issue #181.)
+sh_env_write_proxy() {
+    [ -n "${SH_HOME:-}" ] || return 0
+    sh_ewp_tmp="$SH_HOME/proxy.env.tmp.$$"
+    sh_ewp_n=0
+    {
+        printf '%s\n' '# sandhome egress configuration. Generated; refresh with any'
+        printf '%s\n' '# install or repair. Sourced by env.sh consumers and by the'
+        printf '%s\n' '# global hook dispatcher, because a sandbox that reaches the'
+        printf '%s\n' '# network through a proxy loses it the moment the environment'
+        printf '%s\n' '# is scrubbed, and every documented cold path scrubs (issue #181).'
+        for sh_ewp_v in http_proxy https_proxy no_proxy HTTP_PROXY HTTPS_PROXY NO_PROXY all_proxy ALL_PROXY; do
+            eval "sh_ewp_val=\${$sh_ewp_v:-}"
+            [ -n "$sh_ewp_val" ] || continue
+            printf '%s=%s\n' "$sh_ewp_v" "$(sh_sq_quote "$sh_ewp_val")"
+            printf 'export %s\n' "$sh_ewp_v"
+            sh_ewp_n=$((sh_ewp_n + 1))
+        done
+        printf 'SANDHOME_PROXY_VARS=%s\n' "$sh_ewp_n"
+    } > "$sh_ewp_tmp" 2>/dev/null || { rm -f "$sh_ewp_tmp" 2>/dev/null; return 0; }
+    if [ "$sh_ewp_n" = 0 ]; then
+        rm -f "$sh_ewp_tmp" 2>/dev/null || true
+        rm -f "$SH_HOME/proxy.env" 2>/dev/null || true
+        return 0
+    fi
+    mv -f "$sh_ewp_tmp" "$SH_HOME/proxy.env" 2>/dev/null || {
+        rm -f "$sh_ewp_tmp" 2>/dev/null
+        return 0
+    }
+    return 0
+}
+
 # sh_env_write -> write $SH_HOME/env.sh.
 sh_env_write() {
     if [ "$SH_DRY_RUN" = 1 ]; then
@@ -603,6 +778,7 @@ sh_env_write() {
     sh_ew_tmp="$SH_HOME/env.sh.tmp.$$"
     sh_env_body > "$sh_ew_tmp" || return 1
     mv "$sh_ew_tmp" "$SH_HOME/env.sh" || return 1
+    sh_env_write_proxy || true
     # The exec root carries a pointer back to the home beside the installed
     # command, so a copy with no inherited environment (or one whose baked home
     # is stale) can still find env.sh and the recorded exec root. Best effort:
@@ -1409,6 +1585,60 @@ sh_global_sandbox_names() {
     return 0
 }
 
+# sh_global_is_onpath_dir DIR -> 0 when DIR is one this tree put on PATH, so a
+# shell that sourced nothing cannot be served from it and the hook must not be
+# written there (issue #185).
+#
+# THE MARK IS THE DIRECTORY, NOT THE ROOT. A first attempt marked the exec root
+# and read the mark as "any child of it", which refused every neutral directory
+# under the exec root, and tests/global.sh keeps $SH_EXEC/plain-bin a candidate
+# for exactly this reason: a hook there is the only thing that can serve a
+# shell that has not read the environment. So the mark is a marker FILE INSIDE
+# each directory that goes on PATH, named by the directory itself, and the
+# test is for that file and not for the parent.
+#
+# THE MARKER IS A LIST, NOT A FLAG. A single flag at the root would again mean
+# a list maintained by hand, which is what went wrong before: $SANDHOME_EXEC/
+# cargo-wrap was created after the skip list was written and was taken by
+# mistake. The list is written next to the prepend that puts the directory on
+# PATH, so a directory this tree invents is marked by construction, and
+# sh_env_mark_onpath is the one function that writes one, so the writer and the
+# reader cannot disagree.
+#
+# The reader is given the list rather than asked to re-derive it, because the
+# same reasoning sh_global_hook_names already follows (issue #138): both change
+# without this tree running, and a record is only as current as the last run.
+sh_global_is_onpath_dir() {
+    [ -n "$1" ] || return 1
+    case "$1" in
+        */*) ;;
+        *) return 1 ;;
+    esac
+    [ -e "$1/.sandhome-on-path" ] && return 0
+    # # STOP: A DIRECTORY THE TREE CANNOT MARK IS STILL REFUSED, AND THE MARK
+    # IS NOT THE ONLY RECORD. A read-only or otherwise unwritable exec root
+    # cannot take the marker file, and a directory this tree put on PATH that
+    # then becomes a hook candidate is the defect #185 is about, so a mark that
+    # could not be written has to leave a trace somewhere writable. The roots
+    # themselves are refused by name two functions up, and the exec bin is one
+    # of them, so the common case is already safe; this covers a directory
+    # under the exec root that is NOT one of the named ones, which is exactly
+    # the shape that broke.
+    sh_gpd_root=${1%/*}
+    case "$sh_gpd_root" in
+        ''|.) sh_gpd_root=$1 ;;
+    esac
+    case "$sh_gpd_root" in
+        "$SH_EXEC"|"$SH_EXEC"/*) ;;
+        *) return 1 ;;
+    esac
+    [ -r "$SH_HOME/on-path.dirs" ] || return 1
+    while IFS= read -r sh_gpd_l || [ -n "$sh_gpd_l" ]; do
+        [ "$sh_gpd_l" = "$1" ] && return 0
+    done < "$SH_HOME/on-path.dirs" 2>/dev/null
+    return 1
+}
+
 # sh_global_skip_entry DIR -> 0 when DIR must never be taken as a hook
 # candidate: the view itself (a hook inside it would shadow the binary with
 # itself), the exec root (the hook belongs in `global/`, not at the top), the
@@ -1416,6 +1646,7 @@ sh_global_sandbox_names() {
 # on every name), and every sandbox (issue #138, sh_global_is_sandbox).
 sh_global_skip_entry() {
     [ -n "$1" ] || return 0
+    sh_global_is_onpath_dir "$1" && return 0
     if [ -n "${SH_EXEC_BIN:-}" ]; then
         case "$1" in
             "$SH_EXEC_BIN"|"$SH_EXEC_BIN"/*) return 0 ;;
@@ -1582,6 +1813,25 @@ sh_global_write_dispatch() {
         printf '%s\n' 'if [ -r "$_sandhome_home/env.sh" ]; then'
         printf '%s\n' '  . "$_sandhome_home/env.sh"'
         printf '%s\n' '  _sandhome_loaded=yes'
+        printf '%s\n' 'fi'
+        # # STOP: THE EGRESS VARIABLES ARE RE-APPLIED HERE, NOT ONLY IN env.SH
+        # (issue #181). env.sh records the proxy configuration the installing
+        # shell had, which covers every tree installed after this change. It
+        # does not cover a tree installed before it, and the dispatcher is
+        # rewritten on every install and repair anyway, so the same block is
+        # emitted here and reads the same file. Two paths, one value, no drift:
+        # the dispatcher sources env.sh first, so these are the values env.sh
+        # decided on, not a second opinion.
+        #
+        # The reason it is not enough to rely on env.sh alone is the shape of
+        # the hook: it loads the environment for the PROCESS it dispatches, and
+        # a child cannot change its parent, so a shell that typed `npm install`
+        # keeps an environment with no route out no matter what env.sh says.
+        # Sourcing env.sh inside the dispatcher is what puts the variables in
+        # that process. A fresh hook-only shell is the primary path this project
+        # promises, and on a proxy-only host it reached no registry at all.
+        printf '%s\n' 'if [ -r "$_sandhome_home/proxy.env" ]; then'
+        printf '%s\n' '  . "$_sandhome_home/proxy.env"'
         printf '%s\n' 'fi'
         printf '%s\n' '# The toolchain sandbox bins, so a CLI installed after the setup is'
         printf '%s\n' '# reachable from a shell that sourced nothing. Same order as env.sh.'

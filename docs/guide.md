@@ -232,8 +232,7 @@ what was there before, then verifies the result: every recorded directory is
 run through a fresh `env -i` shell that has to print its marker back.
 `sandhome report` prints `global=on:<dir>` when a recorded directory answers
 that shell, `global=stale:<dir>` when one was recorded and no longer does
-(`doctor` fails on it and names the repair),
-`global=inside-exec-root:<dir>` when the hook was written into a directory this
+(`doctor` fails on it and names the repair),`global=inside-exec-root:<dir>` when the hook was written into a directory this
 tree uses as indirection (`$SANDHOME_EXEC/views/...` or the exec `bin`), which
 `doctor` fails too - such a directory is on `PATH` only because `env.sh` put it
 there, so a hook in it shadows that view's own tools with another view's names
@@ -265,6 +264,54 @@ view's names into it (measured: `node`, `npm`, `npx` into the python view,
 clashing with `uv`/`uvx`, so a sourced shell answered `command -v node` from the
 python view). A directory on the exec root that this tree did **not** make is
 still an ordinary candidate (issues #138, #149).
+
+**A directory this tree PUT on PATH cannot be a hook directory, and the rule is
+a mark, not a list.** `sh_global_skip_entry` refuses `$SANDHOME_EXEC/bin`,
+`$SANDHOME_EXEC/global` and `$SANDHOME_EXEC/views/...` by name, and that list
+is what let a defect through: the rust module added `$SANDHOME_EXEC/cargo-wrap`
+and the rust fragment prepends it, and because the install and repair runs call
+`sh_env_load` before `sh_global_install`, that directory was on `PATH`,
+writable and exec-capable by the time the hook was planned, so the hook was
+written into it and `report` printed `global=on:/workspace/sandexec/cargo-wrap`.
+It served nobody, because the next session does not have it on `PATH`. It also
+disabled the cargo target-dir wrapper, because the fragment's prepend is
+guarded on the directory not already being on `PATH` (issue #176).
+
+So a directory is marked inside itself, by `sh_env_mark_onpath`, at the point a
+fragment puts it on `PATH`, and `sh_global_skip_entry` reads the mark off the
+directory. A directory this tree invents next year is refused without anybody
+remembering to add a name. A view is never marked: the mark would put a file
+inside a tree the promote step mirrors, and the view is already refused by its
+own path pattern. A neutral directory under the exec root that this tree did not
+create and did not put on `PATH` is still a candidate, which is what keeps a
+shell that sourced nothing serviceable (issue #185).
+
+**The egress configuration is written down, because a proxy is a property of the
+machine and not of the shell.** A sandbox that reaches the network only through
+a proxy named in the environment loses the network the moment the environment is
+scrubbed, and every cold path this project documents scrubs: `env -i
+$SANDHOME_EXEC/bin/sandhome doctor`, `sh -c 'eval "$(sandhome env)"'`, a shell
+with no `PATH` sourcing `entry.sh`, and above all the hook, which exists to
+serve a shell that sourced nothing. On a proxy-only host measured here, from a
+fresh hook-only shell, `curl` answered `000` for `nodejs.org`, `npm` answered
+`getaddrinfo EAI_AGAIN`, `pip` answered "from versions: none" and `go` refused
+the resolver; the same four commands with the variables carried through all
+succeeded, which is what isolates the scrub rather than the registries as the
+cause.
+
+So the installing run records the eight variables curl and its relatives read -
+`http_proxy`, `https_proxy`, `no_proxy`, `HTTP_PROXY`, `HTTPS_PROXY`,
+`NO_PROXY`, `all_proxy`, `ALL_PROXY` - into `$SANDHOME_HOME/proxy.env`, and
+`env.sh` also inlines them as guarded assignments, so a shell that has one
+keeps its own. The dispatcher sources `proxy.env` as well as `env.sh`, because
+it loads the environment for the **process it runs** and a child cannot change
+its parent: a shell that typed `npm install` keeps an environment with no route
+out no matter what `env.sh` says. A host with no proxy records no file at all,
+rather than an empty one, and `sandhome report` prints `egress=direct` for it
+and `egress=proxy:<names>` for one that has. `SANDHOME_DOH_URL` remains the
+answer for a genuinely caged host and is unchanged by this; it is simply no
+longer the only thing offered on a host that already had a working route
+(issue #181).
 
 ```sh
 sandhome version             # the schema version, and the cheapest way to prove the copy runs

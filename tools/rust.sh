@@ -292,6 +292,22 @@ sh_toolchain_rust_target_wrapper() {
         mkdir -p "$SH_EXEC/cargo-wrap" 2>/dev/null || true
         ln -sfn "$sh_rw2_out" "$SH_EXEC/cargo-wrap/cargo" 2>/dev/null || \
             cp -f "$sh_rw2_out" "$SH_EXEC/cargo-wrap/cargo" 2>/dev/null || true
+        # # STOP: THE DIRECTORY IS MARKED WHERE IT IS CREATED, NOT WHERE IT IS
+        # PREPENDED (issue #185). It is on PATH only because the fragment below
+        # prepends it, so a shell that has not read the environment cannot be
+        # served from it, and the global hook installer must not take it. The
+        # install and repair runs call sh_env_load before sh_global_install, so
+        # this directory was on PATH, writable and exec-capable by the time the
+        # hook was planned, and the hook was written into it:
+        #     global=on:/workspace/sandexec/cargo-wrap
+        # which served nobody, because the next session does not have it on
+        # PATH. The marker is written here, next to the mkdir, so a directory
+        # created after the skip list was written cannot be taken by mistake.
+        if [ -d "$SH_EXEC/cargo-wrap" ] && [ ! -e "$SH_EXEC/cargo-wrap/.sandhome-on-path" ]; then
+            ( umask 022; : > "$SH_EXEC/cargo-wrap/.sandhome-on-path" ) 2>/dev/null || \
+                { [ -n "${SH_HOME:-}" ] && [ -d "$SH_HOME" ] && \
+                  printf '%s\n' "$SH_EXEC/cargo-wrap" >> "$SH_HOME/on-path.dirs" 2>/dev/null; } || true
+        fi
     fi
     return 0
 }
@@ -953,6 +969,17 @@ case ":\$PATH:" in
   *":$sh_re_dir:"*) ;;
   *) PATH="$sh_re_dir:\$PATH" ;;
 esac
+# # STOP: THE ADOPTED PATH GETS THE WRAPPER PREPEND TOO, AND IT HAS TO BE THE
+# LAST PREPEND SO IT LANDS FIRST (issue #183). This branch writes its own
+# fragment and it did not have the cargo-wrap prepend at all, so the wrapper
+# this same function creates was on no PATH whatsoever: the directory existed,
+# held a working wrapper, and was reached by nothing. The adopted toolchain bin
+# above is prepended by this branch and it holds the real cargo, so the wrapper
+# directory has to come after it in the text and before it on PATH.
+case ":\$PATH:" in
+  *":$SH_EXEC/cargo-wrap:"*) ;;
+  *) PATH="$SH_EXEC/cargo-wrap:\$PATH" ;;
+esac
 export PATH
 $(sh_rust_target_resolver)
 EOF
@@ -1035,6 +1062,34 @@ SHIMEOF
         # adopted toolchain's own rustup, which manages the adopted home.
         if [ "$sh_re_installed" = no ]; then
             tc_rust_ensure_targets
+        fi
+        # # STOP: AN ADOPTED RUST STILL OWES THE TARGET-DIR WRAPPER (issue
+        # #183). sh_toolchain_rust_target_wrapper had exactly one call site in
+        # the tree, and it was below the `return 0` this branch reaches, so
+        # adoption never wrote it. Measured on a host that carries rust: the
+        # setup adopted it, reported toolchain.rust=rustc 1.98.1 with a green
+        # doctor, and left $SANDHOME_EXEC/bin/cargo and
+        # $SANDHOME_EXEC/cargo-wrap absent, so a fresh hook-only shell found
+        # no `cargo` at all while the report described a working toolchain.
+        #
+        # The wrapper is a property of the TOOLCHAIN, not of the way the
+        # toolchain arrived, so it is written on both paths. This is the same
+        # shape as issue #80 above, which is why the two are handled together:
+        # an early return in tc_rust_env silently drops whatever the rest of
+        # the function owes. The wrapper goes on the exec bin beside the
+        # adopted cargo so the hook can serve it, and the same function drops
+        # the $SH_EXEC/cargo-wrap entry the fragment prepends.
+        sh_re_adopt_wrapper_done=yes
+        if [ -n "${SH_EXEC_BIN:-}" ] && [ -n "${SH_EXEC:-}" ]; then
+            for sh_re_aw in \
+                "${SH_EXEC_BIN}/cargo" \
+                "${SH_EXEC}/views/rust/cargo/bin/cargo" \
+                "${SH_EXEC}/views/rust/rustup/toolchains"/*/bin/cargo
+            do
+                [ -x "$sh_re_aw" ] || continue
+                sh_toolchain_rust_target_wrapper "$SH_EXEC_BIN" "$sh_re_aw"
+                break
+            done
         fi
         [ "$sh_re_installed" = yes ] || return 0
     fi
@@ -1242,14 +1297,54 @@ case ":\$PATH:" in
   *":$sh_re_bin:"*) ;;
   *) PATH="$sh_re_bin:\$PATH" ;;
 esac
-# The cargo target-dir wrapper wins over the real cargo. It is a directory of
-# its own because the toolchain bin is prepended above, so a plain
-# $SH_EXEC_BIN/cargo would be shadowed and cargo itself would bypass the
-# wrapper in every sourced shell (issue #176).
+# # STOP: THE WRAPPER DIRECTORY IS MOVED TO THE FRONT, NOT MERELY ADDED. The
+# prepend below used to be guarded on the directory not already being on PATH,
+# the same guard as every other directory here. That is the wrong question for
+# this one: the wrapper has to WIN over the toolchain's own cargo, and the
+# toolchain bins are prepended above, so any shell that already carries
+# $SH_EXEC/cargo-wrap skipped the prepend entirely, the toolchain bin became
+# first, and cargo resolved to the real binary with the wrapper never
+# executed. The global hook is what puts that directory on PATH: install and
+# repair call sh_env_load before sh_global_install, so the hook was written
+# INTO it and the very next session disabled the wrapper. Measured on an
+# exec-capable root, two real same-basename crates from a hook-only login
+# shell:
+#   cargo-wrap NOT on PATH:      PROJECT-A, PROJECT-B   (two target dirs)
+#   cargo-wrap already on PATH:  PROJECT-A, PROJECT-A   (one target dir)
+# So the directory is REMOVED wherever it sits and prepended once, which makes
+# the outcome a function of this file and not of the shell the fragment is
+# read by. The walk runs in both cases, so the same code path both adds the
+# directory when it is absent and lifts it above the toolchain bin when it is
+# not, and one rule cannot be right while the other is wrong. Removing and
+# re-prepending is idempotent, so a nested source or a second fragment read
+# cannot leave two copies in PATH (issue #176, #184).
+#
+# THE WALK USES THE SAME ABSOLUTE PATH AS THE GUARD ABOVE, NOT $SH_EXEC. A
+# first version guarded on the literal path and then walked on \$SH_EXEC, so a
+# shell that sourced this fragment without that variable - which is exactly the
+# shell ROUTE step 4 describes, an env -i with no environment at all - compared
+# every entry against the empty string, kept them all, and prepended
+# "/cargo-wrap" in front of the whole original PATH. A guard and the operation
+# it guards have to be about the same string; when they are about different
+# ones the second is a no-op with a side effect. The path is baked, so the
+# fragment needs no variable to be correct.
 case ":\$PATH:" in
-  *":$SH_EXEC/cargo-wrap:"*) ;;
-  *) PATH="$SH_EXEC/cargo-wrap:\$PATH" ;;
+  *":$SH_EXEC/cargo-wrap:"*) _sh_cw_fix=remove ;;
+  *) _sh_cw_fix=prepend ;;
 esac
+if [ -n "\${_sh_cw_fix:-}" ]; then
+  _sh_cw_new=
+  _sh_cw_rest=\$PATH
+  while [ -n "\$_sh_cw_rest" ]; do
+    case "\$_sh_cw_rest" in
+      *:*) _sh_cw_e=\${_sh_cw_rest%%:*}; _sh_cw_rest=\${_sh_cw_rest#*:} ;;
+      *)   _sh_cw_e=\$_sh_cw_rest; _sh_cw_rest='' ;;
+    esac
+    [ "\$_sh_cw_e" = "$SH_EXEC/cargo-wrap" ] || _sh_cw_new="\$_sh_cw_new:\$_sh_cw_e"
+  done
+  PATH="$SH_EXEC/cargo-wrap\${_sh_cw_new}"
+  unset _sh_cw_fix _sh_cw_new _sh_cw_rest _sh_cw_e
+fi
 export PATH
 $(sh_rust_target_resolver)
 EOF

@@ -220,10 +220,11 @@ usage: sh bootstrap.sh [options]
 | --- | --- | --- |
 | `SANDHOME_ASAN` | env.sh | `on` |
 | `SANDHOME_BIN_DIR` | bootstrap.sh sandhome | `$SH_REPO_DIR/bin` |
+| `SANDHOME_CARGO_TARGET_DEFAULT` | env.sh rust.sh | `$CARGO_TARGET_DIR` |
 | `SANDHOME_CMAKE_VERSION` | cmake.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_CRIT_MB` | space.sh sandhome | `unset, and the feature is off until it is set` |
 | `SANDHOME_DOH_CANARY` | fetch.sh | `https://github.com` |
-| `SANDHOME_DOH_URL` | fetch.sh bootstrap.sh sandhome | `unset, and the feature is off until it is set` |
+| `SANDHOME_DOH_URL` | env.sh fetch.sh bootstrap.sh sandhome | `unset, and the feature is off until it is set` |
 | `SANDHOME_EMSDK_VERSION` | emscripten.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_EXEC` | common.sh env.sh profile.sh report.sh space.sh bootstrap.sh sandhome bun.sh cmake.sh deno.sh emscripten.sh fd.sh go.sh jq.sh meson.sh node.sh python.sh ripgrep.sh rust.sh zig.sh | `*)` |
 | `SANDHOME_FAKEPTY` | env.sh | `unset, and the feature is off until it is set` |
@@ -256,6 +257,7 @@ usage: sh bootstrap.sh [options]
 | `SANDHOME_PCT_MEANINGFUL_MB` | space.sh sandhome | `unset, and the feature is off until it is set` |
 | `SANDHOME_PKGCONF_VERSION` | pkgconf.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_PROFILE` | profile.sh | `1` |
+| `SANDHOME_PROXY_VARS` | env.sh | `unset, and the feature is off until it is set` |
 | `SANDHOME_PTRACE` | env.sh | `*)` |
 | `SANDHOME_QEMUUSER_EXTRA` | sandhome qemuuser.sh | `$SANDHOME_QEMUUSER_EXTRA $sh_c_x` |
 | `SANDHOME_REF` | bootstrap.sh sandhome | `unset, and the feature is off until it is set` |

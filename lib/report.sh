@@ -10,6 +10,55 @@ SH_ADOPTED=''
 
 sh_lead() { printf '%s' "${1# }"; }
 
+# sh_report_egress -> how this machine reaches the network, read from the file
+# the hook will source. One word plus the variable names, or `direct` when
+# nothing is recorded, or `unknown` when the file cannot be read (issue #181).
+#
+# A report that answers this from its own process answers the wrong question:
+# the shells this project documents are scrubbed, so this process has no proxy
+# and the machine does. The distinction between `direct` and `unknown` is kept
+# because they are different claims: `direct` means this machine really has no
+# proxy and a direct route, and `unknown` means nobody wrote the file down, so
+# nobody knows.
+sh_report_egress() {
+    sh_re_f=''
+    [ -n "${SH_HOME:-}" ] && sh_re_f="$SH_HOME/proxy.env"
+    [ -n "$sh_re_f" ] || { printf 'unknown'; return 0; }
+    if [ ! -r "$sh_re_f" ]; then
+        printf 'unknown'
+        return 0
+    fi
+    sh_re_n=''
+    while IFS= read -r sh_re_l || [ -n "$sh_re_l" ]; do
+        case "$sh_re_l" in
+            export\ *) sh_re_l=${sh_re_l#export } ;;
+            *=*) ;;
+            *) continue ;;
+        esac
+        sh_re_v=${sh_re_l%%=*}
+        [ -n "$sh_re_v" ] || continue
+        # The file names each variable twice, once assigned and once exported,
+        # and the counter is a second name that means nothing to a reader. Both
+        # are dropped here, so the line is the list of variables a tool will
+        # actually be given.
+        case "$sh_re_v" in
+            SANDHOME_*) continue ;;
+        esac
+        # A name already listed is not listed twice: the two spellings of one
+        # rule are two rows, and a duplicate row reads as two settings.
+        case ",$sh_re_n," in
+            *",$sh_re_v,"*) continue ;;
+        esac
+        sh_re_n="$sh_re_n${sh_re_n:+,}$sh_re_v"
+    done < "$sh_re_f"
+    if [ -z "$sh_re_n" ]; then
+        printf 'direct'
+        return 0
+    fi
+    printf 'proxy:%s' "$sh_re_n"
+    return 0
+}
+
 # sh_toolchain_status NAME -> present|absent
 sh_toolchain_status() {
     if sh_toolchain_probe "$1"; then
@@ -158,6 +207,15 @@ sh_report_text() {
     # sourcing. Read from disk, so a report run after the exec root moved says
     # `stale:` rather than repeating what an install once claimed (issue #127).
     printf 'global=%s\n' "$(sh_global_report 2>/dev/null)"
+    # # STOP: THE EGRESS LINE IS READ FROM THE DISK, NOT FROM THIS PROCESS.
+    # A report is what a consumer runs to find out what the machine is, and the
+    # question "can this thing reach the network" is the first one after
+    # "does it have a compiler". Printing the value from this process would
+    # answer with whatever the caller happened to export, which is exactly the
+    # value that is missing in the scrubbed shells the project documents
+    # (issue #181). The file is what the hook will actually source, so the file
+    # is what gets reported.
+    printf 'egress=%s\n' "$(sh_report_egress 2>/dev/null)"
     printf 'installed=%s\n'   "$(sh_lead "${SH_INSTALLED:-}")"
     printf 'adopted=%s\n'     "$(sh_lead "${SH_ADOPTED:-}")"
     # # STOP: THIS LINE PROBES THE DISK. It printed $SH_SHIMS_BUILT, which is
@@ -235,6 +293,14 @@ sh_report_json() {
         "$(sh_json_escape "$sh_rj_login")" "$(sh_json_escape "$sh_rj_onpath")" \
         "$(sh_json_escape "${SH_HOME:-unknown}/entry.sh")" \
         "$(sh_json_escape "$(sh_global_report 2>/dev/null)")"
+    # # STOP: THE JSON CARRIES THE EGRESS STATE TOO, BECAUSE THE TEXT LINE IS
+    # NOT THE WHOLE SURFACE. A harness reads `report --json` and not the prose,
+    # and "can this machine reach a registry" is the question it cannot answer
+    # from a process whose environment was scrubbed - which is every cold path
+    # this project documents. Adding it only to the text would leave the
+    # machine-readable answer missing on exactly the hosts that need it
+    # (issue #181).
+    printf ',"egress":"%s"' "$(sh_json_escape "$(sh_report_egress 2>/dev/null)")"
     printf ',"shims_missing":"%s","view":"%s","memexec":"%s"' \
         "$(sh_json_escape "$(sh_lead "$(sh_shim_needed_missing 2>/dev/null)")")" \
         "$(sh_json_escape "$(sh_report_view 2>/dev/null)")" \
