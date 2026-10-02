@@ -456,10 +456,56 @@ t_is "$(env -i PATH=/usr/bin:/bin sh -c ". $r187q/home/env.sh 2>/dev/null; print
     "$QVAL" \
     'a proxy value with a quote and a dollar in it survives into a sourced shell (review 1)'
 
-# THE REPORT MUST CARRY IT IN JSON TOO. A harness reads report --json and not
+# THE JSON REPORT CARRIES IT TOO. A harness reads report --json and not
 # the prose, so a field present only in the text is a field the machine-readable
 # answer does not have, on exactly the hosts that need it.
 t_ok "$(grep -q '"egress":"%s"' "$ROOT/lib/report.sh" && echo 0 || echo 1)" \
     'the JSON report carries the egress state as well as the text report (review 1)'
+
+# A REBUILD HAS THE SAME EGRESS AS THE INSTALL. `sandhome resume` is the command
+# for a wiped exec root, so it is reached through entry.sh or by absolute path
+# and its process has no proxy in it; it then rewrites env.sh, and the egress
+# file that env.sh's values came from went with the wipe. Measured: after
+# `mv exec exec.wiped` and the documented `. entry.sh; sandhome resume`, doctor
+# was green with doctor_failures=0 and every toolchain present, and `report`
+# printed egress=unknown - a machine that could not install a package.
+#
+# BOTH CLAUSES RUN WITH THE AMBIENT EGRESS REMOVED. This suite may be running on
+# a host that has one, and a clause that did not scrub it would be reading its
+# own environment and not the file. The two directions are both scrubbed: one
+# proves the file is applied, the other proves the caller's own value wins, and
+# a clause that sets a variable after the scrub is testing something else.
+r188=$tmp/r188
+mkdir -p "$r188/home/toolchains" "$r188/home/tmp" "$r188/exec/bin"
+printf 'http_proxy=http://9.9.9.9:1\nexport http_proxy\n' > "$r188/home/proxy.env"
+# A DEDICATED HELPER, BECAUSE THE AMBIENT EGRESS HAS TO GO BEFORE THE LIBRARY
+# LOADS. env -u around sh_regr_lib would scrub the suite's own environment
+# correctly but the helper passes its snippet as an argument, so the unset
+# would have to live inside the snippet and would then run after the
+# environment was already in place. This runs the same shell with the same
+# pinned roots and with the eight names absent from the start.
+sh_regr_lib_clean() {
+    env -u http_proxy -u https_proxy -u no_proxy -u HTTP_PROXY -u HTTPS_PROXY \
+        -u NO_PROXY -u all_proxy -u ALL_PROXY \
+        SANDHOME_HOME=$1/home SANDHOME_EXEC=$1/exec SH_HOME=$1/home \
+        SH_HOME_TOOLCHAINS=$1/home/toolchains SH_HOME_TMP=$1/home/tmp \
+        SH_HOME_EXEC=no SH_EXEC=$1/exec SH_EXEC_BIN=$1/exec/bin \
+        SH_EXEC_VIEWS=$1/exec/views SH_REPO_DIR=$ROOT SH_LIB_DIR=$ROOT/lib \
+        SH_SELF=test SH_DRY_RUN=0 SH_VIEW_MODE=copy \
+        sh -c 'for m in common detect space env fetch toolchain shim memexec report; do . "$SH_REPO_DIR/lib/$m.sh"; done; eval "$1"' \
+            _ "$2" 2>/dev/null
+}
+
+r188=$tmp/r188
+mkdir -p "$r188/home/toolchains" "$r188/home/tmp" "$r188/exec/bin"
+printf 'http_proxy=http://9.9.9.9:1\nexport http_proxy\n' > "$r188/home/proxy.env"
+t_is "$(sh_regr_lib_clean "$r188" 'sh_env_load; printf "%s" "${http_proxy:-unset}"')" \
+    'http://9.9.9.9:1' \
+    'a command that reloads the environment regains the recorded egress (review 1)'
+# The yield-to-the-caller rule still holds: a proxy the shell has is not
+# replaced by one the file remembers.
+t_is "$(sh_regr_lib_clean "$r188" 'http_proxy=http://1.1.1.1:2; sh_env_load; printf "%s" "$http_proxy"')" \
+    'http://1.1.1.1:2' \
+    "a shell's own egress is never replaced by the recorded one (review 1)"
 
 t_end

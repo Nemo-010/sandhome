@@ -1283,6 +1283,44 @@ sh_env_load() {
     : "${SANDHOME_HOME:=${SH_HOME:-}}"
     : "${SANDHOME_EXEC:=${SH_EXEC:-}}"
     export SANDHOME_HOME SANDHOME_EXEC
+    # # STOP: THE RECORDED EGRESS IS RESTORED HERE, BECAUSE A COMMAND THAT
+    # REBUILDS THE TREE RUNS WITH NO EGRESS (issue #181). `sandhome resume` is
+    # exactly the cold path: a wiped exec root means no `sandhome` on PATH, so
+    # the command is reached through entry.sh or by absolute path, both of which
+    # start from an environment that has no proxy in it. It then rebuilds every
+    # view and rewrites env.sh, and the egress file it rewrote had been wiped
+    # with the rest of the home, so the machine came back with no route out and
+    # `report` said `egress=unknown`. Measured here: after `mv exec exec.wiped`
+    # and the documented `entry.sh; sandhome resume`, doctor was green with
+    # doctor_failures=0 and every toolchain present, and egress=unknown.
+    #
+    # The file is read BEFORE anything else here, so a rebuild has the same
+    # egress the install had. The file carries UNGUARDED assignments because
+    # env.sh sources it the same way, and that is deliberate there: the file is
+    # the machine's record and env.sh's own inline block is the guarded one.
+    # Here the caller may already have an egress of its own - a shell that
+    # exported one before running a command, or an operator who set it for one
+    # build - so each name is read only when this process does not have it.
+    # Overwriting here would silently break the very command that was working.
+    if [ -n "${SH_HOME:-}" ] && [ -r "$SH_HOME/proxy.env" ]; then
+        while IFS= read -r sh_el_pr || [ -n "$sh_el_pr" ]; do
+            case "$sh_el_pr" in
+                export\ *|*=*) ;;
+                *) continue ;;
+            esac
+            sh_el_pv=${sh_el_pr#export }
+            case "$sh_el_pv" in
+                *http_proxy=*|*https_proxy=*|*no_proxy=*|*HTTP_PROXY=*|\
+                *HTTPS_PROXY=*|*NO_PROXY=*|*all_proxy=*|*ALL_PROXY=*)
+                    sh_el_pn=${sh_el_pv%%=*}
+                    eval "[ -n \"\${$sh_el_pn:-}\" ]" && continue
+                    eval "$sh_el_pv"
+                    eval "export $sh_el_pn"
+                    unset sh_el_pr sh_el_pv sh_el_pn
+                    ;;
+            esac
+        done < "$SH_HOME/proxy.env"
+    fi
     if [ -n "${SH_EXEC_BIN:-}" ]; then
         sh_path_prepend "$SH_EXEC_BIN"
     fi

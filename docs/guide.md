@@ -313,6 +313,20 @@ answer for a genuinely caged host and is unchanged by this; it is simply no
 longer the only thing offered on a host that already had a working route
 (issue #181).
 
+**A rebuild keeps the egress, and a shell's own wins.** `sh_env_load` reads
+`proxy.env` before anything else, so `sandhome resume` - which is reached
+through `entry.sh` or by absolute path, and whose process has no proxy in it -
+comes back with the egress the install had. Measured before the fix: after
+`mv exec exec.wiped` and the documented `. entry.sh; sandhome resume`, `doctor`
+was green with `doctor_failures=0` and every toolchain present, and `report`
+printed `egress=unknown`: a machine that could not install a package. Each name
+is applied only when the calling process does not already have one, so a shell
+that exported a proxy for one build keeps it. A tool that is not one of the
+hook's names - a `pip` inside a venv the operator created, say - is not
+reachable by the hook, because the hook can only serve names it knows; run it
+through `sandhome exec`, which applies the whole environment to whatever you
+name.
+
 ```sh
 sandhome version             # the schema version, and the cheapest way to prove the copy runs
 sandhome global                    # where the hook is, and whether it is stale
